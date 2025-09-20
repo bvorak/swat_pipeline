@@ -1,0 +1,35 @@
+# Paths are relative to this config file unless absolute
+logging:
+  level: INFO
+  log_dir: logs
+  file: pipeline.log
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+paths:
+  project_root: ..
+  data_root: data
+  outputs_root: outputs
+  # Optional: base TxtInOut folder to use when not provided explicitly to the runner
+  # Can be either the TxtInOut directory itself, or a project root containing it
+  base_txtinout: C:\SWAT\RSWAT\cubillas\cubillas_set_219_ruben\cubillas_BASE_set-219\TxtInOut_1
+  # Provide a valid path to your SWAT executable if you want to actually run it
+  swat_executable: C:\SWAT\ArcSWAT\swat_64rel.exe
+
+# Speaking-name groups for reproducible input variants
+input_groups:
+  baseline:
+    description: Base input data set
+    folder: C:\SWAT\RSWAT\cubillas\cubillas_set_219_ruben\cubillas_BASE_set-219\TxtInOut_1
+  urban_expansion_2030:
+    description: Urban expansion scenario for 2030
+    folder: data/input_groups/urban_expansion_2030
+  climate_rcp45:
+    description: Climate RCP4.5 scenario
+    folder: data/input_groups/climate_rcp45
+
+reproducibility:
+  random_seed: 12345
+  change_sets:
+    - name: example_change
+      applies_to_group: baseline
+      notes: placeholder for documented transformation

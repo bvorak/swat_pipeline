@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and outputs
+logs/
+outputs/
+
+# Data (optional, uncomment if you don't want to commit data)
+# data/
+
