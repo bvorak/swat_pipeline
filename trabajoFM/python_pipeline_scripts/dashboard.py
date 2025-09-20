@@ -1195,6 +1195,24 @@ def fan_compare_simulations_dashboard(
                 hovertemplate=("max: %{customdata[4]:.4g}%{customdata[5]}<br>mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>"),
             ))
 
+        # Store band data for comprehensive statistics
+        band_data = {}
+        if n_runs_here >= min_runs_for_bands:
+            # Fan chart mode: store percentile series
+            band_data["p05"] = pd.Series(q[5], index=aligned_df.index, name="p05")
+            band_data["p25"] = pd.Series(q[25], index=aligned_df.index, name="p25")
+            band_data["p50"] = pd.Series(q[50], index=aligned_df.index, name="p50")
+            band_data["p75"] = pd.Series(q[75], index=aligned_df.index, name="p75")
+            band_data["p95"] = pd.Series(q[95], index=aligned_df.index, name="p95")
+            band_data["mean"] = pd.Series(np.nanmean(arr, axis=1), index=aligned_df.index, name="mean")
+        else:
+            # Min-max envelope mode: store min/max/mean series
+            with np.errstate(invalid='ignore'):
+                band_data["min"] = pd.Series(np.nanmin(arr, axis=1), index=aligned_df.index, name="min")
+                band_data["max"] = pd.Series(np.nanmax(arr, axis=1), index=aligned_df.index, name="max")
+                band_data["mean"] = pd.Series(np.nanmean(arr, axis=1), index=aligned_df.index, name="mean")
+        _last["band_data"] = band_data
+
         # Optional independent overlays: plot each as its own line, not part of fan
         # Also retain per-overlay resampled series for stats correlations
         _last["extra_series"] = {}
@@ -2021,6 +2039,7 @@ def fan_compare_simulations_dashboard(
                     local_window_ks=tuple(sorted(list(sel_local_K.value))) if sel_local_K.value else (),
                     local_strategy="nearest",
                     choose_best_lag_by=str(dd_lag_metric.value),
+                    band_data=_last.get("band_data", {}),
                 )
                 html_text = format_stats_text(stats)
                 try:
