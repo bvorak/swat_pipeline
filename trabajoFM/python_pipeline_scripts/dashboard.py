@@ -1175,7 +1175,7 @@ def fan_compare_simulations_dashboard(
                 x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
                 name="mean",
                 customdata=combined_customdata,
-                hovertemplate=("mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<br>max: %{customdata[4]:.4g}%{customdata[5]}<extra></extra>"),
+                hovertemplate=("max: %{customdata[4]:.4g}%{customdata[5]}<br>mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>"),
             ))
 
         # Optional independent overlays: plot each as its own line, not part of fan
