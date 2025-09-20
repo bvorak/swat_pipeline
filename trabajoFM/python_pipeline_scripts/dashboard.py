@@ -301,20 +301,10 @@ def fan_compare_simulations_dashboard(
     fl_event_min_days = widgets.BoundedFloatText(value=1.0, min=0.0, max=30.0, step=0.5, description="Min days:", layout=widgets.Layout(width="180px"))
     # Buffer (days) exclude +/- around detected event days
     sl_event_buffer_days = widgets.IntSlider(value=1, min=0, max=7, step=1, description="Buffer (days)", continuous_update=False, layout=widgets.Layout(width="280px"))
-    # Event view toggle
-    tg_event_view = widgets.ToggleButtons(
-        options=[
-            ("All days", "all"),
-            ("Non-event days", "non_events"),
-            ("Event days", "events"),
-        ],
-        value="all",
-        description="View:",
-        layout=widgets.Layout(width="360px"),
-        style={"button_width": "120px"},
-    )
+    # Exclusion toggle
+    cb_exclude_events = widgets.Checkbox(value=False, description="Exclude events")
     # Dynamic help label
-    lbl_events_help = widgets.HTML(value="<i>Events: days where flow >= threshold and lasting >= Min days. Use the view toggle to switch between event and non-event periods.</i>")
+    lbl_events_help = widgets.HTML(value="<i>Events: days where flow >= threshold and lasting >= Min days.</i>")
     def _toggle_abs_vis(change=None):
         show = (dd_event_threshold.value == "abs")
         tb_event_abs.layout.display = "block" if show else "none"
@@ -339,10 +329,8 @@ def fan_compare_simulations_dashboard(
                 b = int(ui_defaults.get("event_buffer_days"))
                 if 0 <= b <= 7:
                     sl_event_buffer_days.value = b
-            if ui_defaults.get("event_view") in {"all", "events", "non_events"}:
-                tg_event_view.value = ui_defaults.get("event_view")
-            elif isinstance(ui_defaults.get("exclude_events"), bool):
-                tg_event_view.value = "non_events" if ui_defaults.get("exclude_events") else "all"
+            if isinstance(ui_defaults.get("exclude_events"), bool):
+                cb_exclude_events.value = bool(ui_defaults.get("exclude_events"))
     except Exception:
         pass
     # Cleaning policy dropdowns for measured data
@@ -680,8 +668,8 @@ def fan_compare_simulations_dashboard(
         if ui_defaults.get("meas_negative_policy") in ("keep", "drop", "zero"):
             dd_meas_negative.value = ui_defaults.get("meas_negative_policy")
         # Backward compatibility: map legacy outlier keys to new event system
-        if ("event_view" not in (ui_defaults or {})) and isinstance(ui_defaults.get("exclude_flow_outliers"), bool):
-            tg_event_view.value = "non_events" if ui_defaults.get("exclude_flow_outliers") else "all"
+        if isinstance(ui_defaults.get("exclude_flow_outliers"), bool):
+            cb_exclude_events.value = bool(ui_defaults.get("exclude_flow_outliers"))
         if isinstance(ui_defaults.get("outlier_buffer_days"), (int, float)):
             v = int(ui_defaults.get("outlier_buffer_days"))
             if 0 <= v <= sl_event_buffer_days.max:
@@ -863,13 +851,11 @@ def fan_compare_simulations_dashboard(
         except Exception:
             s_swat_avg_daily = None
 
-        # Build event day sets using configurable detection
-        event_mode = str(tg_event_view.value or "all")
-        selected_days_set = None
-        event_day_set = None
-        buffered_event_days = None
+        # Build event/allowed day sets using configurable detection
+        allowed_days_set = None
         try:
-            if event_mode in {"events", "non_events"}:
+            if cb_exclude_events.value:
+                # Select flow series for event detection
                 ev_source = str(dd_event_source.value)
                 if ev_source == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
                     s_events_flow = s_external_flow_daily.copy()
@@ -879,10 +865,15 @@ def fan_compare_simulations_dashboard(
                     s_events_flow = None
                 if s_events_flow is not None and not s_events_flow.empty:
                     df_ev = pd.DataFrame({"date": pd.to_datetime(s_events_flow.index).floor('D'), "Q": s_events_flow.values})
+                    # Resolve threshold token/value
                     token = str(dd_event_threshold.value)
                     if token == "abs":
                         thr_val = float(tb_event_abs.value) if isinstance(tb_event_abs.value, (int, float)) and not np.isnan(tb_event_abs.value) else None
-                        thr_def = thr_val if thr_val is not None else None
+                        if thr_val is None:
+                            # If absolute requested but no value, skip events
+                            thr_def = None
+                        else:
+                            thr_def = thr_val
                     else:
                         thr_def = token
                     if thr_def is not None:
@@ -893,21 +884,19 @@ def fan_compare_simulations_dashboard(
                             event_days = pd.to_datetime(df_flags.loc[df_flags["main_event"], :].index).floor('D').unique()
                             event_day_set = set(pd.to_datetime(event_days).tolist())
                             buf = int(sl_event_buffer_days.value) if isinstance(sl_event_buffer_days.value, (int, float)) else 0
-                            buffered_event_days = set()
+                            excl = set()
                             for d in event_day_set:
                                 d0 = pd.Timestamp(d).normalize()
                                 for k in range(-buf, buf + 1):
-                                    buffered_event_days.add(d0 + pd.Timedelta(days=int(k)))
+                                    excl.add(d0 + pd.Timedelta(days=int(k)))
+                            # Allowed = all flow days minus excluded windows
                             full_days_set = set(pd.to_datetime(df_ev["date"]).unique().tolist())
-                            if event_mode == "events":
-                                selected_days_set = buffered_event_days
-                            else:
-                                selected_days_set = full_days_set - (buffered_event_days or set())
-                            _dbg("events", dict(mode=event_mode, events=len(event_day_set), buffer=len((buffered_event_days or set()) - (event_day_set or set())), keep=len(selected_days_set or [])))
+                            allowed_days_set = full_days_set - excl
+                            _dbg("events", dict(events=len(event_day_set), buffer=len(excl - event_day_set), allowed=len(allowed_days_set)))
         except Exception as e:
             _dbg("event detection failed", e)
-            selected_days_set = None
-        # Extract a single resampled series per run for the selected reach/variable
+            allowed_days_set = None
+
         # Extract a single resampled series per run for the selected reach/variable
         per_sim: Dict[str, pd.Series] = {}
         for sim_name, df in sim_dfs.items():
@@ -942,13 +931,7 @@ def fan_compare_simulations_dashboard(
             if season_months:
                 sub = _filter_season(sub, season_months)
                 _dbg_df_info(sub, f"{sim_name} after season filter")
-            if selected_days_set is not None:
-                try:
-                    day_mask = sub.index.floor('D').isin(list(selected_days_set))
-                    sub = sub.loc[day_mask]
-                    _dbg_df_info(sub, f"{sim_name} after event-mode filter")
-                except Exception:
-                    pass
+            # Do not filter simulation by outlier/buffer days; keep full SWAT series intact
             if sub.empty:
                 continue
             # If in concentration mode, derive daily concentration mg/L from kg/day and chosen flow source
@@ -1116,32 +1099,39 @@ def fan_compare_simulations_dashboard(
                 cd[:, j] = np.where(finite, col, None)
             return cd
         if n_runs_here >= min_runs_for_bands:
-            # Mask bands to points where both bounds are finite to avoid diagonal fill artifacts
+            # Use None values for invalid points to prevent triangular fill artifacts
             x_arr = np.array(x_dt, dtype=object)
             p95 = np.asarray(q[95], dtype=float); p05 = np.asarray(q[5], dtype=float)
             p75 = np.asarray(q[75], dtype=float); p25 = np.asarray(q[25], dtype=float)
             mask90 = np.isfinite(p95) & np.isfinite(p05)
             mask50 = np.isfinite(p75) & np.isfinite(p25)
+            
+            # Apply masks by setting invalid values to None instead of filtering arrays
+            p95_masked = np.where(mask90, p95, np.nan)
+            p05_masked = np.where(mask90, p05, np.nan)
+            p75_masked = np.where(mask50, p75, np.nan)
+            p25_masked = np.where(mask50, p25, np.nan)
+            
             # 90% band (p05..p95)
             fig.add_trace(go.Scatter(
-                x=x_arr[mask90].tolist(), y=_nan_to_none(p95[mask90]), mode="lines",
+                x=x_dt, y=_nan_to_none(p95_masked), mode="lines",
                 line=dict(color=rgba(0.12), width=0.5),
                 name="p95", showlegend=False, hoverinfo="skip"
             ))
             fig.add_trace(go.Scatter(
-                x=x_arr[mask90].tolist(), y=_nan_to_none(p05[mask90]), mode="lines",
+                x=x_dt, y=_nan_to_none(p05_masked), mode="lines",
                 line=dict(color=rgba(0.12), width=0.5),
                 fill="tonexty", fillcolor=rgba(0.12),
                 name="p05-p95", showlegend=True, hoverinfo="skip"
             ))
             # 50% band (p25..p75)
             fig.add_trace(go.Scatter(
-                x=x_arr[mask50].tolist(), y=_nan_to_none(p75[mask50]), mode="lines",
+                x=x_dt, y=_nan_to_none(p75_masked), mode="lines",
                 line=dict(color=rgba(0.28), width=0.5),
                 name="p75", showlegend=False, hoverinfo="skip"
             ))
             fig.add_trace(go.Scatter(
-                x=x_arr[mask50].tolist(), y=_nan_to_none(p25[mask50]), mode="lines",
+                x=x_dt, y=_nan_to_none(p25_masked), mode="lines",
                 line=dict(color=rgba(0.28), width=0.5),
                 fill="tonexty", fillcolor=rgba(0.28),
                 name="p25-p75", showlegend=True, hoverinfo="skip"
@@ -1218,12 +1208,6 @@ def fan_compare_simulations_dashboard(
                         sub = _slice_time(sub, start, end)
                     if season_months:
                         sub = _filter_season(sub, season_months)
-                    if selected_days_set is not None:
-                        try:
-                            day_mask = sub.index.floor('D').isin(list(selected_days_set))
-                            sub = sub.loc[day_mask]
-                        except Exception:
-                            pass
                     if sub.empty:
                         continue
                     if is_conc_mode:
@@ -1383,13 +1367,13 @@ def fan_compare_simulations_dashboard(
             color_idx = 0
 
             # Prepare period day counts for sum-mode multiplication
-            # Split measured data according to the selected event view (if any)
+            # Split measured data into included vs excluded (by outlier/buffer days)
             measured_included_df = measured_use_df
             measured_excluded_df = None
-            if selected_days_set is not None:
+            if allowed_days_set is not None:
                 try:
                     md = pd.to_datetime(measured_use_df[measured_date_col], errors='coerce').dt.floor('D')
-                    keep_mask = md.isin(list(selected_days_set))
+                    keep_mask = md.isin(list(allowed_days_set))
                     measured_included_df = measured_use_df.loc[keep_mask].copy()
                     measured_excluded_df = measured_use_df.loc[~keep_mask].copy()
                 except Exception:
@@ -1561,7 +1545,7 @@ def fan_compare_simulations_dashboard(
                 flow_df["_date"] = flow_df[water_flow_date_col].dt.floor('D')
                 s_daily = flow_df.groupby("_date")[use_flow_col].sum(min_count=1)
                 s_daily.index.name = None
-                # Apply time window, season, and event view filters as needed
+                # Apply time window and season filters only (no outlier/buffer masking)
                 if start is not None:
                     s_daily = s_daily.loc[s_daily.index >= pd.to_datetime(start).floor('D')]
                 if end is not None:
@@ -1569,11 +1553,6 @@ def fan_compare_simulations_dashboard(
                 if season_months:
                     months = set(int(m) for m in season_months)
                     s_daily = s_daily.loc[s_daily.index.month.isin(months)]
-                if selected_days_set is not None:
-                    try:
-                        s_daily = s_daily.loc[s_daily.index.isin(list(selected_days_set))]
-                    except Exception:
-                        pass
                 # Resample per selected method
                 if dd_method.value == "sum":
                     s_flow = s_daily.resample(freq_str).sum(min_count=1)
@@ -1631,12 +1610,6 @@ def fan_compare_simulations_dashboard(
                             sub = _slice_time(sub, start, end)
                         if season_months:
                             sub = _filter_season(sub, season_months)
-                        if selected_days_set is not None:
-                            try:
-                                mask = sub.index.floor('D').isin(list(selected_days_set))
-                                sub = sub.loc[mask]
-                            except Exception:
-                                pass
                         if sub.empty:
                             continue
                         # Convert flow to numeric and compute m3/day
@@ -2291,7 +2264,7 @@ def fan_compare_simulations_dashboard(
         dd_meas_nonnum.observe(_mark_stale, names="value")
         dd_meas_negative.observe(_mark_stale, names="value")
         # Event control observers (mark stale)
-        tg_event_view.observe(_mark_stale, names="value")
+        cb_exclude_events.observe(_mark_stale, names="value")
         sl_event_buffer_days.observe(_mark_stale, names="value")
         dd_event_threshold.observe(_mark_stale, names="value")
         tb_event_abs.observe(_mark_stale, names="value")
@@ -2310,7 +2283,7 @@ def fan_compare_simulations_dashboard(
         if erosion_available:
             cb_erosion_on.observe(_on_flow_toggle_simple, names="value")
         # Event control observers (no measured overlay case)
-        tg_event_view.observe(_mark_stale, names="value")
+        cb_exclude_events.observe(_mark_stale, names="value")
         sl_event_buffer_days.observe(_mark_stale, names="value")
         dd_event_threshold.observe(_mark_stale, names="value")
         tb_event_abs.observe(_mark_stale, names="value")
@@ -2365,8 +2338,8 @@ def fan_compare_simulations_dashboard(
         # Event configuration rows (measured present)
         event_threshold_row = widgets.HBox([dd_event_threshold, tb_event_abs])
         event_source_row = widgets.HBox([dd_event_source, fl_event_min_days])
-        event_view_row = widgets.HBox([tg_event_view, sl_event_buffer_days])
-        outlier_row = widgets.VBox([event_source_row, event_threshold_row, event_view_row, lbl_events_help])
+        event_exclude_row = widgets.HBox([cb_exclude_events, sl_event_buffer_days])
+        outlier_row = widgets.VBox([event_source_row, event_threshold_row, event_exclude_row, lbl_events_help])
         policy_row = widgets.VBox([dd_meas_nonnum, dd_meas_negative])
         deviation_row = widgets.HBox([cb_flag_dev, sl_dev_factor])
         measured_box = widgets.VBox([
@@ -2424,7 +2397,3 @@ def fan_compare_simulations_dashboard(
     display(controls, reload_bar, out, stats_controls, stats_row)
 
     _compute_and_plot()
-
-
-
-
