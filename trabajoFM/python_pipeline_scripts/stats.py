@@ -167,6 +167,24 @@ def _percentile_band_deviation_stats(mean_series: np.ndarray, p25_series: np.nda
     return stats
 
 
+def _normalize_band_groups(band_data: Optional[Dict[str, object]]) -> Dict[str, Dict[str, pd.Series]]:
+    """Normalize band data into a dict[group -> dict[band_name -> series]]."""
+    if not isinstance(band_data, dict) or not band_data:
+        return {}
+    # If already flat (series only), treat as single ensemble group
+    if all(isinstance(v, pd.Series) for v in band_data.values()):
+        return {"ensemble": {str(k): v for k, v in band_data.items() if isinstance(v, pd.Series)}}
+    normalized: Dict[str, Dict[str, pd.Series]] = {}
+    for group_key, value in band_data.items():
+        if isinstance(value, dict):
+            inner = {str(k): v for k, v in value.items() if isinstance(v, pd.Series)}
+            if inner:
+                normalized[str(group_key)] = inner
+        elif isinstance(value, pd.Series):
+            normalized.setdefault("ensemble", {})[str(group_key)] = value
+    return {g: bands for g, bands in normalized.items() if bands}
+
+
 def _measured_vs_series_stats(measured: np.ndarray, target_series: np.ndarray, series_name: str) -> Dict[str, float]:
     """Compute comprehensive stats comparing measured data against any target time series."""
     y, m = _finite_pairs(measured, target_series)
@@ -515,6 +533,16 @@ def compute_stats_for_view(
                                         band_stats, measured_vs_series.
     """
     stats: Dict[str, object] = {}
+    band_groups = _normalize_band_groups(band_data)
+    windowed_groups: Dict[str, Dict[str, pd.Series]] = {}
+
+    def _apply_window_to_series(s: pd.Series) -> pd.Series:
+        if not isinstance(s, pd.Series) or s.empty:
+            return s
+        if window is not None:
+            x0, x1 = window
+            return s.loc[(s.index >= x0) & (s.index <= x1)]
+        return s
 
     Y, M, qdict = _collect_pairs(q_df, measured_series, window=window)
     n = int(Y.size)
@@ -627,58 +655,71 @@ def compute_stats_for_view(
         stats["extras"] = ex
 
     # NEW: Band deviation analysis
-    if band_data is not None and isinstance(band_data, dict):
+    if band_groups:
         band_stats = {}
-        
-        # Apply window filtering to band data
-        def _apply_window_to_series(s: pd.Series) -> pd.Series:
-            if s is None or s.empty:
-                return s
-            if window is not None:
-                x0, x1 = window
-                return s.loc[(s.index >= x0) & (s.index <= x1)]
-            return s
-        
-        # Get windowed band series
-        windowed_bands = {k: _apply_window_to_series(v) for k, v in band_data.items()}
-        
-        # Min/max band analysis
-        if all(k in windowed_bands for k in ['mean', 'min', 'max']):
-            mean_vals = windowed_bands['mean'].dropna().values
-            min_vals = windowed_bands['min'].reindex(windowed_bands['mean'].index).dropna().values
-            max_vals = windowed_bands['max'].reindex(windowed_bands['mean'].index).dropna().values
-            if len(mean_vals) > 0 and len(mean_vals) == len(min_vals) == len(max_vals):
-                band_stats.update(_band_deviation_stats(mean_vals, min_vals, max_vals))
-        
-        # Percentile band analysis  
-        perc_keys = ['mean', 'p25', 'p75', 'p05', 'p95']
-        if all(k in windowed_bands for k in perc_keys[:3]):  # At least mean, p25, p75
-            mean_vals = windowed_bands['mean'].dropna().values
-            p25_vals = windowed_bands['p25'].reindex(windowed_bands['mean'].index).dropna().values
-            p75_vals = windowed_bands['p75'].reindex(windowed_bands['mean'].index).dropna().values
-            p05_vals = windowed_bands.get('p05')
-            p95_vals = windowed_bands.get('p95')
-            
-            if p05_vals is not None and p95_vals is not None:
-                p05_vals = p05_vals.reindex(windowed_bands['mean'].index).dropna().values
-                p95_vals = p95_vals.reindex(windowed_bands['mean'].index).dropna().values
-            else:
-                p05_vals = p95_vals = None
-            
-            if len(mean_vals) > 0:
-                perc_stats = _percentile_band_deviation_stats(mean_vals, p25_vals, p75_vals, p05_vals, p95_vals)
-                band_stats.update(perc_stats)
-        
+
+        windowed_groups = {
+            str(group_key): {
+                str(band_key): _apply_window_to_series(series)
+                for band_key, series in bands.items()
+                if isinstance(series, pd.Series)
+            }
+            for group_key, bands in band_groups.items()
+        }
+
+        ensemble_bands = windowed_groups.get("ensemble", {})
+
+        if all(k in ensemble_bands for k in ["mean", "min", "max"]):
+            mean_series = ensemble_bands["mean"]
+            min_series = ensemble_bands["min"]
+            max_series = ensemble_bands["max"]
+            if all(isinstance(s, pd.Series) and not s.empty for s in (mean_series, min_series, max_series)):
+                idx_common = mean_series.dropna().index
+                idx_common = idx_common.intersection(min_series.dropna().index)
+                idx_common = idx_common.intersection(max_series.dropna().index)
+                if len(idx_common) > 0:
+                    mean_vals = mean_series.reindex(idx_common).to_numpy(dtype=float)
+                    min_vals = min_series.reindex(idx_common).to_numpy(dtype=float)
+                    max_vals = max_series.reindex(idx_common).to_numpy(dtype=float)
+                    band_stats.update(_band_deviation_stats(mean_vals, min_vals, max_vals))
+
+        if all(k in ensemble_bands for k in ["mean", "p25", "p75"]):
+            mean_series = ensemble_bands["mean"]
+            p25_series = ensemble_bands["p25"]
+            p75_series = ensemble_bands["p75"]
+            if all(isinstance(s, pd.Series) and not s.empty for s in (mean_series, p25_series, p75_series)):
+                idx_common = mean_series.dropna().index
+                idx_common = idx_common.intersection(p25_series.dropna().index)
+                idx_common = idx_common.intersection(p75_series.dropna().index)
+                if len(idx_common) > 0:
+                    mean_vals = mean_series.reindex(idx_common).to_numpy(dtype=float)
+                    p25_vals = p25_series.reindex(idx_common).to_numpy(dtype=float)
+                    p75_vals = p75_series.reindex(idx_common).to_numpy(dtype=float)
+                    p05_vals = p95_vals = None
+                    if "p05" in ensemble_bands and "p95" in ensemble_bands:
+                        p05_series = ensemble_bands["p05"]
+                        p95_series = ensemble_bands["p95"]
+                        if isinstance(p05_series, pd.Series) and isinstance(p95_series, pd.Series):
+                            p05_vals = p05_series.reindex(idx_common).to_numpy(dtype=float)
+                            p95_vals = p95_series.reindex(idx_common).to_numpy(dtype=float)
+                    perc_stats = _percentile_band_deviation_stats(mean_vals, p25_vals, p75_vals, p05_vals, p95_vals)
+                    band_stats.update(perc_stats)
+
         if band_stats:
             stats["band_deviation"] = band_stats
 
-    # NEW: Measured vs all available series  
-    if measured_series and band_data is not None:
-        measured_vs_series = {}
-        
-        # Flatten all measured data for comparison
-        all_measured_values = []
-        all_measured_times = []
+
+    # NEW: Measured vs all available series
+    measured_vs_series: Dict[str, float] = {}
+    coverage_entries: Dict[str, Dict[str, float]] = {}
+    coverage_debug: Dict[str, List[str]] = {}
+
+    def _record_cov_debug(label: object, message: str) -> None:
+        coverage_debug.setdefault(str(label), []).append(message)
+
+    if measured_series:
+        all_measured_values: List[float] = []
+        all_measured_times: List[pd.Timestamp] = []
         for s in measured_series:
             if s is None or s.empty:
                 continue
@@ -687,66 +728,104 @@ def compute_stats_for_view(
                 x0, x1 = window
                 ss = ss.loc[(ss.index >= x0) & (ss.index <= x1)]
             for t, val in ss.dropna().items():
-                all_measured_values.append(val)
+                all_measured_values.append(float(val))
                 all_measured_times.append(t)
-        
-        if all_measured_values:
+
+        if not all_measured_values:
+            _record_cov_debug('global', 'no measured data available after filtering for coverage analysis')
+        else:
             measured_times = pd.Index(all_measured_times)
-            measured_vals = np.array(all_measured_values)
-            
-            # Compare against each band series
-            for series_name, series_data in band_data.items():
-                if series_data is None or series_data.empty:
-                    continue
-                
-                # Apply window filter
-                series_windowed = _apply_window_to_series(series_data)
-                if series_windowed.empty:
-                    continue
-                
-                # Align measured times with series data
-                try:
-                    aligned_series = series_windowed.reindex(measured_times, method='nearest', tolerance=pd.Timedelta(days=1))
-                    series_vals = aligned_series.dropna().values
-                    
-                    # Only keep pairs where both are available
-                    valid_indices = ~pd.isna(aligned_series.values)
-                    if np.any(valid_indices):
-                        measured_subset = measured_vals[valid_indices]
-                        series_subset = series_vals
-                        
-                        if len(measured_subset) >= 2 and len(series_subset) >= 2:
-                            series_stats = _measured_vs_series_stats(measured_subset, series_subset, series_name)
-                            measured_vs_series.update(series_stats)
-                except Exception:
-                    continue
-            
-            # Also compare against extras if available
-            if extras is not None:
-                for extra_name, extra_series in extras.items():
-                    if extra_series is None or extra_series.empty:
+            measured_vals = np.array(all_measured_values, dtype=float)
+            tol = pd.Timedelta(days=1)
+
+            if band_groups and windowed_groups:
+                fraction_lookup = {"p05": 0.05, "p25": 0.25, "p50": 0.50, "p75": 0.75, "p95": 0.95}
+
+                def _resolve_band_series(label_hint: str, bands_dict: Dict[str, pd.Series], key: str) -> Optional[pd.Series]:
+                    series = bands_dict.get(key)
+                    if isinstance(series, pd.Series) and not series.empty:
+                        return series
+                    frac = fraction_lookup.get(key)
+                    if frac is None:
+                        return None
+                    min_series = bands_dict.get("min")
+                    max_series = bands_dict.get("max")
+                    if not isinstance(min_series, pd.Series) or min_series.empty or not isinstance(max_series, pd.Series) or max_series.empty:
+                        return None
+                    idx = min_series.index.union(max_series.index)
+                    min_aligned = min_series.reindex(idx)
+                    max_aligned = max_series.reindex(idx)
+                    approx = min_aligned + (max_aligned - min_aligned) * frac
+                    bands_dict[key] = approx
+                    _record_cov_debug(label_hint, f"approximated {key} using min/max (frac={frac:.2f})")
+                    return approx
+
+                for group_key, bands in windowed_groups.items():
+                    if not isinstance(bands, dict) or not bands:
+                        _record_cov_debug(group_key, 'no band series present')
                         continue
-                    
-                    extra_windowed = _apply_window_to_series(extra_series)
-                    if extra_windowed.empty:
+                    center_key = 'mean' if 'mean' in bands else ('p50' if 'p50' in bands else None)
+                    if center_key is None:
+                        _record_cov_debug(group_key, 'no mean/p50 series available')
                         continue
-                    
-                    try:
-                        aligned_extra = extra_windowed.reindex(measured_times, method='nearest', tolerance=pd.Timedelta(days=1))
-                        extra_vals = aligned_extra.dropna().values
-                        
-                        valid_indices = ~pd.isna(aligned_extra.values)
-                        if np.any(valid_indices):
-                            measured_subset = measured_vals[valid_indices]
-                            
-                            if len(measured_subset) >= 2 and len(extra_vals) >= 2:
-                                extra_stats = _measured_vs_series_stats(measured_subset, extra_vals, f"extra_{extra_name}")
-                                measured_vs_series.update(extra_stats)
-                    except Exception:
+                    center_series = bands.get(center_key)
+                    if not isinstance(center_series, pd.Series) or center_series.empty:
+                        _record_cov_debug(group_key, f'{center_key} series empty')
                         continue
-            
-            if measured_vs_series:
-                stats["measured_vs_series"] = measured_vs_series
+                    aligned_center = center_series.reindex(measured_times, method='nearest', tolerance=tol)
+                    center_vals = aligned_center.to_numpy(dtype=float)
+                    valid_mask = np.isfinite(center_vals) & np.isfinite(measured_vals)
+                    if not np.any(valid_mask):
+                        _record_cov_debug(group_key, 'no overlapping measured points with center series')
+                        continue
+                    label = center_key if group_key == 'ensemble' else f"{group_key}_{center_key}"
+
+                    def _add_coverage(lo_key: str, hi_key: str, suffix: str) -> None:
+                        lo_series = bands.get(lo_key)
+                        if not isinstance(lo_series, pd.Series) or lo_series.empty:
+                            lo_series = _resolve_band_series(label, bands, lo_key)
+                        hi_series = bands.get(hi_key)
+                        if not isinstance(hi_series, pd.Series) or hi_series.empty:
+                            hi_series = _resolve_band_series(label, bands, hi_key)
+                        if lo_series is None or hi_series is None or not isinstance(lo_series, pd.Series) or not isinstance(hi_series, pd.Series) or lo_series.empty or hi_series.empty:
+                            _record_cov_debug(label, f'skip {suffix}: band series {lo_key}/{hi_key} unavailable after fallback')
+                            return
+                        aligned_lo = lo_series.reindex(measured_times, method='nearest', tolerance=tol)
+                        aligned_hi = hi_series.reindex(measured_times, method='nearest', tolerance=tol)
+                        lo_vals = aligned_lo.to_numpy(dtype=float)
+                        hi_vals = aligned_hi.to_numpy(dtype=float)
+                        mask = valid_mask & np.isfinite(lo_vals) & np.isfinite(hi_vals)
+                        count = int(np.count_nonzero(mask))
+                        if count == 0:
+                            _record_cov_debug(label, f'skip {suffix}: no finite band values aligned with measured points')
+                            return
+                        cov = _coverage(measured_vals[mask], lo_vals[mask], hi_vals[mask])
+                        if np.isfinite(cov):
+                            coverage_entries.setdefault(label, {})[suffix] = float(cov)
+                            _record_cov_debug(label, f'{suffix}: coverage={cov:.3f} over {count} points')
+                        else:
+                            _record_cov_debug(label, f'skip {suffix}: coverage returned non-finite value')
+
+                    _add_coverage('p25', 'p75', 'coverage50')
+                    _add_coverage('p05', 'p95', 'coverage90')
+                    _add_coverage('min', 'max', 'coverage_minmax')
+            else:
+                _record_cov_debug('global', 'no band data available for coverage analysis')
+
+            if coverage_entries:
+                for label, metrics in coverage_entries.items():
+                    for suffix, value in metrics.items():
+                        measured_vs_series[f"vs_{label}_{suffix}"] = value
+            else:
+                _record_cov_debug('global', 'coverage metrics were not computed for any series')
+    else:
+        _record_cov_debug('global', 'no measured series provided for coverage analysis')
+
+    if measured_vs_series:
+        stats["measured_vs_series"] = measured_vs_series
+    if coverage_debug:
+        stats["coverage_debug"] = coverage_debug
+
 
     return stats
 
@@ -904,55 +983,55 @@ def format_stats_text(stats: Dict[str, object]) -> str:
     if meas_vs:
         lines.append("<b>Measured vs All Series</b>")
         
-        # Parse flat keys like "vs_min_r", "vs_p05_rmse", "vs_extra_external_flow_nse"
-        # Group by series name
+        # Parse flat keys like "vs_mean_coverage50"
         series_groups = {}
         for key, val in meas_vs.items():
             if not key.startswith("vs_"):
                 continue
-            # Extract series name and metric
-            # Examples: vs_min_r -> min, r; vs_p05_rmse -> p05, rmse; vs_extra_external_flow_nse -> extra_external_flow, nse
             parts = key[3:].split("_")  # Remove "vs_" prefix
             if len(parts) >= 2:
-                metric = parts[-1]  # Last part is always the metric
-                series_name = "_".join(parts[:-1])  # Everything before last part is series name
-                if series_name not in series_groups:
-                    series_groups[series_name] = {}
-                series_groups[series_name][metric] = val
+                metric = parts[-1]
+                series_name = "_".join(parts[:-1])
+                series_groups.setdefault(series_name, {})[metric] = val
         
-        # Define display order for series types
         series_order = ["mean", "min", "max", "p05", "p25", "p50", "p75", "p95"]
-        
-        # Add external series at the end (they have "extra_" prefix)
         for series_name in series_groups.keys():
             if series_name not in series_order:
                 series_order.append(series_name)
         
+        metric_defs = [
+            ("coverage50", "within 50% band"),
+            ("coverage90", "within 90% band"),
+            ("coverage_minmax", "within min-max envelope"),
+        ]
+
         for series_name in series_order:
             if series_name not in series_groups:
                 continue
             series_stats = series_groups[series_name]
             if not series_stats:
                 continue
-                
-            # Format series name for display
+
             display_name = series_name
             if series_name.startswith("p") and series_name[1:].isdigit():
                 display_name = f"{series_name[1:]}{series_name[0]}"  # p05 -> 05p
             elif series_name.startswith("extra_"):
-                display_name = series_name[6:]  # Remove "extra_" prefix
-            
+                display_name = series_name[6:]
+
             lines.append(f"<i>vs {display_name}:</i>")
-            
-            # Show key metrics
-            for metric in ["r", "rmse", "mae", "nse", "bias"]:
-                if metric in series_stats:
-                    val = series_stats[metric]
-                    if isinstance(val, (int, float)) and np.isfinite(val):
-                        if metric in {"r", "nse"}:
-                            lines.append(f"  {metric} = {val:.3f}")
-                        else:
-                            lines.append(f"  {metric} = {val:.3g}")
+
+            for metric, label_text in metric_defs:
+                val = series_stats.get(metric)
+                if isinstance(val, (int, float)) and np.isfinite(val):
+                    lines.append(f"  {label_text} = {val * 100:.1f}%")
+
+    coverage_debug = stats.get("coverage_debug", {}) or {}
+    if coverage_debug:
+        lines.append("<b>Coverage Debug</b>")
+        for label, messages in coverage_debug.items():
+            lines.append(f"{label}:")
+            for msg in messages:
+                lines.append(f"  {msg}")
 
     # Join with HTML <br>
     return "<br>".join(lines)
