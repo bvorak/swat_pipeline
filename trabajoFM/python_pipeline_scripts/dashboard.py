@@ -1317,8 +1317,9 @@ def fan_compare_simulations_dashboard(
                 hovertemplate=("max: %{customdata[4]:.4g}%{customdata[5]}<br>mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>"),
             ))
 
-        # Store band data for comprehensive statistics
-        band_data = {}
+        # Store band data for comprehensive statistics (grouped by series)
+        band_groups: Dict[str, Dict[str, pd.Series]] = {}
+        ensemble_band: Dict[str, pd.Series] = {}
         if n_runs_here >= min_runs_for_bands:
             # Fan chart mode: store percentile series
             # Determine if event filtering is active; relax threshold in that case
@@ -1329,7 +1330,7 @@ def fan_compare_simulations_dashboard(
                 min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs normally
             data_count = np.sum(np.isfinite(arr), axis=1)  # Count finite values per time point
             sufficient_data = data_count >= min_data_threshold
-            
+
             # Create percentile arrays with NaN where insufficient data
             p05_vals = np.full(arr.shape[0], np.nan)
             p25_vals = np.full(arr.shape[0], np.nan)
@@ -1337,26 +1338,26 @@ def fan_compare_simulations_dashboard(
             p75_vals = np.full(arr.shape[0], np.nan)
             p95_vals = np.full(arr.shape[0], np.nan)
             mean_vals = np.full(arr.shape[0], np.nan)
-            
+
             # Only compute where we have sufficient data
             if np.any(sufficient_data):
                 sufficient_indices = np.where(sufficient_data)[0]
-                p05_vals[sufficient_indices] = q[5][sufficient_indices]
-                p25_vals[sufficient_indices] = q[25][sufficient_indices]
-                p50_vals[sufficient_indices] = q[50][sufficient_indices]
-                p75_vals[sufficient_indices] = q[75][sufficient_indices]
-                p95_vals[sufficient_indices] = q[95][sufficient_indices]
-                mean_vals[sufficient_indices] = np.nanmean(arr[sufficient_indices, :], axis=1)
-            
+                p05_vals[sufficient_data] = q[5][sufficient_data]
+                p25_vals[sufficient_data] = q[25][sufficient_data]
+                p50_vals[sufficient_data] = q[50][sufficient_data]
+                p75_vals[sufficient_data] = q[75][sufficient_data]
+                p95_vals[sufficient_data] = q[95][sufficient_data]
+                mean_vals[sufficient_data] = np.nanmean(arr[sufficient_data, :], axis=1)
+
             # Create band data series only for time points with sufficient data
             if np.any(sufficient_data):
                 valid_indices = aligned_df.index[sufficient_data]
-                band_data["p05"] = pd.Series(p05_vals[sufficient_data], index=valid_indices, name="p05")
-                band_data["p25"] = pd.Series(p25_vals[sufficient_data], index=valid_indices, name="p25")
-                band_data["p50"] = pd.Series(p50_vals[sufficient_data], index=valid_indices, name="p50")
-                band_data["p75"] = pd.Series(p75_vals[sufficient_data], index=valid_indices, name="p75")
-                band_data["p95"] = pd.Series(p95_vals[sufficient_data], index=valid_indices, name="p95")
-                band_data["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
+                ensemble_band["p05"] = pd.Series(p05_vals[sufficient_data], index=valid_indices, name="p05")
+                ensemble_band["p25"] = pd.Series(p25_vals[sufficient_data], index=valid_indices, name="p25")
+                ensemble_band["p50"] = pd.Series(p50_vals[sufficient_data], index=valid_indices, name="p50")
+                ensemble_band["p75"] = pd.Series(p75_vals[sufficient_data], index=valid_indices, name="p75")
+                ensemble_band["p95"] = pd.Series(p95_vals[sufficient_data], index=valid_indices, name="p95")
+                ensemble_band["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
         else:
             # Min-max envelope mode: store min/max/mean series
             event_filter_active = selected_days_set is not None
@@ -1366,26 +1367,84 @@ def fan_compare_simulations_dashboard(
                 min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs
             data_count = np.sum(np.isfinite(arr), axis=1)  # Count finite values per time point
             sufficient_data = data_count >= min_data_threshold
-            
+
             with np.errstate(invalid='ignore'):
                 min_vals = np.full(arr.shape[0], np.nan)
                 max_vals = np.full(arr.shape[0], np.nan)
                 mean_vals = np.full(arr.shape[0], np.nan)
-                
+                p05_vals = np.full(arr.shape[0], np.nan)
+                p25_vals = np.full(arr.shape[0], np.nan)
+                p50_vals = np.full(arr.shape[0], np.nan)
+                p75_vals = np.full(arr.shape[0], np.nan)
+                p95_vals = np.full(arr.shape[0], np.nan)
+
                 # Only compute where we have sufficient data
                 if np.any(sufficient_data):
                     sufficient_indices = np.where(sufficient_data)[0]
-                    min_vals[sufficient_indices] = np.nanmin(arr[sufficient_indices, :], axis=1)
-                    max_vals[sufficient_indices] = np.nanmax(arr[sufficient_indices, :], axis=1)
-                    mean_vals[sufficient_indices] = np.nanmean(arr[sufficient_indices, :], axis=1)
-                
+                    min_vals[sufficient_data] = np.nanmin(arr[sufficient_data, :], axis=1)
+                    max_vals[sufficient_data] = np.nanmax(arr[sufficient_data, :], axis=1)
+                    mean_vals[sufficient_data] = np.nanmean(arr[sufficient_data, :], axis=1)
+                    if isinstance(q, dict):
+                        if 5 in q:
+                            p05_vals[sufficient_data] = q[5][sufficient_data]
+                        if 25 in q:
+                            p25_vals[sufficient_data] = q[25][sufficient_data]
+                        if 50 in q:
+                            p50_vals[sufficient_data] = q[50][sufficient_data]
+                        if 75 in q:
+                            p75_vals[sufficient_data] = q[75][sufficient_data]
+                        if 95 in q:
+                            p95_vals[sufficient_data] = q[95][sufficient_data]
+
                 # Create band data series only for time points with sufficient data
                 if np.any(sufficient_data):
                     valid_indices = aligned_df.index[sufficient_data]
-                    band_data["min"] = pd.Series(min_vals[sufficient_data], index=valid_indices, name="min")
-                    band_data["max"] = pd.Series(max_vals[sufficient_data], index=valid_indices, name="max")
-                    band_data["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
-        _last["band_data"] = band_data
+                    ensemble_band["min"] = pd.Series(min_vals[sufficient_data], index=valid_indices, name="min")
+                    ensemble_band["max"] = pd.Series(max_vals[sufficient_data], index=valid_indices, name="max")
+                    ensemble_band["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
+                    ensemble_band["p05"] = pd.Series(p05_vals[sufficient_data], index=valid_indices, name="p05")
+                    ensemble_band["p25"] = pd.Series(p25_vals[sufficient_data], index=valid_indices, name="p25")
+                    ensemble_band["p50"] = pd.Series(p50_vals[sufficient_data], index=valid_indices, name="p50")
+                    ensemble_band["p75"] = pd.Series(p75_vals[sufficient_data], index=valid_indices, name="p75")
+                    ensemble_band["p95"] = pd.Series(p95_vals[sufficient_data], index=valid_indices, name="p95")
+        if ensemble_band:
+            band_groups["ensemble"] = ensemble_band
+
+        def _sanitize_series_key(name: object) -> str:
+            txt = str(name) if name is not None else "series"
+            cleaned = re.sub(r"[^0-9A-Za-z]+", "_", txt).strip("_")
+            return cleaned.lower() or "series"
+
+        def _extend_relative_bands(target_groups: Dict[str, Dict[str, pd.Series]], new_series: Dict[str, pd.Series], *, prefix: str = "") -> None:
+            if not isinstance(target_groups, dict) or not isinstance(new_series, dict) or not new_series:
+                return
+            base = target_groups.get("ensemble")
+            if not isinstance(base, dict) or "mean" not in base:
+                return
+            base_mean = base.get("mean")
+            if not isinstance(base_mean, pd.Series) or base_mean.empty:
+                return
+            offsets: Dict[str, pd.Series] = {}
+            for key, series in base.items():
+                if key == "mean" or not isinstance(series, pd.Series):
+                    continue
+                aligned_mean = base_mean.reindex(series.index)
+                offsets[key] = series - aligned_mean
+            for raw_name, s_center in new_series.items():
+                if not isinstance(s_center, pd.Series) or s_center.empty:
+                    continue
+                safe_name = _sanitize_series_key(raw_name)
+                if not safe_name:
+                    continue
+                label = f"{prefix}_{safe_name}" if prefix else safe_name
+                if label == "ensemble":
+                    label = f"{label}_series"
+                derived: Dict[str, pd.Series] = {"mean": s_center.copy()}
+                for key, offset in offsets.items():
+                    aligned_offset = offset.reindex(s_center.index)
+                    derived[key] = (s_center + aligned_offset).rename(key)
+                target_groups[label] = derived
+
 
         # Optional independent overlays: plot each as its own line, not part of fan
         # Also retain per-overlay resampled series for stats correlations
@@ -1467,6 +1526,9 @@ def fan_compare_simulations_dashboard(
                 except Exception:
                     # Keep plotting even if one overlay fails
                     continue
+
+        _extend_relative_bands(band_groups, _last.get("extra_series", {}), prefix="extra")
+        _last["band_data"] = band_groups
 
         # Prepare measured DataFrame (apply cleaning policies and compute kg/day when possible)
         measured_use_df = measured_df if measured_present else None
@@ -2023,7 +2085,7 @@ def fan_compare_simulations_dashboard(
                 e_max = (1.0 - f) * S
                 y3_range = [e_min, e_max]
                 fig.update_layout(yaxis3=dict(
-                    title="Erosion (SED_IN - SED_OUT)", overlaying='y', side='right', showgrid=False,
+                    title="Sedimentation tons (SED_IN - SED_OUT)", overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y3_range, anchor='x', title_standoff=100, automargin=True,
                     ticklabelposition='inside', ticks='inside', title_font_color="#8c564b"
                 ))
