@@ -908,8 +908,9 @@ def fan_compare_simulations_dashboard(
             _dbg("event detection failed", e)
             selected_days_set = None
         # Extract a single resampled series per run for the selected reach/variable
-        # Extract a single resampled series per run for the selected reach/variable
+        # Maintain filtered (stats) and unfiltered (plot) collections
         per_sim: Dict[str, pd.Series] = {}
+        per_sim_plot: Dict[str, pd.Series] = {}
         for sim_name, df in sim_dfs.items():
             # Build subset depending on variable (derived vs direct)
             if var == SYN_VAR:
@@ -942,6 +943,8 @@ def fan_compare_simulations_dashboard(
             if season_months:
                 sub = _filter_season(sub, season_months)
                 _dbg_df_info(sub, f"{sim_name} after season filter")
+            # Keep a copy BEFORE event-day filtering for plotting
+            sub_plot = sub.copy()
             if selected_days_set is not None:
                 try:
                     day_mask = sub.index.floor('D').isin(list(selected_days_set))
@@ -997,6 +1000,46 @@ def fan_compare_simulations_dashboard(
             s.name = sim_name
             per_sim[sim_name] = s
             _dbg_df_info(s, f"{sim_name} series after resample")
+
+            # Build plotting series (unfiltered by event filter)
+            try:
+                base_col_plot = (SYN_VAR if var == SYN_VAR else var)
+                if is_conc_mode:
+                    flow_source_p = str(dd_flow_source.value)
+                    if flow_source_p == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
+                        days_p = sub_plot.index.floor('D')
+                        f_series_p = s_external_flow_daily.reindex(days_p)
+                        fvals_p = f_series_p.to_numpy(dtype=float)
+                        kgd_p = sub_plot[base_col_plot].to_numpy(dtype=float)
+                        with np.errstate(invalid='ignore', divide='ignore'):
+                            conc_p = (kgd_p / fvals_p) * 1000.0
+                        sub_plot["__conc_mgL__"] = conc_p
+                        sub_plot["__flow_m3d__"] = f_series_p.to_numpy(dtype=float)
+                    elif flow_source_p == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
+                        days_p = sub_plot.index.floor('D')
+                        f_series_p = s_swat_avg_daily.reindex(days_p)
+                        fvals_p = f_series_p.to_numpy(dtype=float)
+                        kgd_p = sub_plot[base_col_plot].to_numpy(dtype=float)
+                        with np.errstate(invalid='ignore', divide='ignore'):
+                            conc_p = (kgd_p / fvals_p) * 1000.0
+                        sub_plot["__conc_mgL__"] = conc_p
+                        sub_plot["__flow_m3d__"] = f_series_p.to_numpy(dtype=float)
+                    else:
+                        # fallback to per-run flow column
+                        flow_col_plot = flow_col if flow_col in sub_plot.columns else ("FLOW_OUTcmscms" if "FLOW_OUTcmscms" in sub_plot.columns else None)
+                        if flow_col_plot is not None:
+                            with np.errstate(invalid='ignore', divide='ignore'):
+                                sub_plot["__conc_mgL__"] = (sub_plot[base_col_plot] / (sub_plot[flow_col_plot] * 86400.0)) * 1000.0
+                                sub_plot["__flow_m3d__"] = (sub_plot[flow_col_plot].astype(float) * 86400.0)
+                    how_plot = dd_method.value if dd_method.value in ("flow_weighted_mean", "mean") else "mean"
+                    s_plot = _resample_series(sub_plot, "__conc_mgL__", freq=freq_str, how=how_plot, flow_col="__flow_m3d__")
+                else:
+                    s_plot = _resample_series(sub_plot, base_col_plot, freq=freq_str, how=method, flow_col=flow_col if flow_col in sub_plot.columns else None)
+                if not s_plot.empty:
+                    s_plot.name = sim_name
+                    per_sim_plot[sim_name] = s_plot
+            except Exception as _e_plot:
+                _dbg("build plot series failed", dict(run=sim_name, err=str(_e_plot)))
 
         if not per_sim:
             with out:
@@ -1056,17 +1099,38 @@ def fan_compare_simulations_dashboard(
             all_nan = int(q_df["p50"].isna().sum())
             _dbg("quantiles", dict(all_nan_p50=all_nan))
 
-        # Precompute y-range for fixed scaling
-        finite_vals = arr[np.isfinite(arr)]
-        if finite_vals.size:
-            y_min = float(np.nanmin(finite_vals))
-            y_max = float(np.nanmax(finite_vals))
-            if y_min == y_max:
-                y_max = y_min + 1.0
-        else:
-            y_min, y_max = 0.0, 1.0
-        pad = (y_max - y_min) * 0.05
-        _last["y_fixed"] = [y_min - pad, y_max + pad]
+        # Build UNFILTERED aligned DataFrame for plotting; if empty fallback to filtered
+        try:
+            if per_sim_plot:
+                aligned_df_plot = pd.concat(per_sim_plot.values(), axis=1).sort_index()
+            else:
+                aligned_df_plot = aligned_df.copy()
+            aligned_df_plot.index = pd.to_datetime(aligned_df_plot.index, utc=False)
+            arr_plot = aligned_df_plot.to_numpy(dtype=float)
+            percs_plot = [5, 10, 25, 50, 60, 75, 90, 95]
+            qs_plot = np.nanpercentile(arr_plot, percs_plot, axis=1) if arr_plot.shape[1] else np.full((len(percs_plot), 0), np.nan)
+            q_plot = {p: qs_plot[i, :] if arr_plot.shape[1] else np.array([]) for i, p in enumerate(percs_plot)}
+            _last["aligned_df_plot"] = aligned_df_plot
+            _last["q_plot_df"] = pd.DataFrame({
+                "p05": q_plot[5], "p10": q_plot[10], "p25": q_plot[25], "p50": q_plot[50], "p60": q_plot[60], "p75": q_plot[75], "p90": q_plot[90], "p95": q_plot[95]
+            }, index=aligned_df_plot.index)
+            # y-range based on UNFILTERED data
+            finite_vals_plot = arr_plot[np.isfinite(arr_plot)]
+            if finite_vals_plot.size:
+                y_min = float(np.nanmin(finite_vals_plot))
+                y_max = float(np.nanmax(finite_vals_plot))
+                if y_min == y_max:
+                    y_max = y_min + 1.0
+            else:
+                y_min, y_max = 0.0, 1.0
+            pad = (y_max - y_min) * 0.05
+            _last["y_fixed"] = [y_min - pad, y_max + pad]
+        except Exception as _e_unf:
+            _dbg("unfiltered plot build failed", str(_e_unf))
+            aligned_df_plot = aligned_df
+            arr_plot = arr
+            q_plot = q
+            _last["y_fixed"] = _last.get("y_fixed", None)
 
         # Per-point human-friendly hover scaling (k = thousands, M = millions)
         # Keeps numbers readable and avoids misleading labels for small values.
@@ -1093,16 +1157,62 @@ def fan_compare_simulations_dashboard(
             cd[:, 1] = labels
             return cd
 
-        # Build figure
+        # Build figure (plotting uses UNFILTERED data arrays)
         fig = go.FigureWidget(layout=dict(template=template))
         if figure_width is not None:
             fig.layout.width = int(figure_width)
         fig.layout.height = int(figure_height)
+        # Grey overlay for filtered-out days (aggregate any consecutive excluded days over full date span)
+        try:
+            if selected_days_set is not None and len(selected_days_set) > 0:
+                existing_ranges = _last.get('filtered_out_overlay')
+                # Work over full continuous daily span (ensures coverage even if resampled index is sparse)
+                if len(aligned_df_plot.index) > 0 and pd.api.types.is_datetime64_any_dtype(aligned_df_plot.index):
+                    day_start = pd.to_datetime(aligned_df_plot.index.min()).floor('D')
+                    day_end = pd.to_datetime(aligned_df_plot.index.max()).floor('D')
+                    full_days = pd.date_range(start=day_start, end=day_end, freq='D')
+                    excluded_days = [d for d in full_days if d not in selected_days_set]
+                else:
+                    excluded_days = []
+                if excluded_days:
+                    # Group consecutive days
+                    blocks: list[list[pd.Timestamp, pd.Timestamp]] = []
+                    for d in excluded_days:
+                        d = pd.Timestamp(d).normalize()
+                        if not blocks or d - blocks[-1][1] > pd.Timedelta(days=1):
+                            blocks.append([d, d])
+                        else:
+                            blocks[-1][1] = d
+                    if blocks != existing_ranges:
+                        # Remove previous overlay shapes (keep other shapes if any by filtering on fillcolor signature)
+                        prev_shapes = list(getattr(fig.layout, 'shapes', []))
+                        remaining = [s for s in prev_shapes if not (isinstance(s, dict) and str(s.get('fillcolor','')).startswith('rgba(90,90,90'))]
+                        new_shapes = []
+                        for a, b in blocks:
+                            new_shapes.append(dict(
+                                type='rect', xref='x', yref='paper',
+                                x0=a.isoformat(), x1=(b + pd.Timedelta(days=1)).isoformat(),
+                                y0=0, y1=1,
+                                fillcolor='rgba(90,90,90,0.30)',
+                                line=dict(width=0), layer='below'
+                            ))
+                        fig.layout.shapes = tuple(remaining + new_shapes)
+                        _last['filtered_out_overlay'] = blocks
+                    # Legend proxy (avoid duplicates)
+                    if not any(getattr(tr, 'name', '') == 'Filtered (excluded from stats)' for tr in fig.data):
+                        fig.add_trace(go.Scatter(
+                            x=[None], y=[None], mode='markers',
+                            marker=dict(size=10, color='rgba(90,90,90,0.30)', symbol='square'),
+                            name='Filtered (excluded from stats)',
+                            hoverinfo='skip', showlegend=True
+                        ))
+        except Exception as _e_overlay:
+            _dbg('overlay build failed', str(_e_overlay))
 
         # Fan chart vs simplified band depending on number of runs
         color = "#1f77b4"
         rgba = lambda a: f"rgba(31,119,180,{a})"
-        n_runs_here = int(arr.shape[1])
+        n_runs_here = int(arr_plot.shape[1])
         min_runs_for_bands = 5
         # Median with percentile tooltip
         def _make_customdata_multi(*arrays: Iterable[np.ndarray]) -> np.ndarray:
@@ -1118,8 +1228,8 @@ def fan_compare_simulations_dashboard(
         if n_runs_here >= min_runs_for_bands:
             # Use None values for invalid points to prevent triangular fill artifacts
             x_arr = np.array(x_dt, dtype=object)
-            p95 = np.asarray(q[95], dtype=float); p05 = np.asarray(q[5], dtype=float)
-            p75 = np.asarray(q[75], dtype=float); p25 = np.asarray(q[25], dtype=float)
+            p95 = np.asarray(q_plot[95], dtype=float); p05 = np.asarray(q_plot[5], dtype=float)
+            p75 = np.asarray(q_plot[75], dtype=float); p25 = np.asarray(q_plot[25], dtype=float)
             mask90 = np.isfinite(p95) & np.isfinite(p05)
             mask50 = np.isfinite(p75) & np.isfinite(p25)
             
@@ -1155,17 +1265,29 @@ def fan_compare_simulations_dashboard(
             ))
             # Median
             fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(q[50]), mode="lines", line=dict(color="black", width=2),
+                x=x_dt, y=_nan_to_none(q_plot[50]), mode="lines", line=dict(color="black", width=2),
                 name="median",
-                customdata=_make_customdata_multi(q[5], q[25], q[50], q[75], q[95]),
+                customdata=_make_customdata_multi(q_plot[5], q_plot[25], q_plot[50], q_plot[75], q_plot[95]),
                 hovertemplate=_median_hovertemplate(cb_show_names_in_tooltip.value, _run_label),
             ))
         else:
             # Too few runs: show min-max envelope + mean line
+            # Only compute envelope where we have sufficient data (at least 50% of runs)
+            min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs
+            data_count = np.sum(np.isfinite(arr_plot), axis=1)  # Count finite values per time point
+            sufficient_data = data_count >= min_data_threshold
+            
             with np.errstate(invalid='ignore'):
-                vmin = np.nanmin(arr, axis=1)
-                vmax = np.nanmax(arr, axis=1)
-                vmean = np.nanmean(arr, axis=1)
+                vmin = np.full(arr_plot.shape[0], np.nan)
+                vmax = np.full(arr_plot.shape[0], np.nan)
+                vmean = np.full(arr_plot.shape[0], np.nan)
+                
+                # Only compute where we have sufficient data
+                if np.any(sufficient_data):
+                    sufficient_indices = np.where(sufficient_data)[0]
+                    vmin[sufficient_indices] = np.nanmin(arr_plot[sufficient_indices, :], axis=1)
+                    vmax[sufficient_indices] = np.nanmax(arr_plot[sufficient_indices, :], axis=1)
+                    vmean[sufficient_indices] = np.nanmean(arr_plot[sufficient_indices, :], axis=1)
             # Max then min with fill between
             fig.add_trace(go.Scatter(
                 x=x_dt, y=_nan_to_none(vmax), mode="lines", line=dict(color=rgba(0.20), width=0.5),
@@ -1199,18 +1321,70 @@ def fan_compare_simulations_dashboard(
         band_data = {}
         if n_runs_here >= min_runs_for_bands:
             # Fan chart mode: store percentile series
-            band_data["p05"] = pd.Series(q[5], index=aligned_df.index, name="p05")
-            band_data["p25"] = pd.Series(q[25], index=aligned_df.index, name="p25")
-            band_data["p50"] = pd.Series(q[50], index=aligned_df.index, name="p50")
-            band_data["p75"] = pd.Series(q[75], index=aligned_df.index, name="p75")
-            band_data["p95"] = pd.Series(q[95], index=aligned_df.index, name="p95")
-            band_data["mean"] = pd.Series(np.nanmean(arr, axis=1), index=aligned_df.index, name="mean")
+            # Determine if event filtering is active; relax threshold in that case
+            event_filter_active = selected_days_set is not None
+            if event_filter_active:
+                min_data_threshold = 1  # show band wherever at least one run has data
+            else:
+                min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs normally
+            data_count = np.sum(np.isfinite(arr), axis=1)  # Count finite values per time point
+            sufficient_data = data_count >= min_data_threshold
+            
+            # Create percentile arrays with NaN where insufficient data
+            p05_vals = np.full(arr.shape[0], np.nan)
+            p25_vals = np.full(arr.shape[0], np.nan)
+            p50_vals = np.full(arr.shape[0], np.nan)
+            p75_vals = np.full(arr.shape[0], np.nan)
+            p95_vals = np.full(arr.shape[0], np.nan)
+            mean_vals = np.full(arr.shape[0], np.nan)
+            
+            # Only compute where we have sufficient data
+            if np.any(sufficient_data):
+                sufficient_indices = np.where(sufficient_data)[0]
+                p05_vals[sufficient_indices] = q[5][sufficient_indices]
+                p25_vals[sufficient_indices] = q[25][sufficient_indices]
+                p50_vals[sufficient_indices] = q[50][sufficient_indices]
+                p75_vals[sufficient_indices] = q[75][sufficient_indices]
+                p95_vals[sufficient_indices] = q[95][sufficient_indices]
+                mean_vals[sufficient_indices] = np.nanmean(arr[sufficient_indices, :], axis=1)
+            
+            # Create band data series only for time points with sufficient data
+            if np.any(sufficient_data):
+                valid_indices = aligned_df.index[sufficient_data]
+                band_data["p05"] = pd.Series(p05_vals[sufficient_data], index=valid_indices, name="p05")
+                band_data["p25"] = pd.Series(p25_vals[sufficient_data], index=valid_indices, name="p25")
+                band_data["p50"] = pd.Series(p50_vals[sufficient_data], index=valid_indices, name="p50")
+                band_data["p75"] = pd.Series(p75_vals[sufficient_data], index=valid_indices, name="p75")
+                band_data["p95"] = pd.Series(p95_vals[sufficient_data], index=valid_indices, name="p95")
+                band_data["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
         else:
             # Min-max envelope mode: store min/max/mean series
+            event_filter_active = selected_days_set is not None
+            if event_filter_active:
+                min_data_threshold = 1
+            else:
+                min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs
+            data_count = np.sum(np.isfinite(arr), axis=1)  # Count finite values per time point
+            sufficient_data = data_count >= min_data_threshold
+            
             with np.errstate(invalid='ignore'):
-                band_data["min"] = pd.Series(np.nanmin(arr, axis=1), index=aligned_df.index, name="min")
-                band_data["max"] = pd.Series(np.nanmax(arr, axis=1), index=aligned_df.index, name="max")
-                band_data["mean"] = pd.Series(np.nanmean(arr, axis=1), index=aligned_df.index, name="mean")
+                min_vals = np.full(arr.shape[0], np.nan)
+                max_vals = np.full(arr.shape[0], np.nan)
+                mean_vals = np.full(arr.shape[0], np.nan)
+                
+                # Only compute where we have sufficient data
+                if np.any(sufficient_data):
+                    sufficient_indices = np.where(sufficient_data)[0]
+                    min_vals[sufficient_indices] = np.nanmin(arr[sufficient_indices, :], axis=1)
+                    max_vals[sufficient_indices] = np.nanmax(arr[sufficient_indices, :], axis=1)
+                    mean_vals[sufficient_indices] = np.nanmean(arr[sufficient_indices, :], axis=1)
+                
+                # Create band data series only for time points with sufficient data
+                if np.any(sufficient_data):
+                    valid_indices = aligned_df.index[sufficient_data]
+                    band_data["min"] = pd.Series(min_vals[sufficient_data], index=valid_indices, name="min")
+                    band_data["max"] = pd.Series(max_vals[sufficient_data], index=valid_indices, name="max")
+                    band_data["mean"] = pd.Series(mean_vals[sufficient_data], index=valid_indices, name="mean")
         _last["band_data"] = band_data
 
         # Optional independent overlays: plot each as its own line, not part of fan
