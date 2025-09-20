@@ -94,6 +94,97 @@ def _medae(y: np.ndarray, m: np.ndarray) -> float:
 
 
 # -----------------------------
+# New band deviation metrics
+# -----------------------------
+
+def _band_deviation_stats(mean_series: np.ndarray, min_series: np.ndarray, max_series: np.ndarray) -> Dict[str, float]:
+    """Compute statistics describing how much the min/max bands deviate around the mean.
+    
+    Returns metrics quantifying simulation uncertainty/spread.
+    """
+    mean_arr = np.asarray(mean_series, dtype=float)
+    min_arr = np.asarray(min_series, dtype=float) 
+    max_arr = np.asarray(max_series, dtype=float)
+    
+    # Only use points where all three are finite
+    mask = np.isfinite(mean_arr) & np.isfinite(min_arr) & np.isfinite(max_arr)
+    if not np.any(mask):
+        return {
+            "band_width_mean": float("nan"),
+            "band_width_rel%": float("nan"),
+            "band_asymmetry": float("nan"),
+            "band_rmse_vs_mean": float("nan"),
+        }
+    
+    mean_vals = mean_arr[mask]
+    min_vals = min_arr[mask]  
+    max_vals = max_arr[mask]
+    
+    # Band width (max - min)
+    band_widths = max_vals - min_vals
+    band_width_mean = float(np.nanmean(band_widths))
+    
+    # Relative band width as percentage of mean
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rel_widths = (band_widths / np.abs(mean_vals)) * 100.0
+        band_width_rel = float(np.nanmean(rel_widths[np.isfinite(rel_widths)]))
+    
+    # Band asymmetry: how much closer is mean to min vs max (0 = centered, +1 = closer to min, -1 = closer to max)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        asymmetry = (2 * (mean_vals - min_vals) / band_widths) - 1.0
+        band_asymmetry = float(np.nanmean(asymmetry[np.isfinite(asymmetry)]))
+    
+    # RMSE of band edges vs mean (measure of overall spread)
+    min_dev = (min_vals - mean_vals) ** 2
+    max_dev = (max_vals - mean_vals) ** 2
+    band_rmse = float(np.sqrt(np.nanmean(np.concatenate([min_dev, max_dev]))))
+    
+    return {
+        "band_width_mean": band_width_mean,
+        "band_width_rel%": band_width_rel,
+        "band_asymmetry": band_asymmetry, 
+        "band_rmse_vs_mean": band_rmse,
+    }
+
+
+def _percentile_band_deviation_stats(mean_series: np.ndarray, p25_series: np.ndarray, p75_series: np.ndarray, 
+                                   p05_series: np.ndarray = None, p95_series: np.ndarray = None) -> Dict[str, float]:
+    """Compute statistics for percentile band deviations around the mean."""
+    stats = {}
+    
+    # 50% band (p25-p75) 
+    if p25_series is not None and p75_series is not None:
+        band_stats_50 = _band_deviation_stats(mean_series, p25_series, p75_series)
+        for key, val in band_stats_50.items():
+            stats[f"p50_{key}"] = val
+    
+    # 90% band (p05-p95)
+    if p05_series is not None and p95_series is not None:
+        band_stats_90 = _band_deviation_stats(mean_series, p05_series, p95_series)
+        for key, val in band_stats_90.items():
+            stats[f"p90_{key}"] = val
+            
+    return stats
+
+
+def _measured_vs_series_stats(measured: np.ndarray, target_series: np.ndarray, series_name: str) -> Dict[str, float]:
+    """Compute comprehensive stats comparing measured data against any target time series."""
+    y, m = _finite_pairs(measured, target_series)
+    if y.size < 2:
+        return {f"vs_{series_name}_r": float("nan"), f"vs_{series_name}_rmse": float("nan"), 
+                f"vs_{series_name}_mae": float("nan"), f"vs_{series_name}_nse": float("nan"),
+                f"vs_{series_name}_bias": float("nan")}
+    
+    return {
+        f"vs_{series_name}_r": _pearson_r(y, m),
+        f"vs_{series_name}_rmse": _rmse(y, m), 
+        f"vs_{series_name}_mae": _mae(y, m),
+        f"vs_{series_name}_nse": _nse(y, m),
+        f"vs_{series_name}_bias": float(np.nanmean(y - m)),  # obs - pred
+    }
+
+
+# -----------------------------
 # Core assemblers
 # -----------------------------
 
@@ -329,10 +420,17 @@ def compute_stats_for_view(
     local_window_ks: Sequence[int] = (1,),
     local_strategy: str = "nearest",
     choose_best_lag_by: str = "r",
+    # New parameters for band deviation analysis
+    band_data: Optional[Dict[str, pd.Series]] = None,
 ) -> Dict[str, object]:
     """Compute an extensible suite of stats for the dashboard view.
 
-    Returns a nested dict with sections: n, same_day, log_space, global_lag, local_window_K*, extras.
+    New parameters:
+    - band_data: Optional dict with keys like 'min', 'max', 'mean', 'p25', 'p75', 'p05', 'p95' 
+                 containing time series for band deviation analysis
+
+    Returns a nested dict with sections: n, same_day, log_space, global_lag, local_window_K*, extras, 
+                                        band_stats, measured_vs_series.
     """
     stats: Dict[str, object] = {}
 
@@ -441,6 +539,128 @@ def compute_stats_for_view(
     if ex:
         stats["extras"] = ex
 
+    # NEW: Band deviation analysis
+    if band_data is not None and isinstance(band_data, dict):
+        band_stats = {}
+        
+        # Apply window filtering to band data
+        def _apply_window_to_series(s: pd.Series) -> pd.Series:
+            if s is None or s.empty:
+                return s
+            if window is not None:
+                x0, x1 = window
+                return s.loc[(s.index >= x0) & (s.index <= x1)]
+            return s
+        
+        # Get windowed band series
+        windowed_bands = {k: _apply_window_to_series(v) for k, v in band_data.items()}
+        
+        # Min/max band analysis
+        if all(k in windowed_bands for k in ['mean', 'min', 'max']):
+            mean_vals = windowed_bands['mean'].dropna().values
+            min_vals = windowed_bands['min'].reindex(windowed_bands['mean'].index).dropna().values
+            max_vals = windowed_bands['max'].reindex(windowed_bands['mean'].index).dropna().values
+            if len(mean_vals) > 0 and len(mean_vals) == len(min_vals) == len(max_vals):
+                band_stats.update(_band_deviation_stats(mean_vals, min_vals, max_vals))
+        
+        # Percentile band analysis  
+        perc_keys = ['mean', 'p25', 'p75', 'p05', 'p95']
+        if all(k in windowed_bands for k in perc_keys[:3]):  # At least mean, p25, p75
+            mean_vals = windowed_bands['mean'].dropna().values
+            p25_vals = windowed_bands['p25'].reindex(windowed_bands['mean'].index).dropna().values
+            p75_vals = windowed_bands['p75'].reindex(windowed_bands['mean'].index).dropna().values
+            p05_vals = windowed_bands.get('p05')
+            p95_vals = windowed_bands.get('p95')
+            
+            if p05_vals is not None and p95_vals is not None:
+                p05_vals = p05_vals.reindex(windowed_bands['mean'].index).dropna().values
+                p95_vals = p95_vals.reindex(windowed_bands['mean'].index).dropna().values
+            else:
+                p05_vals = p95_vals = None
+            
+            if len(mean_vals) > 0:
+                perc_stats = _percentile_band_deviation_stats(mean_vals, p25_vals, p75_vals, p05_vals, p95_vals)
+                band_stats.update(perc_stats)
+        
+        if band_stats:
+            stats["band_deviation"] = band_stats
+
+    # NEW: Measured vs all available series  
+    if measured_series and band_data is not None:
+        measured_vs_series = {}
+        
+        # Flatten all measured data for comparison
+        all_measured_values = []
+        all_measured_times = []
+        for s in measured_series:
+            if s is None or s.empty:
+                continue
+            ss = s
+            if window is not None:
+                x0, x1 = window
+                ss = ss.loc[(ss.index >= x0) & (ss.index <= x1)]
+            for t, val in ss.dropna().items():
+                all_measured_values.append(val)
+                all_measured_times.append(t)
+        
+        if all_measured_values:
+            measured_times = pd.Index(all_measured_times)
+            measured_vals = np.array(all_measured_values)
+            
+            # Compare against each band series
+            for series_name, series_data in band_data.items():
+                if series_data is None or series_data.empty:
+                    continue
+                
+                # Apply window filter
+                series_windowed = _apply_window_to_series(series_data)
+                if series_windowed.empty:
+                    continue
+                
+                # Align measured times with series data
+                try:
+                    aligned_series = series_windowed.reindex(measured_times, method='nearest', tolerance=pd.Timedelta(days=1))
+                    series_vals = aligned_series.dropna().values
+                    
+                    # Only keep pairs where both are available
+                    valid_indices = ~pd.isna(aligned_series.values)
+                    if np.any(valid_indices):
+                        measured_subset = measured_vals[valid_indices]
+                        series_subset = series_vals
+                        
+                        if len(measured_subset) >= 2 and len(series_subset) >= 2:
+                            series_stats = _measured_vs_series_stats(measured_subset, series_subset, series_name)
+                            measured_vs_series.update(series_stats)
+                except Exception:
+                    continue
+            
+            # Also compare against extras if available
+            if extras is not None:
+                for extra_name, extra_series in extras.items():
+                    if extra_series is None or extra_series.empty:
+                        continue
+                    
+                    extra_windowed = _apply_window_to_series(extra_series)
+                    if extra_windowed.empty:
+                        continue
+                    
+                    try:
+                        aligned_extra = extra_windowed.reindex(measured_times, method='nearest', tolerance=pd.Timedelta(days=1))
+                        extra_vals = aligned_extra.dropna().values
+                        
+                        valid_indices = ~pd.isna(aligned_extra.values)
+                        if np.any(valid_indices):
+                            measured_subset = measured_vals[valid_indices]
+                            
+                            if len(measured_subset) >= 2 and len(extra_vals) >= 2:
+                                extra_stats = _measured_vs_series_stats(measured_subset, extra_vals, f"extra_{extra_name}")
+                                measured_vs_series.update(extra_stats)
+                    except Exception:
+                        continue
+            
+            if measured_vs_series:
+                stats["measured_vs_series"] = measured_vs_series
+
     return stats
 
 
@@ -522,12 +742,10 @@ def format_stats_text(stats: Dict[str, object]) -> str:
                     lines.append(f"{kk} = {lw[kk] * 100:.1f}%")
                 elif kk in {"median_lag_days", "IQR_lag_days", "n"}:
                     if kk == "n":
-                        print("Trying to calc. n", lw[kk])
                         lines.append(f"{kk} = {int(lw[kk])}")
                     else:
                         lines.append(f"{kk} = {lw[kk]:.3g}")
                 elif kk in {"NSE"}:
-                    print("Trying to calc. NSE for local window lag" + kk, lw[kk])  
                     lines.append(f"{kk} = {lw[kk]:.3f}")
                 else:
                     lines.append(f"{kk} = {lw[kk]:.3g}")
@@ -539,6 +757,102 @@ def format_stats_text(stats: Dict[str, object]) -> str:
             r = ed.get("r")
             if isinstance(r, (int, float)) and np.isfinite(r):
                 lines.append(f"r (obs vs {name}) = {r:.3f}")
+
+    # Band deviation analysis
+    band_dev = stats.get("band_deviation", {}) or {}
+    if band_dev:
+        lines.append("<b>Band Analysis</b>")
+        
+        # Min-max band stats (stored with keys like "band_width_mean", "band_width_rel%")
+        if "band_width_mean" in band_dev:
+            width = band_dev["band_width_mean"]
+            if isinstance(width, (int, float)) and np.isfinite(width):
+                lines.append(f"Min-max width = {width:.3g}")
+        if "band_width_rel%" in band_dev:
+            rel_width = band_dev["band_width_rel%"]
+            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
+                lines.append(f"Min-max width (%) = {rel_width:.1f}%")
+        if "band_asymmetry" in band_dev:
+            asym = band_dev["band_asymmetry"]
+            if isinstance(asym, (int, float)) and np.isfinite(asym):
+                lines.append(f"Min-max asymmetry = {asym:.3f}")
+        if "band_rmse_vs_mean" in band_dev:
+            rmse = band_dev["band_rmse_vs_mean"]
+            if isinstance(rmse, (int, float)) and np.isfinite(rmse):
+                lines.append(f"Min-max RMSE vs mean = {rmse:.3g}")
+                
+        # Percentile band stats (stored with keys like "p50_band_width_mean", "p90_band_width_mean")
+        if "p50_band_width_mean" in band_dev:
+            width = band_dev["p50_band_width_mean"]
+            if isinstance(width, (int, float)) and np.isfinite(width):
+                lines.append(f"50% band width = {width:.3g}")
+        if "p90_band_width_mean" in band_dev:
+            width = band_dev["p90_band_width_mean"]
+            if isinstance(width, (int, float)) and np.isfinite(width):
+                lines.append(f"90% band width = {width:.3g}")
+        if "p50_band_width_rel%" in band_dev:
+            rel_width = band_dev["p50_band_width_rel%"]
+            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
+                lines.append(f"50% band width (%) = {rel_width:.1f}%")
+        if "p90_band_width_rel%" in band_dev:
+            rel_width = band_dev["p90_band_width_rel%"]
+            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
+                lines.append(f"90% band width (%) = {rel_width:.1f}%")
+
+    # Measured vs series comparisons
+    meas_vs = stats.get("measured_vs_series", {}) or {}
+    if meas_vs:
+        lines.append("<b>Measured vs All Series</b>")
+        
+        # Parse flat keys like "vs_min_r", "vs_p05_rmse", "vs_extra_external_flow_nse"
+        # Group by series name
+        series_groups = {}
+        for key, val in meas_vs.items():
+            if not key.startswith("vs_"):
+                continue
+            # Extract series name and metric
+            # Examples: vs_min_r -> min, r; vs_p05_rmse -> p05, rmse; vs_extra_external_flow_nse -> extra_external_flow, nse
+            parts = key[3:].split("_")  # Remove "vs_" prefix
+            if len(parts) >= 2:
+                metric = parts[-1]  # Last part is always the metric
+                series_name = "_".join(parts[:-1])  # Everything before last part is series name
+                if series_name not in series_groups:
+                    series_groups[series_name] = {}
+                series_groups[series_name][metric] = val
+        
+        # Define display order for series types
+        series_order = ["mean", "min", "max", "p05", "p25", "p50", "p75", "p95"]
+        
+        # Add external series at the end (they have "extra_" prefix)
+        for series_name in series_groups.keys():
+            if series_name not in series_order:
+                series_order.append(series_name)
+        
+        for series_name in series_order:
+            if series_name not in series_groups:
+                continue
+            series_stats = series_groups[series_name]
+            if not series_stats:
+                continue
+                
+            # Format series name for display
+            display_name = series_name
+            if series_name.startswith("p") and series_name[1:].isdigit():
+                display_name = f"{series_name[1:]}{series_name[0]}"  # p05 -> 05p
+            elif series_name.startswith("extra_"):
+                display_name = series_name[6:]  # Remove "extra_" prefix
+            
+            lines.append(f"<i>vs {display_name}:</i>")
+            
+            # Show key metrics
+            for metric in ["r", "rmse", "mae", "nse", "bias"]:
+                if metric in series_stats:
+                    val = series_stats[metric]
+                    if isinstance(val, (int, float)) and np.isfinite(val):
+                        if metric in {"r", "nse"}:
+                            lines.append(f"  {metric} = {val:.3f}")
+                        else:
+                            lines.append(f"  {metric} = {val:.3g}")
 
     # Join with HTML <br>
     return "<br>".join(lines)
