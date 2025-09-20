@@ -2029,18 +2029,27 @@ def fan_compare_simulations_dashboard(
                 if x0 is None or x1 is None:
                     return
                 # Compute comprehensive stats using the external module
-                stats = compute_stats_for_view(
-                    q_local,
-                    meas_list,
-                    window=(x0, x1),
-                    extras=extras_dict,
-                    compute_log=bool(cb_log_metrics.value),
-                    max_global_lag=int(sl_max_lag.value),
-                    local_window_ks=tuple(sorted(list(sel_local_K.value))) if sel_local_K.value else (),
-                    local_strategy="nearest",
-                    choose_best_lag_by=str(dd_lag_metric.value),
-                    band_data=_last.get("band_data", {}),
-                )
+                try:
+                    stats = compute_stats_for_view(
+                        q_local,
+                        meas_list,
+                        window=(x0, x1),
+                        extras=extras_dict,
+                        compute_log=bool(cb_log_metrics.value),
+                        max_global_lag=int(sl_max_lag.value),
+                        local_window_ks=tuple(sorted(list(sel_local_K.value))) if sel_local_K.value else (),
+                        local_strategy="nearest",
+                        choose_best_lag_by=str(dd_lag_metric.value),
+                        band_data=_last.get("band_data", {}),
+                    )
+                except Exception as e:
+                    # If stats computation fails, provide error details
+                    with out:
+                        print(f"Stats computation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    stats_html.value = f"Stats computation error: {e}"
+                    return
                 html_text = format_stats_text(stats)
                 try:
                     stats_html.value = html_text

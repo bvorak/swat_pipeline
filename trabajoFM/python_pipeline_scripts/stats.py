@@ -409,6 +409,88 @@ def _local_window_match(
     return out
 
 
+def _calculate_data_usage(
+    q_df: pd.DataFrame,
+    measured_series: Sequence[pd.Series],
+    *,
+    window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
+) -> Dict[str, Union[int, float]]:
+    """Calculate statistics on data usage/filtering for transparency.
+    
+    Returns percentage of available days actually used in calculations.
+    """
+    usage_stats = {}
+    
+    if q_df is None or q_df.empty or not measured_series:
+        return {
+            "sim_days_total": 0,
+            "sim_days_used": 0,
+            "sim_usage_percent": 0.0,
+            "measured_days_total": 0,
+            "measured_days_used": 0,
+            "measured_usage_percent": 0.0,
+            "paired_days_used": 0,
+            "paired_usage_percent": 0.0,
+        }
+    
+    # Calculate simulation data availability
+    sim_total_days = len(q_df.index)
+    sim_finite_days = q_df.notna().any(axis=1).sum()  # Days with any finite simulation data
+    
+    # Apply window filtering to simulation data
+    if window is not None:
+        x0, x1 = window
+        q_windowed = q_df.loc[(q_df.index >= x0) & (q_df.index <= x1)]
+        sim_windowed_days = len(q_windowed.index)
+        sim_windowed_finite = q_windowed.notna().any(axis=1).sum()
+    else:
+        sim_windowed_days = sim_total_days
+        sim_windowed_finite = sim_finite_days
+    
+    # Calculate measured data availability
+    measured_total_days = 0
+    measured_finite_days = 0
+    measured_windowed_days = 0
+    measured_windowed_finite = 0
+    
+    for s in measured_series:
+        if s is None or s.empty:
+            continue
+        measured_total_days = max(measured_total_days, len(s.index))
+        measured_finite_days = max(measured_finite_days, s.notna().sum())
+        
+        # Apply window filtering
+        if window is not None:
+            x0, x1 = window
+            s_windowed = s.loc[(s.index >= x0) & (s.index <= x1)]
+            measured_windowed_days = max(measured_windowed_days, len(s_windowed.index))
+            measured_windowed_finite = max(measured_windowed_finite, s_windowed.notna().sum())
+        else:
+            measured_windowed_days = measured_total_days
+            measured_windowed_finite = measured_finite_days
+    
+    # Calculate paired data (used in actual statistics)
+    Y, M, _ = _collect_pairs(q_df, measured_series, window=window)
+    paired_days_used = int(Y.size)
+    
+    return {
+        "sim_days_total": int(sim_total_days),
+        "sim_days_finite": int(sim_finite_days),
+        "sim_days_windowed": int(sim_windowed_days),
+        "sim_days_windowed_finite": int(sim_windowed_finite),
+        "sim_usage_percent": float(sim_windowed_finite / sim_total_days * 100) if sim_total_days > 0 else 0.0,
+        
+        "measured_days_total": int(measured_total_days),
+        "measured_days_finite": int(measured_finite_days),
+        "measured_days_windowed": int(measured_windowed_days),
+        "measured_days_windowed_finite": int(measured_windowed_finite),
+        "measured_usage_percent": float(measured_windowed_finite / measured_total_days * 100) if measured_total_days > 0 else 0.0,
+        
+        "paired_days_used": paired_days_used,
+        "paired_usage_percent": float(paired_days_used / max(sim_total_days, measured_total_days) * 100) if max(sim_total_days, measured_total_days) > 0 else 0.0,
+    }
+
+
 def compute_stats_for_view(
     q_df: pd.DataFrame,
     measured_series: Sequence[pd.Series],
@@ -437,6 +519,11 @@ def compute_stats_for_view(
     Y, M, qdict = _collect_pairs(q_df, measured_series, window=window)
     n = int(Y.size)
     stats["n"] = n
+    
+    # Calculate data usage statistics
+    data_usage = _calculate_data_usage(q_df, measured_series, window=window)
+    stats["data_usage"] = data_usage
+    
     if n == 0:
         stats["same_day"] = {}
         return stats
@@ -675,6 +762,19 @@ def format_stats_text(stats: Dict[str, object]) -> str:
     lines: List[str] = []
     lines.append("<b>Stats (view)</b>")
     lines.append(f"n = {n}")
+    
+    # Add data usage information
+    data_usage = stats.get("data_usage", {}) or {}
+    if data_usage:
+        paired_pct = data_usage.get("paired_usage_percent", 0.0)
+        sim_pct = data_usage.get("sim_usage_percent", 0.0)
+        meas_pct = data_usage.get("measured_usage_percent", 0.0)
+        
+        lines.append(f"data usage = {paired_pct:.1f}% of available days")
+        if data_usage.get("sim_days_total", 0) > 0:
+            lines.append(f"sim coverage = {sim_pct:.1f}% ({data_usage.get('sim_days_windowed_finite', 0)}/{data_usage.get('sim_days_total', 0)} days)")
+        if data_usage.get("measured_days_total", 0) > 0:
+            lines.append(f"measured coverage = {meas_pct:.1f}% ({data_usage.get('measured_days_windowed_finite', 0)}/{data_usage.get('measured_days_total', 0)} days)")
 
     same = stats.get("same_day", {}) or {}
     if same:
