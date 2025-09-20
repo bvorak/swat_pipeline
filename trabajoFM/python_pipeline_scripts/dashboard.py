@@ -1159,11 +1159,23 @@ def fan_compare_simulations_dashboard(
                 fill="tonexty", fillcolor=rgba(0.18),
                 name="min-max", showlegend=True, hoverinfo="skip"
             ))
+            # Create customdata with min, mean, max and their formatted units
+            mean_data = _make_customdata(vmean)
+            min_data = _make_customdata(vmin)  
+            max_data = _make_customdata(vmax)
+            
+            # Combine into 6-column customdata: [min_val, min_unit, mean_val, mean_unit, max_val, max_unit]
+            combined_customdata = np.column_stack([
+                min_data[:, 0], min_data[:, 1],   # min value, min unit
+                mean_data[:, 0], mean_data[:, 1], # mean value, mean unit  
+                max_data[:, 0], max_data[:, 1]    # max value, max unit
+            ])
+            
             fig.add_trace(go.Scatter(
                 x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
                 name="mean",
-                customdata=_make_customdata(vmean),
-                hovertemplate=("mean: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>"),
+                customdata=combined_customdata,
+                hovertemplate=("mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<br>max: %{customdata[4]:.4g}%{customdata[5]}<extra></extra>"),
             ))
 
         # Optional independent overlays: plot each as its own line, not part of fan
@@ -1571,6 +1583,7 @@ def fan_compare_simulations_dashboard(
                     fig.update_layout(yaxis2=dict(
                         title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
                         autorange=False, range=y2_range, title_standoff=20, automargin=True,
+                        title_font_color="#1f77b4"
                     ))
                     # Single dotted blue line, with legend label requested
                     fig.add_trace(go.Scatter(
@@ -1646,6 +1659,7 @@ def fan_compare_simulations_dashboard(
                     fig.update_layout(yaxis2=dict(
                         title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
                         autorange=False, title_standoff=20, automargin=True,
+                        title_font_color="#1f77b4"
                     ))
                     fig.add_trace(go.Scatter(
                         x=_to_plotly_x(s_swat_mean.index), y=s_swat_mean.values, mode="lines",
@@ -1685,6 +1699,7 @@ def fan_compare_simulations_dashboard(
                 fig.update_layout(yaxis2=dict(
                     title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y2_range, title_standoff=20, automargin=True,
+                    title_font_color="#1f77b4"
                 ))
         except Exception:
             pass
@@ -1783,8 +1798,8 @@ def fan_compare_simulations_dashboard(
                 y3_range = [e_min, e_max]
                 fig.update_layout(yaxis3=dict(
                     title="Erosion (SED_IN - SED_OUT)", overlaying='y', side='right', showgrid=False,
-                    autorange=False, range=y3_range, anchor='x', title_standoff=60, automargin=True,
-                    ticklabelposition='inside', ticks='inside'
+                    autorange=False, range=y3_range, anchor='x', title_standoff=100, automargin=True,
+                    ticklabelposition='inside', ticks='inside', title_font_color="#8c564b"
                 ))
                 fig.add_trace(go.Scatter(
                     x=_to_plotly_x(s_ero_mean.index), y=s_ero_mean.values, mode="lines",
