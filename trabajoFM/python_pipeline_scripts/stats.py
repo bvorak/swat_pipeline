@@ -97,6 +97,118 @@ def _medae(y: np.ndarray, m: np.ndarray) -> float:
 # New band deviation metrics
 # -----------------------------
 
+def _index_of_agreement(y: np.ndarray, m: np.ndarray) -> float:
+    "Willmott index of agreement (d)."
+    y, m = _finite_pairs(y, m)
+    if y.size == 0:
+        return float('nan')
+    o_bar = np.nanmean(y)
+    denom = np.nansum((np.abs(m - o_bar) + np.abs(y - o_bar)) ** 2)
+    if not np.isfinite(denom) or denom == 0:
+        return float('nan')
+    num = np.nansum((y - m) ** 2)
+    return float(1.0 - num / denom)
+
+
+def _index_of_agreement_from_series(y: np.ndarray, m: np.ndarray, *, scale: Optional[float] = None) -> float:
+    y, m = _finite_pairs(y, m)
+    if y.size == 0:
+        return float('nan')
+    if scale is not None:
+        if not np.isfinite(scale) or scale == 0:
+            return float('nan')
+        y = y / scale
+        m = m / scale
+    return _index_of_agreement(y, m)
+
+
+def _index_of_agreement_log(y: np.ndarray, m: np.ndarray) -> float:
+    y, m = _finite_pairs(y, m)
+    mask = (y > 0) & (m > 0) & np.isfinite(y) & np.isfinite(m)
+    if not np.any(mask):
+        return float('nan')
+    y_log = np.log10(y[mask])
+    m_log = np.log10(m[mask])
+    return _index_of_agreement(y_log, m_log)
+
+
+def _index_of_agreement_relative(y: np.ndarray, m: np.ndarray) -> float:
+    "Relative form using absolute-mean scaling of observations."
+    y, m = _finite_pairs(y, m)
+    if y.size == 0:
+        return float('nan')
+    mean_abs = np.nanmean(np.abs(y))
+    if not np.isfinite(mean_abs) or mean_abs == 0:
+        return float('nan')
+    return _index_of_agreement_from_series(y, m, scale=mean_abs)
+
+
+def _nse_relative(y: np.ndarray, m: np.ndarray) -> float:
+    y, m = _finite_pairs(y, m)
+    if y.size == 0:
+        return float('nan')
+    mean_abs = np.nanmean(np.abs(y))
+    if not np.isfinite(mean_abs) or mean_abs == 0:
+        return float('nan')
+    y_norm = y / mean_abs
+    m_norm = m / mean_abs
+    return _nse(y_norm, m_norm)
+
+
+def _nse_log(y: np.ndarray, m: np.ndarray) -> float:
+    y, m = _finite_pairs(y, m)
+    mask = (y > 0) & (m > 0) & np.isfinite(y) & np.isfinite(m)
+    if not np.any(mask):
+        return float('nan')
+    y_log = np.log10(y[mask])
+    m_log = np.log10(m[mask])
+    return _nse(y_log, m_log)
+
+
+def _rsr(y: np.ndarray, m: np.ndarray) -> float:
+    "RSR = RMSE / SD_obs (population form consistent with Moriasi eq. 3)."
+    y, m = _finite_pairs(y, m)
+    if y.size == 0:
+        return float('nan')
+    sse = np.nansum((y - m) ** 2)
+    o_bar = np.nanmean(y)
+    sso = np.nansum((y - o_bar) ** 2)
+    if not np.isfinite(sso) or sso == 0:
+        return float('nan')
+    return float(np.sqrt(sse) / np.sqrt(sso))
+
+
+def _distribution_summary(values: np.ndarray) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {
+            "mean": float('nan'),
+            "median": float('nan'),
+            "p05": float('nan'),
+            "p25": float('nan'),
+            "p50": float('nan'),
+            "p75": float('nan'),
+            "p95": float('nan'),
+            "sd": float('nan'),
+            "var": float('nan'),
+            "n": 0.0,
+        }
+    out = {
+        "mean": float(np.nanmean(arr)),
+        "median": float(np.nanmedian(arr)),
+        "p05": float(np.nanpercentile(arr, 5)),
+        "p25": float(np.nanpercentile(arr, 25)),
+        "p50": float(np.nanpercentile(arr, 50)),
+        "p75": float(np.nanpercentile(arr, 75)),
+        "p95": float(np.nanpercentile(arr, 95)),
+        "sd": float(np.nanstd(arr)),
+        "var": float(np.nanvar(arr)),
+        "n": float(arr.size),
+    }
+    return out
+
+
 def _band_deviation_stats(mean_series: np.ndarray, min_series: np.ndarray, max_series: np.ndarray) -> Dict[str, float]:
     """Compute statistics describing how much the min/max bands deviate around the mean.
     
@@ -185,21 +297,35 @@ def _normalize_band_groups(band_data: Optional[Dict[str, object]]) -> Dict[str, 
     return {g: bands for g, bands in normalized.items() if bands}
 
 
+
 def _measured_vs_series_stats(measured: np.ndarray, target_series: np.ndarray, series_name: str) -> Dict[str, float]:
     """Compute comprehensive stats comparing measured data against any target time series."""
     y, m = _finite_pairs(measured, target_series)
     if y.size < 2:
-        return {f"vs_{series_name}_r": float("nan"), f"vs_{series_name}_rmse": float("nan"), 
-                f"vs_{series_name}_mae": float("nan"), f"vs_{series_name}_nse": float("nan"),
-                f"vs_{series_name}_bias": float("nan")}
-    
+        return {
+            f"vs_{series_name}_r": float("nan"),
+            f"vs_{series_name}_rmse": float("nan"),
+            f"vs_{series_name}_mae": float("nan"),
+            f"vs_{series_name}_nse": float("nan"),
+            f"vs_{series_name}_NSE_rel": float("nan"),
+            f"vs_{series_name}_d": float("nan"),
+            f"vs_{series_name}_d_rel": float("nan"),
+            f"vs_{series_name}_RSR": float("nan"),
+            f"vs_{series_name}_bias": float("nan"),
+        }
+
     return {
         f"vs_{series_name}_r": _pearson_r(y, m),
-        f"vs_{series_name}_rmse": _rmse(y, m), 
+        f"vs_{series_name}_rmse": _rmse(y, m),
         f"vs_{series_name}_mae": _mae(y, m),
         f"vs_{series_name}_nse": _nse(y, m),
+        f"vs_{series_name}_NSE_rel": _nse_relative(y, m),
+        f"vs_{series_name}_d": _index_of_agreement(y, m),
+        f"vs_{series_name}_d_rel": _index_of_agreement_relative(y, m),
+        f"vs_{series_name}_RSR": _rsr(y, m),
         f"vs_{series_name}_bias": float(np.nanmean(y - m)),  # obs - pred
     }
+
 
 
 # -----------------------------
@@ -574,14 +700,46 @@ def compute_stats_for_view(
         "Bias(obs-pred)": bias,
         "PBIAS%": pbias,
         "NSE": nse,
+        "NSE_rel": _nse_relative(Y, M),
         "KGE": kge,
         "MedAE": medae,
+        "d": _index_of_agreement(Y, M),
+        "d_rel": _index_of_agreement_relative(Y, M),
+        "RSR": _rsr(Y, M),
     }
     if "p25" in qdict and "p75" in qdict:
         same_day["coverage50"] = _coverage(Y, qdict["p25"], qdict["p75"])  # fraction
     if "p05" in qdict and "p95" in qdict:
         same_day["coverage90"] = _coverage(Y, qdict["p05"], qdict["p95"])  # fraction
     stats["same_day"] = same_day
+
+    paired_summary = {
+        "observed": _distribution_summary(Y),
+        "predicted": _distribution_summary(M),
+    }
+    full_pred_series = None
+    if q_df is not None and "p50" in q_df.columns:
+        full_pred_series = q_df["p50"].copy()
+        if window is not None:
+            x0, x1 = window
+            full_pred_series = full_pred_series.loc[(full_pred_series.index >= x0) & (full_pred_series.index <= x1)]
+        full_pred_series = full_pred_series.dropna()
+    observed_full_values: list[float] = []
+    for _s in measured_series:
+        if _s is None or _s.empty:
+            continue
+        ss = _s
+        if window is not None:
+            x0, x1 = window
+            ss = ss.loc[(ss.index >= x0) & (ss.index <= x1)]
+        observed_full_values.extend(ss.dropna().to_numpy(dtype=float).tolist())
+    distribution_block = {
+        "paired": paired_summary,
+        "observed_full": _distribution_summary(np.array(observed_full_values, dtype=float)),
+        "predicted_full": _distribution_summary(full_pred_series.to_numpy(dtype=float)) if isinstance(full_pred_series, pd.Series) and not full_pred_series.empty else _distribution_summary(np.array([], dtype=float)),
+    }
+    stats["distribution_summary"] = distribution_block
+
 
     # Log-space metrics (base 10) for positive values
     if compute_log:
@@ -595,6 +753,8 @@ def compute_stats_for_view(
                 "RMSElog10": _rmse(ylog, mlog),
                 "MAElog10": _mae(ylog, mlog),
                 "NSElog10": _nse(ylog, mlog),
+                "NSE_log": _nse_log(Y, M),
+                "d_log": _index_of_agreement_log(Y, M),
                 "n_pos": int(mask_pos.sum()),
             }
 
@@ -657,7 +817,6 @@ def compute_stats_for_view(
     # NEW: Band deviation analysis
     if band_groups:
         band_stats = {}
-
         windowed_groups = {
             str(group_key): {
                 str(band_key): _apply_window_to_series(series)
@@ -666,9 +825,7 @@ def compute_stats_for_view(
             }
             for group_key, bands in band_groups.items()
         }
-
         ensemble_bands = windowed_groups.get("ensemble", {})
-
         if all(k in ensemble_bands for k in ["mean", "min", "max"]):
             mean_series = ensemble_bands["mean"]
             min_series = ensemble_bands["min"]
@@ -682,7 +839,6 @@ def compute_stats_for_view(
                     min_vals = min_series.reindex(idx_common).to_numpy(dtype=float)
                     max_vals = max_series.reindex(idx_common).to_numpy(dtype=float)
                     band_stats.update(_band_deviation_stats(mean_vals, min_vals, max_vals))
-
         if all(k in ensemble_bands for k in ["mean", "p25", "p75"]):
             mean_series = ensemble_bands["mean"]
             p25_series = ensemble_bands["p25"]
@@ -704,7 +860,6 @@ def compute_stats_for_view(
                             p95_vals = p95_series.reindex(idx_common).to_numpy(dtype=float)
                     perc_stats = _percentile_band_deviation_stats(mean_vals, p25_vals, p75_vals, p05_vals, p95_vals)
                     band_stats.update(perc_stats)
-
         if band_stats:
             stats["band_deviation"] = band_stats
 
@@ -730,17 +885,14 @@ def compute_stats_for_view(
             for t, val in ss.dropna().items():
                 all_measured_values.append(float(val))
                 all_measured_times.append(t)
-
         if not all_measured_values:
             _record_cov_debug('global', 'no measured data available after filtering for coverage analysis')
         else:
             measured_times = pd.Index(all_measured_times)
             measured_vals = np.array(all_measured_values, dtype=float)
             tol = pd.Timedelta(days=1)
-
             if band_groups and windowed_groups:
                 fraction_lookup = {"p05": 0.05, "p25": 0.25, "p50": 0.50, "p75": 0.75, "p95": 0.95}
-
                 def _resolve_band_series(label_hint: str, bands_dict: Dict[str, pd.Series], key: str) -> Optional[pd.Series]:
                     series = bands_dict.get(key)
                     if isinstance(series, pd.Series) and not series.empty:
@@ -759,7 +911,6 @@ def compute_stats_for_view(
                     bands_dict[key] = approx
                     _record_cov_debug(label_hint, f"approximated {key} using min/max (frac={frac:.2f})")
                     return approx
-
                 for group_key, bands in windowed_groups.items():
                     if not isinstance(bands, dict) or not bands:
                         _record_cov_debug(group_key, 'no band series present')
@@ -779,7 +930,6 @@ def compute_stats_for_view(
                         _record_cov_debug(group_key, 'no overlapping measured points with center series')
                         continue
                     label = center_key if group_key == 'ensemble' else f"{group_key}_{center_key}"
-
                     def _add_coverage(lo_key: str, hi_key: str, suffix: str) -> None:
                         lo_series = bands.get(lo_key)
                         if not isinstance(lo_series, pd.Series) or lo_series.empty:
@@ -805,13 +955,11 @@ def compute_stats_for_view(
                             _record_cov_debug(label, f'{suffix}: coverage={cov:.3f} over {count} points')
                         else:
                             _record_cov_debug(label, f'skip {suffix}: coverage returned non-finite value')
-
                     _add_coverage('p25', 'p75', 'coverage50')
                     _add_coverage('p05', 'p95', 'coverage90')
                     _add_coverage('min', 'max', 'coverage_minmax')
             else:
                 _record_cov_debug('global', 'no band data available for coverage analysis')
-
             if coverage_entries:
                 for label, metrics in coverage_entries.items():
                     for suffix, value in metrics.items():
@@ -866,7 +1014,6 @@ def format_stats_text(stats: Dict[str, object]) -> str:
                 return f"{k} = {float(v) * 100:.1f}%"
             # Error metrics and bias
             return f"{k} = {float(v):.3g}"
-
         lines.append("<b>Same-day</b>")
         order = ["r", "R2", "MAE", "RMSE", "Bias(obs-pred)", "PBIAS%", "NSE", "KGE", "MedAE", "coverage50", "coverage90"]
         for key in order:
@@ -885,7 +1032,7 @@ def format_stats_text(stats: Dict[str, object]) -> str:
     logd = stats.get("log_space", {}) or {}
     if logd:
         lines.append("<b>Log-space</b>")
-        for key in ["r_log", "R2_log", "MAElog10", "RMSElog10", "NSElog10", "n_pos"]:
+        for key in ["r_log", "R2_log", "MAElog10", "RMSElog10", "NSElog10", "NSE_log", "d_log", "n_pos"]:
             if key in logd:
                 val = logd[key]
                 if key == "n_pos":
@@ -897,6 +1044,35 @@ def format_stats_text(stats: Dict[str, object]) -> str:
                     else:
                         if isinstance(val, (int, float)) and np.isfinite(val):
                             lines.append(f"{key} = {float(val):.3g}")
+
+    dist_summary = stats.get("distribution_summary", {}) or {}
+    if dist_summary:
+        lines.append("<b>Distribution Summary</b>")
+        paired = dist_summary.get("paired", {}) or {}
+        for label, summary in [("Observed (paired)", paired.get("observed")), ("Predicted (paired)", paired.get("predicted"))]:
+            if isinstance(summary, dict):
+                lines.append(f"{label}:")
+                for key in ["mean", "median", "p05", "p25", "p50", "p75", "p95", "sd", "var", "n"]:
+                    val = summary.get(key)
+                    if isinstance(val, (int, float)) and np.isfinite(val):
+                        if key == "n":
+                            lines.append(f"  {key} = {int(val)}")
+                        else:
+                            lines.append(f"  {key} = {val:.3g}")
+        obs_full = dist_summary.get("observed_full")
+        if isinstance(obs_full, dict):
+            lines.append("Observed (full series):")
+            for key in ["mean", "median", "sd", "var"]:
+                val = obs_full.get(key)
+                if isinstance(val, (int, float)) and np.isfinite(val):
+                    lines.append(f"  {key} = {val:.3g}")
+        pred_full = dist_summary.get("predicted_full")
+        if isinstance(pred_full, dict):
+            lines.append("Predicted (full series):")
+            for key in ["mean", "median", "sd", "var"]:
+                val = pred_full.get(key)
+                if isinstance(val, (int, float)) and np.isfinite(val):
+                    lines.append(f"  {key} = {val:.3g}")
 
     gl = stats.get("global_lag", {}) or {}
     if gl:
@@ -999,28 +1175,39 @@ def format_stats_text(stats: Dict[str, object]) -> str:
             if series_name not in series_order:
                 series_order.append(series_name)
         
-        metric_defs = [
+        metric_defs_numeric = [
+            ("r", "r"),
+            ("nse", "NSE"),
+            ("NSE_rel", "NSE (relative)"),
+            ("d", "Index of agreement"),
+            ("d_rel", "Index of agreement (relative)"),
+            ("RSR", "RSR"),
+            ("rmse", "RMSE"),
+            ("mae", "MAE"),
+            ("bias", "Bias (obs-pred)"),
+        ]
+        metric_defs_coverage = [
             ("coverage50", "within 50% band"),
             ("coverage90", "within 90% band"),
             ("coverage_minmax", "within min-max envelope"),
         ]
-
         for series_name in series_order:
             if series_name not in series_groups:
                 continue
             series_stats = series_groups[series_name]
             if not series_stats:
                 continue
-
             display_name = series_name
             if series_name.startswith("p") and series_name[1:].isdigit():
                 display_name = f"{series_name[1:]}{series_name[0]}"  # p05 -> 05p
             elif series_name.startswith("extra_"):
                 display_name = series_name[6:]
-
             lines.append(f"<i>vs {display_name}:</i>")
-
-            for metric, label_text in metric_defs:
+            for metric, label_text in metric_defs_numeric:
+                val = series_stats.get(metric)
+                if isinstance(val, (int, float)) and np.isfinite(val):
+                    lines.append(f"  {label_text} = {val:.3g}")
+            for metric, label_text in metric_defs_coverage:
                 val = series_stats.get(metric)
                 if isinstance(val, (int, float)) and np.isfinite(val):
                     lines.append(f"  {label_text} = {val * 100:.1f}%")
