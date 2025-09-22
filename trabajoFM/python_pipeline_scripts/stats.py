@@ -209,6 +209,26 @@ def _distribution_summary(values: np.ndarray) -> Dict[str, float]:
     return out
 
 
+
+def _duration_curve_from_series(series: pd.Series, levels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    if not isinstance(series, pd.Series):
+        return levels, np.full_like(levels, np.nan, dtype=float)
+    arr = series.to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return levels, np.full_like(levels, np.nan, dtype=float)
+    values = np.percentile(arr, 100 - levels)
+    return levels, values
+
+
+def _empirical_exceedance(values: Iterable[float]) -> Tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(list(values), dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.array([]), np.array([])
+    arr_sorted = np.sort(arr)[::-1]
+    exceed = (np.arange(1, arr_sorted.size + 1) / (arr_sorted.size + 1)) * 100.0
+    return exceed, arr_sorted
 def _band_deviation_stats(mean_series: np.ndarray, min_series: np.ndarray, max_series: np.ndarray) -> Dict[str, float]:
     """Compute statistics describing how much the min/max bands deviate around the mean.
     
@@ -1277,10 +1297,13 @@ def build_fit_diagnostics(
     template: str = "plotly_white",
     title: Optional[str] = None,
     lag_hist_K: int = 1,
+    compare_mode: str = "load",
 ) -> Dict[str, go.Figure]:
     """Build a small set of diagnostic figures to evaluate fit and error structure.
 
-    Returns a dict of Plotly figures: keys include 'obs_vs_pred', 'resid_hist', 'resid_vs_pred', 'lag_hist'.
+    Returns a dict of Plotly figures: keys include 'obs_vs_pred', 'resid_hist', 'resid_vs_pred', 'lag_hist', 'load_duration_curve'.
+
+    compare_mode controls whether load-oriented diagnostics are included (set to "load" to add the load duration curve).
     """
     Y, M, qdict = _collect_pairs(q_df, measured_series, window=window)
     figs: Dict[str, go.Figure] = {}
@@ -1344,6 +1367,91 @@ def build_fit_diagnostics(
             fig_lag.update_layout(title=f"Local matching lags (K={int(lag_hist_K)})", xaxis_title="Lag (days)", yaxis_title="Count")
             figs["lag_hist"] = fig_lag
 
+    if compare_mode == "load":
+        try:
+            levels = np.linspace(1.0, 99.0, 99)
+            x0 = x1 = None
+            if window is not None:
+                x0, x1 = window
+            median_series = None
+            if q_df is not None and "p50" in q_df.columns:
+                median_series = q_df["p50"].copy()
+                if window is not None:
+                    median_series = median_series.loc[(median_series.index >= x0) & (median_series.index <= x1)]
+            if isinstance(median_series, pd.Series):
+                median_series = median_series.dropna()
+            if isinstance(median_series, pd.Series) and not median_series.empty:
+                fig_ldc = go.Figure(layout=dict(template=template))
+                x_median, y_median = _duration_curve_from_series(median_series, levels)
+                band_added = False
+                if q_df is not None and all(col in q_df.columns for col in ("p05", "p95")):
+                    p95_series = q_df["p95"].copy()
+                    p05_series = q_df["p05"].copy()
+                    if window is not None:
+                        p95_series = p95_series.loc[(p95_series.index >= x0) & (p95_series.index <= x1)]
+                        p05_series = p05_series.loc[(p05_series.index >= x0) & (p05_series.index <= x1)]
+                    x_band, y_p95 = _duration_curve_from_series(p95_series, levels)
+                    _, y_p05 = _duration_curve_from_series(p05_series, levels)
+                    if np.any(np.isfinite(y_p95)) and np.any(np.isfinite(y_p05)):
+                        fig_ldc.add_trace(go.Scatter(
+                            x=x_band,
+                            y=y_p95,
+                            mode="lines",
+                            line=dict(color="rgba(31,119,180,0.35)", width=0.5),
+                            name="Model p95",
+                            showlegend=False,
+                            hoverinfo="skip",
+                        ))
+                        fig_ldc.add_trace(go.Scatter(
+                            x=x_band,
+                            y=y_p05,
+                            mode="lines",
+                            line=dict(color="rgba(31,119,180,0.35)", width=0.5),
+                            fill="tonexty",
+                            fillcolor="rgba(31,119,180,0.2)",
+                            name="Model 90% band",
+                            hoverinfo="skip",
+                        ))
+                        band_added = True
+                if np.any(np.isfinite(y_median)):
+                    fig_ldc.add_trace(go.Scatter(
+                        x=x_median,
+                        y=y_median,
+                        mode="lines",
+                        line=dict(color="black", width=2),
+                        name="Model median",
+                    ))
+                observed_values: list[float] = []
+                for s in measured_series:
+                    if s is None or not isinstance(s, pd.Series) or s.empty:
+                        continue
+                    ss = s
+                    if window is not None:
+                        ss = ss.loc[(ss.index >= x0) & (ss.index <= x1)]
+                    observed_values.extend(ss.dropna().to_numpy(dtype=float).tolist())
+                obs_exceed, obs_vals = _empirical_exceedance(observed_values)
+                if obs_exceed.size:
+                    fig_ldc.add_trace(go.Scatter(
+                        x=obs_exceed,
+                        y=obs_vals,
+                        mode="markers",
+                        name="Observed",
+                        marker=dict(color="#d62728", size=8, opacity=0.85, line=dict(width=0.5, color="#333")),
+                    ))
+                if np.any(np.isfinite(y_median)) or band_added or obs_exceed.size:
+                    ldc_title = "Load duration curve"
+                    if title:
+                        ldc_title = f"{title} - Load duration curve"
+                    fig_ldc.update_layout(
+                        title=ldc_title,
+                        xaxis=dict(title="Exceedance probability (%)", autorange="reversed", range=[0, 100]),
+                        yaxis=dict(title="Load"),
+                        legend=dict(orientation="h", y=-0.15),
+                        margin=dict(l=60, r=20, t=60, b=80),
+                    )
+                    figs["load_duration_curve"] = fig_ldc
+        except Exception:
+            pass
     return figs
 
 
@@ -1378,6 +1486,7 @@ def evaluate_fit(
     local_window_ks: Sequence[int] = (1, 2),
     local_strategy: str = "nearest",
     choose_best_lag_by: str = "r",
+    compare_mode: str = "load",
 ) -> Dict[str, object]:
     """Build quantiles and measured series, then compute stats and diagnostics.
 
@@ -1529,6 +1638,7 @@ def evaluate_fit(
         template=template,
         title=f"Diagnostics: {var} (Reach {reach})",
         lag_hist_K=int(local_window_ks[0]) if local_window_ks else 1,
+        compare_mode=compare_mode,
     )
 
     return {
