@@ -207,6 +207,7 @@ def fan_compare_simulations_dashboard(
         style=dict(button_width="160px"),
     )
     cb_autoscale_y_live = widgets.Checkbox(value=True, description="Auto-scale Y on zoom")
+    cb_range_slider = widgets.Checkbox(value=True, description="Show range slider")
     cb_show_names_in_tooltip = widgets.Checkbox(value=False, description="Names in tooltip")
 
     # Measured controls
@@ -653,6 +654,8 @@ def fan_compare_simulations_dashboard(
             cb_autoscale_y_live.value = bool(ui_defaults.get("autoscale_y_live"))
         if isinstance(ui_defaults.get("show_names_in_tooltip"), bool):
             cb_show_names_in_tooltip.value = bool(ui_defaults.get("show_names_in_tooltip"))
+        if isinstance(ui_defaults.get("range_slider"), bool):
+            cb_range_slider.value = bool(ui_defaults.get("range_slider"))
         if isinstance(ui_defaults.get("show_diags"), bool):
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
         # Stats controls
@@ -1332,6 +1335,8 @@ def fan_compare_simulations_dashboard(
             sufficient_data = data_count >= min_data_threshold
 
             # Create percentile arrays with NaN where insufficient data
+            min_vals = np.full(arr.shape[0], np.nan)
+            max_vals = np.full(arr.shape[0], np.nan)
             p05_vals = np.full(arr.shape[0], np.nan)
             p25_vals = np.full(arr.shape[0], np.nan)
             p50_vals = np.full(arr.shape[0], np.nan)
@@ -1342,6 +1347,8 @@ def fan_compare_simulations_dashboard(
             # Only compute where we have sufficient data
             if np.any(sufficient_data):
                 sufficient_indices = np.where(sufficient_data)[0]
+                min_vals[sufficient_data] = np.nanmin(arr[sufficient_data, :], axis=1)
+                max_vals[sufficient_data] = np.nanmax(arr[sufficient_data, :], axis=1)
                 p05_vals[sufficient_data] = q[5][sufficient_data]
                 p25_vals[sufficient_data] = q[25][sufficient_data]
                 p50_vals[sufficient_data] = q[50][sufficient_data]
@@ -1352,6 +1359,8 @@ def fan_compare_simulations_dashboard(
             # Create band data series only for time points with sufficient data
             if np.any(sufficient_data):
                 valid_indices = aligned_df.index[sufficient_data]
+                ensemble_band["min"] = pd.Series(min_vals[sufficient_data], index=valid_indices, name="min")
+                ensemble_band["max"] = pd.Series(max_vals[sufficient_data], index=valid_indices, name="max")
                 ensemble_band["p05"] = pd.Series(p05_vals[sufficient_data], index=valid_indices, name="p05")
                 ensemble_band["p25"] = pd.Series(p25_vals[sufficient_data], index=valid_indices, name="p25")
                 ensemble_band["p50"] = pd.Series(p50_vals[sufficient_data], index=valid_indices, name="p50")
@@ -2139,21 +2148,24 @@ def fan_compare_simulations_dashboard(
         # Use ASCII hyphen in title to avoid encoding issues
         mode_label = ("Conc mg/L" if is_conc_mode else "Load kg/day")
         title_text = f"{var} - Reach {dd_reach.value} ({freq_str}, {method}) [{mode_label}]" + ("  " + chem_labels[0] if chem_labels else "")
+        slider_visible = bool(cb_range_slider.value)
+        bottom_margin = 150 if slider_visible else 110
+        title_y = -0.22 if slider_visible else -0.16
         fig.update_layout(
             title_text=None,
-            xaxis_title="Date", yaxis_title=var,
+            xaxis_title=None, yaxis_title=var,
             hovermode="x unified",
             hoverlabel=dict(namelength=-1, align="left", font_size=12, bgcolor="white"),
             legend=dict(orientation="h", y=1.02, x=0),
             xaxis=dict(
                 type="date",
-                rangeslider=dict(visible=True, thickness=0.08, bgcolor="#f6f6f6", bordercolor="#ddd", borderwidth=1),
+                rangeslider=dict(visible=slider_visible, thickness=0.08, bgcolor="#f6f6f6", bordercolor="#ddd", borderwidth=1),
                 tickformatstops=TICK_STOPS
             ),
-            margin=dict(l=60, r=20, t=50, b=150)
+            margin=dict(l=60, r=20, t=50, b=bottom_margin)
         )
         fig.add_annotation(
-            x=0.5, y=-0.22, xref='paper', yref='paper',
+            x=0.5, y=title_y, xref='paper', yref='paper',
             text=title_text,
             showarrow=False, xanchor='center', yanchor='top',
             font=dict(size=22, color='black')
@@ -2620,6 +2632,13 @@ def fan_compare_simulations_dashboard(
         for _chk in cb_extra.values():
             _chk.observe(_mark_stale, names="value")
 
+    def _on_range_slider_toggle(_):
+        try:
+            _compute_and_plot()
+        except Exception:
+            pass
+    cb_range_slider.observe(_on_range_slider_toggle, names="value")
+
     # Stats/dx toggles
     for _w in (dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags):
         try:
@@ -2629,7 +2648,7 @@ def fan_compare_simulations_dashboard(
 
     # Layout controls
     controls_left = widgets.VBox([num_sim, dd_var, tg_units, dd_method, dd_flow_source, lbl_units])
-    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip]
+    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider]
 
     if measured_present:
         cat_boxes = []
