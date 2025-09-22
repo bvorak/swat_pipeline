@@ -2318,10 +2318,11 @@ def fan_compare_simulations_dashboard(
                             template=template,
                             title=f"Diagnostics: {dd_var.value} (Reach {dd_reach.value})",
                             lag_hist_K=int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1,
+                            compare_mode=("conc" if is_conc_mode else "load"),
                         )
                         # Convert to FigureWidgets for better embedding
                         children = []
-                        for key in ["obs_vs_pred", "resid_hist", "resid_vs_pred", "lag_hist"]:
+                        for key in ["obs_vs_pred", "resid_hist", "resid_vs_pred", "lag_hist", "load_duration_curve"]:
                             if key in figs:
                                 try:
                                     children.append(go.FigureWidget(figs[key]))
@@ -2334,7 +2335,7 @@ def fan_compare_simulations_dashboard(
                             call_str = (
                                 "from python_pipeline_scripts.stats import build_fit_diagnostics\n"
                                 "# assuming you have q_df (fan quantiles) and measured_series from the dashboard context\n"
-                                f"figs = build_fit_diagnostics(q_df, measured_series, window=(pd.Timestamp('{start_s}'), pd.Timestamp('{end_s}')), template='{template}', title='Diagnostics: {dd_var.value} (Reach {dd_reach.value})', lag_hist_K={int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1})"
+                                f"figs = build_fit_diagnostics(q_df, measured_series, window=(pd.Timestamp('{start_s}'), pd.Timestamp('{end_s}')), template='{template}', title='Diagnostics: {dd_var.value} (Reach {dd_reach.value})', lag_hist_K={int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1}, compare_mode=('conc' if is_conc_mode else 'load'))"
                             )
                             children.append(widgets.HTML("<b>Reproduce diagnostics</b>"))
                             children.append(widgets.HTML(f"<pre style='white-space:pre-wrap'>{call_str}</pre>"))
