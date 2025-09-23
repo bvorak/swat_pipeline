@@ -773,6 +773,18 @@ def fan_compare_simulations_dashboard(
         template_name: str,
         y_axis_title: str,
     ) -> List[widgets.Widget]:
+        """
+        Build and return a list of Plotly FigureWidget objects representing simulation load and flow duration curves.
+
+        Parameters:
+            q_plot (Optional[pd.DataFrame]): DataFrame containing quantile data for the simulation.
+            flow_series (Optional[pd.Series]): Series containing flow data for the simulation.
+            template_name (str): Name of the Plotly template to use for the figures.
+            y_axis_title (str): Title for the y-axis of the duration curve plot.
+
+        Returns:
+            List[widgets.Widget]: List of Plotly FigureWidget objects for display in the dashboard.
+        """
         widgets_out: List[widgets.Widget] = []
         try:
             from .stats import _duration_curve_from_series as _dcfs  # type: ignore
@@ -782,14 +794,83 @@ def fan_compare_simulations_dashboard(
         levels = np.linspace(1.0, 99.0, 99)
         if isinstance(q_plot, pd.DataFrame) and not q_plot.empty:
             fig_ldc = go.Figure(layout=dict(template=template_name))
+            # Ensure min/max columns exist (fallback compute from aligned_df if omitted earlier)
+            try:
+                if ("min" not in q_plot.columns or "max" not in q_plot.columns) and isinstance(_last.get("aligned_df"), pd.DataFrame):
+                    base_aligned: pd.DataFrame = _last.get("aligned_df")  # type: ignore
+                    if base_aligned is not None and not base_aligned.empty:
+                        if "min" not in q_plot.columns:
+                            q_plot["min"] = base_aligned.min(axis=1, skipna=True)
+                        if "max" not in q_plot.columns:
+                            q_plot["max"] = base_aligned.max(axis=1, skipna=True)
+            except Exception:
+                pass
+            try:
+                _dbg("duration q_plot cols", list(q_plot.columns))
+            except Exception:
+                pass
             added = False
-            for col, name, style in (
-                ("p95", "Simulation p95", dict(color="rgba(31,119,180,0.35)", width=0.5)),
-                ("p75", "Simulation p75", dict(color="rgba(31,119,180,0.45)", width=0.5, dash="dot")),
-                ("p50", "Simulation median", dict(color="black", width=2)),
-                ("p25", "Simulation p25", dict(color="rgba(31,119,180,0.45)", width=0.5, dash="dot")),
-                ("p05", "Simulation p05", dict(color="rgba(31,119,180,0.35)", width=0.5)),
-            ):
+            # ------------------------------------------------------------------
+            # Configurable quantile/min-max lines to show on the duration curve.
+            # COMMENT OUT or REORDER entries below to customize quickly.
+            # If 'min' and 'max' columns are present they will also be used to
+            # render a shaded band (added prior to the quantile lines).
+            # ------------------------------------------------------------------
+            PLOT_LINES = [
+                ("max", "Simulation max", dict(color="#7f0000", width=1.2)),  # optional (band top)
+                #("p95", "Simulation p95", dict(color="#d62728", width=1.1, dash="solid")),
+                ("p75", "Simulation p75", dict(color="#ff7f0e", width=1.0, dash="dot")),
+                ("p50", "Simulation median", dict(color="#000000", width=2.4)),  # bold central line
+                ("p25", "Simulation p25", dict(color="#1f77b4", width=1.0, dash="dot")),
+                #("p05", "Simulation p05", dict(color="#2ca02c", width=1.1, dash="solid")),
+                ("min", "Simulation min", dict(color="#00441b", width=1.2)),  # optional (band bottom)
+            ]
+
+            # Min-max shaded band (only if both columns exist and non-empty)
+            if all(c in q_plot.columns for c in ("min", "max")):
+                try:
+                    s_max = q_plot["max"].dropna()
+                    s_min = q_plot["min"].dropna()
+                    if not s_max.empty and not s_min.empty:
+                        x_max, y_max = _dcfs(s_max, levels)
+                        x_min, y_min = _dcfs(s_min, levels)
+                        if np.any(np.isfinite(y_max)) and np.any(np.isfinite(y_min)):
+                            # Ascending reorder so low values left
+                            try:
+                                y_max_ord = np.sort(y_max)
+                                y_min_ord = np.sort(y_min)
+                            except Exception:
+                                y_max_ord, y_min_ord = y_max, y_min
+                            fig_ldc.add_trace(
+                                go.Scatter(
+                                    x=x_max,
+                                    y=y_max_ord,
+                                    mode="lines",
+                                    name="Max",
+                                    line=dict(color="rgba(127,0,0,0.8)", width=0.8),
+                                    showlegend=False,
+                                )
+                            )
+                            fig_ldc.add_trace(
+                                go.Scatter(
+                                    x=x_min,
+                                    y=y_min_ord,
+                                    mode="lines",
+                                    name="Min-Max band",
+                                    line=dict(color="rgba(0,68,27,0.8)", width=0.8),
+                                    fill="tonexty",
+                                    fillcolor="rgba(100,100,100,0.18)",
+                                )
+                            )
+                            added = True
+                except Exception:
+                    pass
+
+            # Plot requested quantile lines (skip min/max here if already banded)
+            for col, name, style in PLOT_LINES:
+                if col in {"min", "max"} and all(c in q_plot.columns for c in ("min", "max")):
+                    # already represented in band – skip individual lines unless user comments band logic out
+                    continue
                 if col not in q_plot.columns:
                     continue
                 series = q_plot[col].dropna()
@@ -798,21 +879,65 @@ def fan_compare_simulations_dashboard(
                 x_vals, y_vals = _dcfs(series, levels)
                 if not np.any(np.isfinite(y_vals)):
                     continue
+                try:
+                    y_ordered = np.sort(y_vals)
+                except Exception:
+                    y_ordered = y_vals
                 fig_ldc.add_trace(
                     go.Scatter(
                         x=x_vals,
-                        y=y_vals,
+                        y=y_ordered,
                         mode="lines",
                         name=name,
                         line=style,
                     )
                 )
                 added = True
+            # ------------------------------------------------------------------
+            # Overlay measured series (sparse points) from current view.
+            # We DO NOT interpolate; each measured value is plotted at its
+            # empirical exceedance probability (percent rank). The orientation
+            # has low values at the left, so we sort ascending.
+            # Easily disable by setting ENABLE_MEASURED_DURATION_OVERLAY=False
+            # or commenting out this whole block.
+            # ------------------------------------------------------------------
+            ENABLE_MEASURED_DURATION_OVERLAY = True
+            if ENABLE_MEASURED_DURATION_OVERLAY:
+                try:
+                    meas_list = _last.get("meas_series") or []
+                    measured_vals: list[float] = []
+                    if isinstance(meas_list, (list, tuple)):
+                        for ms in meas_list:
+                            if isinstance(ms, pd.Series) and not ms.empty:
+                                measured_vals.extend(ms.dropna().to_numpy(dtype=float).tolist())
+                    if measured_vals:
+                        arr_meas = np.array(measured_vals, dtype=float)
+                        arr_meas = arr_meas[np.isfinite(arr_meas)]
+                        if arr_meas.size:
+                            arr_meas.sort()  # ascending
+                            n_meas = arr_meas.size
+                            # Empirical exceedance probability (percent rank) in ascending orientation
+                            # Using i/(n+1)*100 to keep within (0,100)
+                            x_meas = 100.0 * (np.arange(1, n_meas + 1) / (n_meas + 1))
+                            fig_ldc.add_trace(
+                                go.Scatter(
+                                    x=x_meas,
+                                    y=arr_meas,
+                                    mode="markers",
+                                    name="Measured (all)",
+                                    marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
+                                    hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                )
+                            )
+                            added = True
+                            _dbg("duration measured overlay", dict(n_points=int(n_meas)))
+                except Exception as _e_meas_dc:
+                    _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
                 fig_ldc.update_layout(
                     title="Simulation Load Duration Curve",
-                    xaxis_title="Exceedance probability (%)",
-                    yaxis_title=y_axis_title,
+                    xaxis_title=r"% of Time where load is Exceeded",
+                    yaxis_title="load: " + y_axis_title,
                 )
                 widgets_out.append(go.FigureWidget(fig_ldc))
         sim_flow_series = None
@@ -822,10 +947,14 @@ def fan_compare_simulations_dashboard(
             fig_fdc = go.Figure(layout=dict(template=template_name))
             x_flow, y_flow = _dcfs(sim_flow_series, levels)
             if np.any(np.isfinite(y_flow)):
+                try:
+                    y_flow_ordered = np.sort(y_flow)
+                except Exception:
+                    y_flow_ordered = y_flow
                 fig_fdc.add_trace(
                     go.Scatter(
                         x=x_flow,
-                        y=y_flow,
+                        y=y_flow_ordered,
                         mode="lines",
                         name="Simulation flow",
                         line=dict(color="#17becf", width=2),
@@ -833,7 +962,7 @@ def fan_compare_simulations_dashboard(
                 )
                 fig_fdc.update_layout(
                     title="Simulation Flow Duration Curve",
-                    xaxis_title="Exceedance probability (%)",
+                    xaxis_title=r"% of Time where flow is Exceeded",
                     yaxis_title="Flow (m3/day)",
                 )
                 widgets_out.append(go.FigureWidget(fig_fdc))
@@ -1246,8 +1375,26 @@ def fan_compare_simulations_dashboard(
         qs = np.nanpercentile(arr, percs, axis=1)  # shape: (7, T)
         q = {p: qs[i, :] for i, p in enumerate(percs)}  # p -> array(T,)
         # Store quantiles in a frame for quick lookups
+        # Also compute per-timestamp min and max across simulations for duration banding
+        try:
+            row_min = np.nanmin(arr, axis=1)
+        except Exception:
+            row_min = np.full(arr.shape[0], np.nan)
+        try:
+            row_max = np.nanmax(arr, axis=1)
+        except Exception:
+            row_max = np.full(arr.shape[0], np.nan)
         q_df = pd.DataFrame({
-            "p05": q[5], "p10": q[10], "p25": q[25], "p50": q[50], "p60": q[60], "p75": q[75], "p90": q[90], "p95": q[95]
+            "min": row_min,
+            "p05": q[5],
+            "p10": q[10],
+            "p25": q[25],
+            "p50": q[50],
+            "p60": q[60],
+            "p75": q[75],
+            "p90": q[90],
+            "p95": q[95],
+            "max": row_max,
         }, index=aligned_df.index)
         _last["q_df"] = q_df
         if debug or (isinstance(ui_defaults, dict) and ui_defaults.get("debug")):
