@@ -2269,6 +2269,7 @@ def compute_stats_for_view(
                         relative_width_high = float(np.nanmedian(high_vals))
                 if np.isfinite(relative_width_low) and np.isfinite(relative_width_high) and relative_width_low != 0:
                     relative_width_event_contrast = float(relative_width_high / relative_width_low)
+
             relative_width_event = float("nan")
             relative_width_nonevent = float("nan")
             event_ratio = float("nan")
@@ -2310,6 +2311,31 @@ def compute_stats_for_view(
                         relative_width_nonevent = float(np.nanmedian(nonevent_vals))
             if np.isfinite(relative_width_event) and np.isfinite(relative_width_nonevent) and relative_width_nonevent != 0:
                 event_ratio = float(relative_width_event / relative_width_nonevent)
+
+            def _safe_stat(arr, func):
+                if arr.size == 0:
+                    return float("nan")
+                val = func(arr)
+                return float(val) if np.isfinite(val) else float("nan")
+
+            base_min = _safe_stat(base_vals, np.nanmin)
+            base_max = _safe_stat(base_vals, np.nanmax)
+            base_mean = _safe_stat(base_vals, np.nanmean)
+            base_p50 = _safe_stat(base_vals, lambda x: np.nanpercentile(x, 50))
+            base_p90 = _safe_stat(base_vals, lambda x: np.nanpercentile(x, 90))
+
+            overlay_min = _safe_stat(overlay_vals, np.nanmin)
+            overlay_max = _safe_stat(overlay_vals, np.nanmax)
+            overlay_mean = _safe_stat(overlay_vals, np.nanmean)
+            overlay_p50 = _safe_stat(overlay_vals, lambda x: np.nanpercentile(x, 50))
+            overlay_p90 = _safe_stat(overlay_vals, lambda x: np.nanpercentile(x, 90))
+
+            delta_min = base_min - overlay_min if np.isfinite(base_min) and np.isfinite(overlay_min) else float("nan")
+            delta_max = base_max - overlay_max if np.isfinite(base_max) and np.isfinite(overlay_max) else float("nan")
+            delta_mean = base_mean - overlay_mean if np.isfinite(base_mean) and np.isfinite(overlay_mean) else float("nan")
+            delta_p50 = base_p50 - overlay_p50 if np.isfinite(base_p50) and np.isfinite(overlay_p50) else float("nan")
+            delta_p90 = base_p90 - overlay_p90 if np.isfinite(base_p90) and np.isfinite(overlay_p90) else float("nan")
+
             overlay_comparison[str(name)] = {
                 "median_delta": median_delta,
                 "median_delta_pct": median_delta_pct,
@@ -2327,19 +2353,27 @@ def compute_stats_for_view(
                 "event_ratio": event_ratio,
                 "event_pairs": int(event_pairs_count),
                 "non_event_pairs": int(nonevent_pairs_count),
+                "baseline_min": base_min,
+                "baseline_max": base_max,
+                "baseline_mean": base_mean,
+                "baseline_p50": base_p50,
+                "baseline_p90": base_p90,
+                "overlay_min": overlay_min,
+                "overlay_max": overlay_max,
+                "overlay_mean": overlay_mean,
+                "overlay_p50": overlay_p50,
+                "overlay_p90": overlay_p90,
+                "delta_min": delta_min,
+                "delta_max": delta_max,
+                "delta_mean": delta_mean,
+                "delta_p50": delta_p50,
+                "delta_p90": delta_p90,
             }
 
             overlay_metrics = _pairwise_metrics(overlay_vals, base_vals)
             filtered_metrics = {k: overlay_metrics[k] for k in allowed_overlay_metrics if k in overlay_metrics and np.isfinite(overlay_metrics[k])}
             filtered_metrics.update({
                 "n_pairs": int(mask.sum()),
-                "baseline_days_total": baseline_total_days,
-                "baseline_days_finite": baseline_finite_days,
-                "baseline_raw_days_total": raw_baseline_total,
-                "baseline_raw_days_finite": raw_baseline_finite,
-                "overlay_days_total": overlay_total_days,
-                "overlay_days_finite": overlay_finite_days,
-                "paired_days": int(mask.sum()),
             })
             overlay_full_stats[str(name)] = filtered_metrics
 
@@ -2494,20 +2528,16 @@ def format_stats_text(stats: Dict[str, object]) -> str:
                             lines.append(f"  {key} = {int(val)}")
                         else:
                             lines.append(f"  {key} = {val:.3g}")
-        obs_full = dist_summary.get("observed_full")
-        if isinstance(obs_full, dict):
-            lines.append("Observed (full series):")
-            for key in ["mean", "median", "sd", "var"]:
-                val = obs_full.get(key)
-                if isinstance(val, (int, float)) and np.isfinite(val):
-                    lines.append(f"  {key} = {val:.3g}")
         pred_full = dist_summary.get("predicted_full")
         if isinstance(pred_full, dict):
             lines.append("Predicted (full series):")
-            for key in ["mean", "median", "sd", "var"]:
+            for key in ["mean", "median", "p05", "p25", "p50", "p75", "p95", "sd", "var", "n"]:
                 val = pred_full.get(key)
                 if isinstance(val, (int, float)) and np.isfinite(val):
-                    lines.append(f"  {key} = {val:.3g}")
+                    if key == "n":
+                        lines.append(f"  {key} = {int(val)}")
+                    else:
+                        lines.append(f"  {key} = {val:.3g}")
 
     gl = stats.get("global_lag", {}) or {}
     if gl:
@@ -2584,79 +2614,118 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         if summary_bits or view_key != "all":
             summary_txt = ", ".join(summary_bits) if summary_bits else "no event counts available"
             lines.append(f"Event filter view: {raw_view_label} ({summary_txt})")
-        general_metrics = [
-            ("median_W", "Raw width median (W)", False),
-            ("p90_W", "Raw width p90 (W)", False),
-            ("coverage_fraction", "Coverage fraction (overlay inside envelope)", True),
-        ]
-        quantile_metrics = [
-            ("relative_width_low", "Relative width low decile"),
-            ("relative_width_high", "Relative width high decile"),
-            ("relative_width_event_contrast", "Event contrast (high / low)"),
-        ]
-        event_metric_map = {
-            "events": [("relative_width_event", "Relative width (event days)")],
-            "non_events": [("relative_width_nonevent", "Relative width (non-event days)")],
-            "all": [
-                ("relative_width_event", "Relative width (event days)"),
-                ("relative_width_nonevent", "Relative width (non-event days)"),
-                ("event_ratio", "Event ratio (event / non-event)"),
-            ],
-        }
-        event_metrics = event_metric_map.get(view_key, event_metric_map["all"])
-        for name, comp in cmp_dict.items():
-            if not isinstance(comp, dict):
-                continue
-            lines.append(f"<i>{name}:</i>")
-            printed_keys = {"median_delta", "median_delta_pct", "relative_width", "rmse", "r"}
-            delta = comp.get("median_delta")
-            if isinstance(delta, (int, float)) and np.isfinite(delta):
-                lines.append(f"  Median delta (baseline - overlay) = {delta:.3g}")
-            delta_pct = comp.get("median_delta_pct")
-            if isinstance(delta_pct, (int, float)) and np.isfinite(delta_pct):
-                lines.append(f"  Median delta (%) = {delta_pct:.2f}%")
-            rel = comp.get("relative_width")
-            if isinstance(rel, (int, float)) and np.isfinite(rel):
-                lines.append(f"  Relative width = {rel:.3g}")
-            rmse_val = comp.get("rmse")
-            if isinstance(rmse_val, (int, float)) and np.isfinite(rmse_val):
-                lines.append(f"  RMSE = {rmse_val:.3g}")
-            r_val = comp.get("r")
-            if isinstance(r_val, (int, float)) and np.isfinite(r_val):
-                lines.append(f"  r = {r_val:.3f}")
-            for key, label, is_percent in general_metrics:
-                value = comp.get(key)
-                if isinstance(value, (int, float)) and np.isfinite(value):
-                    if is_percent:
-                        lines.append(f"  {label} = {value:.1%}")
-                    else:
-                        lines.append(f"  {label} = {value:.3g}")
-                    printed_keys.add(key)
-            for key, label in quantile_metrics:
-                value = comp.get(key)
-                if isinstance(value, (int, float)) and np.isfinite(value):
-                    lines.append(f"  {label} = {value:.3g}")
-                    printed_keys.add(key)
-            for key, label in event_metrics:
-                value = comp.get(key)
-                if isinstance(value, (int, float)) and np.isfinite(value):
-                    lines.append(f"  {label} = {value:.3g}")
-                    printed_keys.add(key)
-            event_pairs = comp.get("event_pairs")
-            if isinstance(event_pairs, (int, float)) and event_pairs > 0:
-                lines.append(f"  Event pairs = {int(event_pairs)}")
-                printed_keys.add("event_pairs")
-            nonevent_pairs = comp.get("non_event_pairs")
-            if isinstance(nonevent_pairs, (int, float)) and nonevent_pairs > 0:
-                lines.append(f"  Non-event pairs = {int(nonevent_pairs)}")
-                printed_keys.add("non_event_pairs")
-            for extra_key, extra_val in comp.items():
-                if extra_key in printed_keys:
-                    continue
-                if isinstance(extra_val, (int, float)) and np.isfinite(extra_val):
-                    label = str(extra_key).replace("_", " ")
-                    lines.append(f"  {label} = {extra_val:.3g}")
 
+    general_metrics = [
+        ("median_W", "Raw width median (W)", False),
+        ("p90_W", "Raw width p90 (W)", False),
+        ("coverage_fraction", "Coverage fraction (overlay inside envelope)", True),
+    ]
+    quantile_metrics = [
+        ("relative_width_low", "Relative width low decile"),
+        ("relative_width_high", "Relative width high decile"),
+        ("relative_width_event_contrast", "Event contrast (high / low)"),
+    ]
+    event_metric_map = {
+        "events": [("relative_width_event", "Relative width (event days)")],
+        "non_events": [("relative_width_nonevent", "Relative width (non-event days)")],
+        "all": [
+            ("relative_width_event", "Relative width (event days)"),
+            ("relative_width_nonevent", "Relative width (non-event days)"),
+            ("event_ratio", "Event ratio (event / non-event)"),
+        ],
+    }
+    baseline_stat_metrics = [
+        ("baseline_min", "Baseline min"),
+        ("baseline_max", "Baseline max"),
+        ("baseline_mean", "Baseline mean"),
+        ("baseline_p50", "Baseline p50"),
+        ("baseline_p90", "Baseline p90"),
+    ]
+    overlay_stat_metrics = [
+        ("overlay_min", "Overlay min"),
+        ("overlay_max", "Overlay max"),
+        ("overlay_mean", "Overlay mean"),
+        ("overlay_p50", "Overlay p50"),
+        ("overlay_p90", "Overlay p90"),
+    ]
+    delta_stat_metrics = [
+        ("delta_min", "Shift in min (baseline - overlay)"),
+        ("delta_max", "Shift in max (baseline - overlay)"),
+        ("delta_mean", "Shift in mean (baseline - overlay)"),
+        ("delta_p50", "Shift in p50 (baseline - overlay)"),
+        ("delta_p90", "Shift in p90 (baseline - overlay)"),
+    ]
+    event_metrics = event_metric_map.get(view_key, event_metric_map["all"])
+    for name, comp in cmp_dict.items():
+        if not isinstance(comp, dict):
+            continue
+        lines.append("")  # Blank line between entries
+        lines.append(f"<i>{name}:</i>")
+        printed_keys = {"median_delta", "median_delta_pct", "relative_width", "rmse", "r"}
+        delta = comp.get("median_delta")
+        if isinstance(delta, (int, float)) and np.isfinite(delta):
+            lines.append(f"  Median delta (baseline - overlay) = {delta:.3g}")
+        delta_pct = comp.get("median_delta_pct")
+        if isinstance(delta_pct, (int, float)) and np.isfinite(delta_pct):
+            lines.append(f"  Median delta (%) = {delta_pct:.2f}%")
+        rel = comp.get("relative_width")
+        if isinstance(rel, (int, float)) and np.isfinite(rel):
+            lines.append(f"  Relative width = {rel:.3g}")
+        rmse_val = comp.get("rmse")
+        if isinstance(rmse_val, (int, float)) and np.isfinite(rmse_val):
+            lines.append(f"  RMSE = {rmse_val:.3g}")
+        r_val = comp.get("r")
+        if isinstance(r_val, (int, float)) and np.isfinite(r_val):
+            lines.append(f"  r = {r_val:.3f}")
+        for key, label, is_percent in general_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                if is_percent:
+                    lines.append(f"  {label} = {value:.1%}")
+                else:
+                    lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+        for key, label in quantile_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+        for key, label in event_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+        for key, label in baseline_stat_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+        for key, label in overlay_stat_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+        for key, label in delta_stat_metrics:
+            value = comp.get(key)
+            if isinstance(value, (int, float)) and np.isfinite(value):
+                lines.append(f"  {label} = {value:.3g}")
+                printed_keys.add(key)
+
+        event_pairs = comp.get("event_pairs")
+        if isinstance(event_pairs, (int, float)) and event_pairs > 0:
+            lines.append(f"  Event pairs = {int(event_pairs)}")
+            printed_keys.add("event_pairs")
+
+        nonevent_pairs = comp.get("non_event_pairs")
+        if isinstance(nonevent_pairs, (int, float)) and nonevent_pairs > 0:
+            lines.append(f"  Non-event pairs = {int(nonevent_pairs)}")
+            printed_keys.add("non_event_pairs")
+        for extra_key, extra_val in comp.items():
+            if extra_key in printed_keys:
+                continue
+            if isinstance(extra_val, (int, float)) and np.isfinite(extra_val):
+                label = str(extra_key).replace("_", " ")
+                lines.append(f"  {label} = {extra_val:.3g}")
     overlay_full = stats.get("overlay_full_series", {}) or {}
     if overlay_full:
         lines.append("<b>Overlay Full-Series</b>")
@@ -2671,6 +2740,7 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         for name, metrics in overlay_full.items():
             if not isinstance(metrics, dict):
                 continue
+            lines.append("")  # Blank line between entries
             lines.append(f"<i>{name}:</i>")
             n_pairs = metrics.get("n_pairs")
             if isinstance(n_pairs, (int, float)) and np.isfinite(n_pairs):
