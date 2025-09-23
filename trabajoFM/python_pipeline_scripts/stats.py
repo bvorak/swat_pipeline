@@ -1457,6 +1457,28 @@ def compute_stats_for_view(
 
     """
 
+    # -----------------------------
+    # Global shift aggregation switch
+    # Set SHIFT_AGG to 'median' or 'mean' to control how (baseline - overlay) shifts are summarized.
+    # This affects: overall paired shift, percent shift, event shift, non-event shift.
+    # -----------------------------
+    global SHIFT_AGG  # allow user to modify externally if desired
+    try:
+        SHIFT_AGG  # type: ignore  # noqa: F821
+    except NameError:
+        SHIFT_AGG = 'median'  # fallback default if not already defined elsewhere
+
+    def _shift_agg(arr: np.ndarray) -> float:
+        arr = np.asarray(arr, dtype=float)
+        if arr.size == 0:
+            return float('nan')
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return float('nan')
+        if SHIFT_AGG == 'mean':
+            return float(np.nanmean(arr))
+        return float(np.nanmedian(arr))
+
     stats: Dict[str, object] = {}
 
     band_groups = _normalize_band_groups(band_data)
@@ -2235,7 +2257,8 @@ def compute_stats_for_view(
             base_vals = paired_base.to_numpy(dtype=float)
             overlay_vals = paired_overlay.to_numpy(dtype=float)
             diff = base_vals - overlay_vals
-            median_delta = float(np.nanmedian(diff)) if diff.size else float("nan")
+            # SHIFT AGGREGATION POINT: Change np.nanmedian -> np.nanmean below to switch to mean shifts
+            median_delta = _shift_agg(diff) if diff.size else float("nan")
             denom_series = paired_base.abs().replace(0, np.nan)
             rel_series = (diff_series.abs() / denom_series).replace([np.inf, -np.inf], np.nan)
             rel_vals = rel_series.dropna().to_numpy(dtype=float)
@@ -2243,7 +2266,8 @@ def compute_stats_for_view(
             percent_series = (diff_series / denom_series) * 100.0
             percent_series = percent_series.replace([np.inf, -np.inf], np.nan)
             percent_vals = percent_series.dropna().to_numpy(dtype=float)
-            median_delta_pct = float(np.nanmedian(percent_vals)) if percent_vals.size else float("nan")
+            # SHIFT AGGREGATION POINT (%): Change np.nanmedian -> np.nanmean to use mean percent shift
+            median_delta_pct = _shift_agg(percent_vals) if percent_vals.size else float("nan")
             rmse_overlay = _rmse(base_vals, overlay_vals)
             r_overlay = _pearson_r(base_vals, overlay_vals)
             paired_index = paired_base.index
@@ -2312,6 +2336,31 @@ def compute_stats_for_view(
             if np.isfinite(relative_width_event) and np.isfinite(relative_width_nonevent) and relative_width_nonevent != 0:
                 event_ratio = float(relative_width_event / relative_width_nonevent)
 
+            # Compute event / non-event specific shift (baseline - overlay) using same masks
+            # Controlled by global SHIFT_AGG (median/mean)
+            delta_event_pairs = float("nan")
+            delta_non_event_pairs = float("nan")
+            try:
+                if event_mask is not None and np.any(event_mask):
+                    ev_base = paired_base.loc[event_mask].to_numpy(dtype=float)
+                    ev_overlay = paired_overlay.loc[event_mask].to_numpy(dtype=float)
+                    if ev_base.size and ev_overlay.size:
+                        ev_diff = ev_base - ev_overlay
+                        if ev_diff.size:
+                            delta_event_pairs = _shift_agg(ev_diff)
+            except Exception:
+                pass
+            try:
+                if nonevent_mask is not None and np.any(nonevent_mask):
+                    nev_base = paired_base.loc[nonevent_mask].to_numpy(dtype=float)
+                    nev_overlay = paired_overlay.loc[nonevent_mask].to_numpy(dtype=float)
+                    if nev_base.size and nev_overlay.size:
+                        nev_diff = nev_base - nev_overlay
+                        if nev_diff.size:
+                            delta_non_event_pairs = _shift_agg(nev_diff)
+            except Exception:
+                pass
+
             def _safe_stat(arr, func):
                 if arr.size == 0:
                     return float("nan")
@@ -2368,6 +2417,8 @@ def compute_stats_for_view(
                 "delta_mean": delta_mean,
                 "delta_p50": delta_p50,
                 "delta_p90": delta_p90,
+                "delta_event_pairs": delta_event_pairs,
+                "delta_non_event_pairs": delta_non_event_pairs,
             }
 
             overlay_metrics = _pairwise_metrics(overlay_vals, base_vals)
@@ -2654,6 +2705,8 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         ("delta_mean", "Shift in mean (baseline - overlay)"),
         ("delta_p50", "Shift in p50 (baseline - overlay)"),
         ("delta_p90", "Shift in p90 (baseline - overlay)"),
+        ("delta_event_pairs", "Shift event pairs (baseline - overlay)"),
+        ("delta_non_event_pairs", "Shift non-event pairs (baseline - overlay)"),
     ]
     event_metrics = event_metric_map.get(view_key, event_metric_map["all"])
     for name, comp in cmp_dict.items():
