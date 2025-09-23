@@ -868,6 +868,57 @@ def _collect_pairs(
 
 
 
+
+
+
+def _pairwise_metrics(
+    y: np.ndarray,
+    m: np.ndarray,
+    qdict: Optional[Dict[str, np.ndarray]] = None,
+    *,
+    include_minmax: bool = False,
+) -> Dict[str, float]:
+    """Compute core pairwise metrics for two aligned series."""
+    y_arr = np.asarray(y, dtype=float)
+    m_arr = np.asarray(m, dtype=float)
+
+    r = _pearson_r(y_arr, m_arr)
+    rmse = _rmse(y_arr, m_arr)
+    mae = _mae(y_arr, m_arr)
+    bias = float(np.nanmean(y_arr - m_arr)) if y_arr.size else float("nan")
+
+    metrics = {
+        "r": r,
+        "R2": float(r ** 2) if np.isfinite(r) else float("nan"),
+        "MAE": mae,
+        "RMSE": rmse,
+        "Bias(obs-pred)": bias,
+        "PBIAS%": _pbias(y_arr, m_arr),
+        "NSE": _nse(y_arr, m_arr),
+        "NSE_rel": _nse_relative(y_arr, m_arr),
+        "KGE": _kge(y_arr, m_arr),
+        "MedAE": _medae(y_arr, m_arr),
+        "d": _index_of_agreement(y_arr, m_arr),
+        "d_rel": _index_of_agreement_relative(y_arr, m_arr),
+        "RSR": _rsr(y_arr, m_arr),
+    }
+
+    bands = qdict or {}
+    if isinstance(bands, dict):
+        if "p25" in bands and "p75" in bands:
+            metrics["coverage50"] = _coverage(y_arr, bands["p25"], bands["p75"])
+        if "p05" in bands and "p95" in bands:
+            metrics["coverage90"] = _coverage(y_arr, bands["p05"], bands["p95"])
+        if "min" in bands and "max" in bands:
+            cov_full = _coverage(y_arr, bands["min"], bands["max"])
+            metrics["coverage100"] = cov_full
+            if include_minmax:
+                metrics["coverage_minmax"] = cov_full
+
+    return metrics
+
+
+
 def _coverage(y: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> float:
 
     y, lo = _finite_pairs(y, lo)
@@ -1456,77 +1507,8 @@ def compute_stats_for_view(
 
     
 
-    if n == 0:
-
-        stats["same_day"] = {}
-
-        return stats
-
-
-
-    # Same-day metrics
-
-    r = _pearson_r(Y, M)
-
-    R2 = float(r ** 2) if np.isfinite(r) else float("nan")
-
-    rmse = _rmse(Y, M)
-
-    mae = _mae(Y, M)
-
-    bias = float(np.nanmean(Y - M)) if n else float("nan")  # obs - pred
-
-    pbias = _pbias(Y, M)
-
-    nse = _nse(Y, M)
-
-    kge = _kge(Y, M)
-
-    medae = _medae(Y, M)
-
-    same_day: Dict[str, float] = {
-
-        "r": r,
-
-        "R2": R2,
-
-        "MAE": mae,
-
-        "RMSE": rmse,
-
-        "Bias(obs-pred)": bias,
-
-        "PBIAS%": pbias,
-
-        "NSE": nse,
-
-        "NSE_rel": _nse_relative(Y, M),
-
-        "KGE": kge,
-
-        "MedAE": medae,
-
-        "d": _index_of_agreement(Y, M),
-
-        "d_rel": _index_of_agreement_relative(Y, M),
-
-        "RSR": _rsr(Y, M),
-
-    }
-
-    if "p25" in qdict and "p75" in qdict:
-
-        same_day["coverage50"] = _coverage(Y, qdict["p25"], qdict["p75"])  # fraction
-
-    if "p05" in qdict and "p95" in qdict:
-
-        same_day["coverage90"] = _coverage(Y, qdict["p05"], qdict["p95"])  # fraction
-
-    if "min" in qdict and "max" in qdict:
-
-        same_day["coverage100"] = _coverage(Y, qdict["min"], qdict["max"])  # fraction
-
-    stats["same_day"] = same_day
+    same_day_metrics = _pairwise_metrics(Y, M, qdict) if n else {}
+    stats["same_day"] = same_day_metrics
 
 
 
@@ -2045,114 +2027,130 @@ def compute_stats_for_view(
 
 
     overlay_comparison: Dict[str, Dict[str, float]] = {}
+    overlay_full_stats: Dict[str, Dict[str, float]] = {}
+    raw_ensemble = band_groups.get("ensemble_raw", {}) if isinstance(band_groups, dict) else {}
+    baseline_series_for_overlay: Optional[pd.Series] = None
+    baseline_summary_series: Optional[pd.Series] = None
 
-    baseline_median_series: Optional[pd.Series] = None
+    def _window_series(series: Optional[pd.Series]) -> Optional[pd.Series]:
+        return _apply_window_to_series(series) if isinstance(series, pd.Series) else None
 
-    if q_df is not None and "p50" in q_df.columns:
+    baseline_raw_series = _window_series(raw_ensemble.get("p50")) if isinstance(raw_ensemble, dict) else None
+    if baseline_raw_series is not None:
+        baseline_series_for_overlay = baseline_raw_series
+    elif q_df is not None and "p50" in q_df.columns:
+        baseline_series_for_overlay = _apply_window_to_series(q_df["p50"].copy())
 
-        baseline_median_series = q_df["p50"].copy()
+    baseline_summary: Dict[str, float] = {}
+    baseline_median_value = float("nan")
+    baseline_median_abs = float("nan")
 
-        if window is not None:
+    baseline_total_days = int(baseline_series_for_overlay.index.size) if isinstance(baseline_series_for_overlay, pd.Series) else 0
+    baseline_finite_days = int(baseline_series_for_overlay.dropna().size) if isinstance(baseline_series_for_overlay, pd.Series) else 0
 
-            x0, x1 = window
+    baseline_summary_series = baseline_series_for_overlay.dropna() if isinstance(baseline_series_for_overlay, pd.Series) else None
+    if isinstance(baseline_summary_series, pd.Series) and not baseline_summary_series.empty:
+        baseline_median_value = float(np.nanmedian(baseline_summary_series.values))
+        baseline_median_abs = float(np.nanmedian(np.abs(baseline_summary_series.values)))
+        baseline_summary = {
+            "median": baseline_median_value,
+            "mean": float(np.nanmean(baseline_summary_series.values)),
+            "sd": float(np.nanstd(baseline_summary_series.values)),
+        }
 
-            baseline_median_series = baseline_median_series.loc[(baseline_median_series.index >= x0) & (baseline_median_series.index <= x1)]
-
-        baseline_median_series = baseline_median_series.dropna() if isinstance(baseline_median_series, pd.Series) else None
+    raw_baseline_total = int(baseline_raw_series.index.size) if isinstance(baseline_raw_series, pd.Series) else 0
+    raw_baseline_finite = int(baseline_raw_series.dropna().size) if isinstance(baseline_raw_series, pd.Series) else 0
 
     baseline_relative_width = float("nan")
-
-    if isinstance(baseline_median_series, pd.Series) and not baseline_median_series.empty:
-
-        if q_df is not None and all(col in q_df.columns for col in ("p05", "p95")):
-
-            p05_series = q_df["p05"].copy()
-
-            p95_series = q_df["p95"].copy()
-
-            if window is not None:
-
-                x0, x1 = window
-
-                p05_series = p05_series.loc[(p05_series.index >= x0) & (p05_series.index <= x1)]
-
-                p95_series = p95_series.loc[(p95_series.index >= x0) & (p95_series.index <= x1)]
-
-            idx = baseline_median_series.index.intersection(p05_series.index).intersection(p95_series.index)
-
-            if len(idx) > 0:
-
-                med_vals = baseline_median_series.reindex(idx).to_numpy(dtype=float)
-
-                width_vals = (p95_series.reindex(idx).to_numpy(dtype=float) - p05_series.reindex(idx).to_numpy(dtype=float))
-
-                denom = np.where(np.abs(med_vals) > 0, np.abs(med_vals), np.nan)
-
-                rel_vals = width_vals / denom
-
-                rel_vals = rel_vals[np.isfinite(rel_vals)]
-
-                if rel_vals.size:
-
-                    baseline_relative_width = float(np.nanmedian(rel_vals))
-
-    if extras and isinstance(extras, dict) and isinstance(baseline_median_series, pd.Series) and not baseline_median_series.empty:
-
-        for name, series in extras.items():
-
-            if not isinstance(series, pd.Series) or series.empty:
-
-                continue
-
-            overlay_series = series
-
-            if window is not None:
-
-                x0, x1 = window
-
-                overlay_series = overlay_series.loc[(overlay_series.index >= x0) & (overlay_series.index <= x1)]
-
-            overlay_series = overlay_series.dropna()
-
-            if overlay_series.empty:
-
-                continue
-
-            aligned_base = baseline_median_series.reindex(overlay_series.index)
-
-            mask = aligned_base.notna() & overlay_series.notna()
-
-            if not mask.any():
-
-                continue
-
-            base_vals = aligned_base.loc[mask].to_numpy(dtype=float)
-
-            overlay_vals = overlay_series.loc[mask].to_numpy(dtype=float)
-
-            diff = overlay_vals - base_vals
-
-            median_delta = float(np.nanmedian(diff)) if diff.size else float("nan")
-
-            denom = np.where(np.abs(base_vals) > 0, np.abs(base_vals), np.nan)
-
-            rel_vals = np.abs(diff) / denom
-
+    p05_series_full = _window_series(raw_ensemble.get("p05")) if isinstance(raw_ensemble, dict) else None
+    p95_series_full = _window_series(raw_ensemble.get("p95")) if isinstance(raw_ensemble, dict) else None
+    if p05_series_full is None and q_df is not None and "p05" in q_df.columns:
+        p05_series_full = _apply_window_to_series(q_df["p05"].copy())
+    if p95_series_full is None and q_df is not None and "p95" in q_df.columns:
+        p95_series_full = _apply_window_to_series(q_df["p95"].copy())
+    if (
+        isinstance(baseline_summary_series, pd.Series)
+        and not baseline_summary_series.empty
+        and isinstance(p05_series_full, pd.Series)
+        and isinstance(p95_series_full, pd.Series)
+    ):
+        idx = baseline_summary_series.index.intersection(p05_series_full.index).intersection(p95_series_full.index)
+        if len(idx) > 0:
+            med_vals = baseline_summary_series.reindex(idx).to_numpy(dtype=float)
+            width_vals = (
+                p95_series_full.reindex(idx).to_numpy(dtype=float)
+                - p05_series_full.reindex(idx).to_numpy(dtype=float)
+            )
+            denom = np.where(np.abs(med_vals) > 0, np.abs(med_vals), np.nan)
+            rel_vals = width_vals / denom
             rel_vals = rel_vals[np.isfinite(rel_vals)]
+            if rel_vals.size:
+                baseline_relative_width = float(np.nanmedian(rel_vals))
 
+    allowed_overlay_metrics = {"r", "R2", "MAE", "RMSE", "Bias(obs-pred)", "MedAE"}
+
+    if extras and isinstance(extras, dict) and isinstance(baseline_series_for_overlay, pd.Series):
+        for name, series in extras.items():
+            if not isinstance(series, pd.Series) or series.empty:
+                continue
+            overlay_series = series
+            if window is not None:
+                x0, x1 = window
+                overlay_series = overlay_series.loc[(overlay_series.index >= x0) & (overlay_series.index <= x1)]
+            overlay_total_days = int(overlay_series.index.size)
+            overlay_series = overlay_series.dropna()
+            overlay_finite_days = int(overlay_series.index.size)
+            if overlay_series.empty:
+                continue
+            aligned_base = baseline_series_for_overlay.reindex(overlay_series.index)
+            mask = aligned_base.notna() & overlay_series.notna()
+            if not mask.any():
+                continue
+            base_vals = aligned_base.loc[mask].to_numpy(dtype=float)
+            overlay_vals = overlay_series.loc[mask].to_numpy(dtype=float)
+            diff = base_vals - overlay_vals
+            median_delta = float(np.nanmedian(diff)) if diff.size else float("nan")
+            denom = np.where(np.abs(base_vals) > 0, np.abs(base_vals), np.nan)
+            rel_vals = np.abs(diff) / denom
+            rel_vals = rel_vals[np.isfinite(rel_vals)]
             relative_width = float(np.nanmedian(rel_vals)) if rel_vals.size else float("nan")
+            percent_vals = diff / denom * 100.0
+            percent_vals = percent_vals[np.isfinite(percent_vals)]
+            median_delta_pct = float(np.nanmedian(percent_vals)) if percent_vals.size else float("nan")
+            rmse_overlay = _rmse(base_vals, overlay_vals)
+            r_overlay = _pearson_r(base_vals, overlay_vals)
+            overlay_comparison[str(name)] = {
+                "median_delta": median_delta,
+                "median_delta_pct": median_delta_pct,
+                "relative_width": relative_width,
+                "rmse": rmse_overlay,
+                "r": r_overlay,
+            }
+            overlay_metrics = _pairwise_metrics(overlay_vals, base_vals)
+            filtered_metrics = {k: overlay_metrics[k] for k in allowed_overlay_metrics if k in overlay_metrics and np.isfinite(overlay_metrics[k])}
+            filtered_metrics.update({
+                "n_pairs": int(mask.sum()),
+                "baseline_days_total": baseline_total_days,
+                "baseline_days_finite": baseline_finite_days,
+                "baseline_raw_days_total": raw_baseline_total,
+                "baseline_raw_days_finite": raw_baseline_finite,
+                "overlay_days_total": overlay_total_days,
+                "overlay_days_finite": overlay_finite_days,
+                "paired_days": int(mask.sum()),
+            })
+            overlay_full_stats[str(name)] = filtered_metrics
 
-            overlay_comparison[str(name)] = {"median_delta": median_delta, "relative_width": relative_width}
-
+    baseline_entry = overlay_comparison.setdefault("__baseline__", {})
     if np.isfinite(baseline_relative_width):
-
-        overlay_comparison.setdefault("__baseline__", {})["relative_width"] = baseline_relative_width
-
-    if overlay_comparison:
-
-        stats["overlay_comparison"] = overlay_comparison
-
-
+        baseline_entry["relative_width"] = baseline_relative_width
+    if baseline_summary:
+        baseline_entry.setdefault("median", baseline_summary.get("median"))
+        baseline_entry.setdefault("mean", baseline_summary.get("mean"))
+        baseline_entry.setdefault("sd", baseline_summary.get("sd"))
+        stats["baseline_summary"] = baseline_summary
+    stats["overlay_comparison"] = overlay_comparison
+    if overlay_full_stats:
+        stats["overlay_full_series"] = overlay_full_stats
 
     if measured_vs_series:
 
@@ -2173,546 +2171,244 @@ def compute_stats_for_view(
 
 
 def format_stats_text(stats: Dict[str, object]) -> str:
-
     """Format a stats dict (from compute_stats_for_view) into HTML for the annotation box.
 
-
-
     Designed to be resilient to additional/unknown keys.
-
     """
-
     if not isinstance(stats, dict):
-
         return "No stats"
 
     n = int(stats.get("n", 0) or 0)
-
     lines: List[str] = []
-
     lines.append("<b>Stats (view)</b>")
-
     lines.append(f"n = {n}")
 
-    
+    def _format_metric(key: str, value: object) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and not np.isfinite(value):
+                return None
+            low_key = key.lower()
+            if low_key in {"r", "r_log", "r (meas vs median)", "nse", "kge", "r2", "r2_log"}:
+                return f"{key} = {float(value):.3f}"
+            if "coverage" in low_key:
+                return f"{key} = {float(value) * 100:.1f}%"
+            if isinstance(value, int) and not isinstance(value, bool):
+                return f"{key} = {int(value)}"
+            return f"{key} = {float(value):.3g}"
+        if isinstance(value, str):
+            return f"{key} = {value}"
+        return f"{key} = {value}"
 
     # Add data usage information
-
     data_usage = stats.get("data_usage", {}) or {}
-
     if data_usage:
-
         paired_pct = data_usage.get("paired_usage_percent", 0.0)
-
         sim_pct = data_usage.get("sim_usage_percent", 0.0)
-
         meas_pct = data_usage.get("measured_usage_percent", 0.0)
-
-        
-
         lines.append(f"data usage = {paired_pct:.1f}% of available days")
-
         if data_usage.get("sim_days_total", 0) > 0:
-
-            lines.append(f"sim coverage = {sim_pct:.1f}% ({data_usage.get('sim_days_windowed_finite', 0)}/{data_usage.get('sim_days_total', 0)} days)")
-
+            lines.append(
+                f"sim coverage = {sim_pct:.1f}% ("
+                f"{data_usage.get('sim_days_windowed_finite', 0)}/"
+                f"{data_usage.get('sim_days_total', 0)} days)"
+            )
         if data_usage.get("measured_days_total", 0) > 0:
-
-            lines.append(f"measured coverage = {meas_pct:.1f}% ({data_usage.get('measured_days_windowed_finite', 0)}/{data_usage.get('measured_days_total', 0)} days)")
-
-
+            lines.append(
+                f"measured coverage = {meas_pct:.1f}% ("
+                f"{data_usage.get('measured_days_windowed_finite', 0)}/"
+                f"{data_usage.get('measured_days_total', 0)} days)"
+            )
 
     same = stats.get("same_day", {}) or {}
-
     if same:
-
-        def fmt_pair(k: str, v: float) -> Optional[str]:
-
-            if v is None or (isinstance(v, float) and not np.isfinite(v)):
-
-                return None
-
-            if k.lower() in {"r", "r_log", "r (meas vs median)", "nse", "kge", "r2", "r2_log"}:
-
-                return f"{k} = {float(v):.3f}"
-
-            if "coverage" in k.lower():
-
-                return f"{k} = {float(v) * 100:.1f}%"
-
-            # Error metrics and bias
-
-            return f"{k} = {float(v):.3g}"
-
         lines.append("<b>Same-day</b>")
-
-        order = ["r", "R2", "MAE", "RMSE", "Bias(obs-pred)", "PBIAS%", "NSE", "KGE", "MedAE", "coverage50", "coverage90", "coverage100"]
-
+        order = [
+            "r",
+            "R2",
+            "MAE",
+            "RMSE",
+            "Bias(obs-pred)",
+            "PBIAS%",
+            "NSE",
+            "KGE",
+            "MedAE",
+            "coverage50",
+            "coverage90",
+            "coverage100",
+        ]
         for key in order:
-
             if key in same:
-
-                s = fmt_pair(key, same[key])
-
-                if s:
-
-                    lines.append(s)
-
-        # Include any extra keys
-
+                formatted = _format_metric(key, same[key])
+                if formatted:
+                    lines.append(formatted)
         for key, val in same.items():
-
             if key in order:
-
                 continue
-
-            s = fmt_pair(str(key), val)
-
-            if s:
-
-                lines.append(s)
-
-
+            formatted = _format_metric(str(key), val)
+            if formatted:
+                lines.append(formatted)
 
     logd = stats.get("log_space", {}) or {}
-
     if logd:
-
         lines.append("<b>Log-space</b>")
-
         for key in ["r_log", "R2_log", "MAElog10", "RMSElog10", "NSElog10", "NSE_log", "d_log", "n_pos"]:
-
             if key in logd:
-
                 val = logd[key]
-
                 if key == "n_pos":
-
                     lines.append(f"n(+/+) = {int(val)}")
-
                 else:
-
                     if key.lower().startswith("r") or key.lower().endswith("log") or key.lower().startswith("nse"):
-
                         if isinstance(val, (int, float)) and np.isfinite(val):
-
                             lines.append(f"{key} = {float(val):.3f}")
-
                     else:
-
                         if isinstance(val, (int, float)) and np.isfinite(val):
-
                             lines.append(f"{key} = {float(val):.3g}")
 
-
-
     dist_summary = stats.get("distribution_summary", {}) or {}
-
     if dist_summary:
-
         lines.append("<b>Distribution Summary</b>")
-
         paired = dist_summary.get("paired", {}) or {}
-
-        for label, summary in [("Observed (paired)", paired.get("observed")), ("Predicted (paired)", paired.get("predicted"))]:
-
+        for label, summary in [
+            ("Observed (paired)", paired.get("observed")),
+            ("Predicted (paired)", paired.get("predicted")),
+        ]:
             if isinstance(summary, dict):
-
                 lines.append(f"{label}:")
-
                 for key in ["mean", "median", "p05", "p25", "p50", "p75", "p95", "sd", "var", "n"]:
-
                     val = summary.get(key)
-
                     if isinstance(val, (int, float)) and np.isfinite(val):
-
                         if key == "n":
-
                             lines.append(f"  {key} = {int(val)}")
-
                         else:
-
                             lines.append(f"  {key} = {val:.3g}")
-
         obs_full = dist_summary.get("observed_full")
-
         if isinstance(obs_full, dict):
-
             lines.append("Observed (full series):")
-
             for key in ["mean", "median", "sd", "var"]:
-
                 val = obs_full.get(key)
-
                 if isinstance(val, (int, float)) and np.isfinite(val):
-
                     lines.append(f"  {key} = {val:.3g}")
-
         pred_full = dist_summary.get("predicted_full")
-
         if isinstance(pred_full, dict):
-
             lines.append("Predicted (full series):")
-
             for key in ["mean", "median", "sd", "var"]:
-
                 val = pred_full.get(key)
-
                 if isinstance(val, (int, float)) and np.isfinite(val):
-
                     lines.append(f"  {key} = {val:.3g}")
-
-
 
     gl = stats.get("global_lag", {}) or {}
-
     if gl:
-
         lines.append("<b>Global lag</b>")
-
         metric = gl.get("metric", "r")
-
         if "best_lag_days" in gl:
-
             lines.append(f"best lag = {int(gl['best_lag_days'])} d (by {metric})")
-
         for key in ["r", "R2", "MAE", "RMSE", "NSE"]:
-
             if key in gl and isinstance(gl[key], (int, float)) and np.isfinite(gl[key]):
-
                 fmt = ".3f" if key in {"r", "R2", "NSE"} else ".3g"
-
                 lines.append(f"{key} = {gl[key]:{fmt}}")
 
-
-
-    # Show one or more local-window blocks sorted by K
-
     for key in sorted([k for k in stats.keys() if str(k).startswith("local_window_K")]):
-
         lw = stats.get(key) or {}
-
         if not lw:
-
             continue
-
         lines.append(f"<b>Local window K={int(lw.get('K', 0))}</b>")
-
-        for kk in ["RMSE", "MAE", "Bias(obs-pred)", "NSE","median_lag_days", "IQR_lag_days", "fraction_zero_lag", "n"]:
-
+        for kk in [
+            "RMSE",
+            "MAE",
+            "Bias(obs-pred)",
+            "NSE",
+            "median_lag_days",
+            "IQR_lag_days",
+            "fraction_zero_lag",
+            "n",
+        ]:
             if kk in lw and isinstance(lw[kk], (int, float)) and np.isfinite(lw[kk]):
-
                 if kk in {"fraction_zero_lag"}:
-
                     lines.append(f"{kk} = {lw[kk] * 100:.1f}%")
-
                 elif kk in {"median_lag_days", "IQR_lag_days", "n"}:
-
                     if kk == "n":
-
                         lines.append(f"{kk} = {int(lw[kk])}")
-
                     else:
-
                         lines.append(f"{kk} = {lw[kk]:.3g}")
-
                 elif kk in {"NSE"}:
-
                     lines.append(f"{kk} = {lw[kk]:.3f}")
-
                 else:
-
                     lines.append(f"{kk} = {lw[kk]:.3g}")
 
-
-
-    ex = stats.get("extras", {}) or {}
-
-    if ex:
-
-        lines.append("<b>Extras</b>")
-
-        for name, ed in ex.items():
-
-            r = ed.get("r")
-
-            if isinstance(r, (int, float)) and np.isfinite(r):
-
-                lines.append(f"r (obs vs {name}) = {r:.3f}")
-
-
-
-    # Band deviation analysis
-
-    band_dev = stats.get("band_deviation", {}) or {}
-
-    if band_dev:
-
-        lines.append("<b>Band Analysis</b>")
-
-        
-
-        # Min-max band stats (stored with keys like "band_width_mean", "band_width_rel%")
-
-        if "band_width_mean" in band_dev:
-
-            width = band_dev["band_width_mean"]
-
-            if isinstance(width, (int, float)) and np.isfinite(width):
-
-                lines.append(f"Min-max width = {width:.3g}")
-
-        if "band_width_rel%" in band_dev:
-
-            rel_width = band_dev["band_width_rel%"]
-
-            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
-
-                lines.append(f"Min-max width (%) = {rel_width:.1f}%")
-
-        if "band_asymmetry" in band_dev:
-
-            asym = band_dev["band_asymmetry"]
-
-            if isinstance(asym, (int, float)) and np.isfinite(asym):
-
-                lines.append(f"Min-max asymmetry = {asym:.3f}")
-
-        if "band_rmse_vs_mean" in band_dev:
-
-            rmse = band_dev["band_rmse_vs_mean"]
-
-            if isinstance(rmse, (int, float)) and np.isfinite(rmse):
-
-                lines.append(f"Min-max RMSE vs mean = {rmse:.3g}")
-
-                
-
-        # Percentile band stats (stored with keys like "p50_band_width_mean", "p90_band_width_mean")
-
-        if "p50_band_width_mean" in band_dev:
-
-            width = band_dev["p50_band_width_mean"]
-
-            if isinstance(width, (int, float)) and np.isfinite(width):
-
-                lines.append(f"50% band width = {width:.3g}")
-
-        if "p90_band_width_mean" in band_dev:
-
-            width = band_dev["p90_band_width_mean"]
-
-            if isinstance(width, (int, float)) and np.isfinite(width):
-
-                lines.append(f"90% band width = {width:.3g}")
-
-        if "p50_band_width_rel%" in band_dev:
-
-            rel_width = band_dev["p50_band_width_rel%"]
-
-            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
-
-                lines.append(f"50% band width (%) = {rel_width:.1f}%")
-
-        if "p90_band_width_rel%" in band_dev:
-
-            rel_width = band_dev["p90_band_width_rel%"]
-
-            if isinstance(rel_width, (int, float)) and np.isfinite(rel_width):
-
-                lines.append(f"90% band width (%) = {rel_width:.1f}%")
-
-
-
-    # Measured vs series comparisons
-
-    meas_vs = stats.get("measured_vs_series", {}) or {}
-
-    if meas_vs:
-
-        lines.append("<b>Measured vs All Series</b>")
-
-        
-
-        # Parse flat keys like "vs_mean_coverage50"
-
-        series_groups = {}
-
-        for key, val in meas_vs.items():
-
-            if not key.startswith("vs_"):
-
-                continue
-
-            parts = key[3:].split("_")  # Remove "vs_" prefix
-
-            if len(parts) >= 2:
-
-                metric = parts[-1]
-
-                series_name = "_".join(parts[:-1])
-
-                series_groups.setdefault(series_name, {})[metric] = val
-
-        
-
-        series_order = ["mean", "min", "max", "p05", "p25", "p50", "p75", "p95"]
-
-        for series_name in series_groups.keys():
-
-            if series_name not in series_order:
-
-                series_order.append(series_name)
-
-        
-
-        metric_defs_numeric = [
-
-            ("r", "r"),
-
-            ("nse", "NSE"),
-
-            ("NSE_rel", "NSE (relative)"),
-
-            ("d", "Index of agreement"),
-
-            ("d_rel", "Index of agreement (relative)"),
-
-            ("RSR", "RSR"),
-
-            ("rmse", "RMSE"),
-
-            ("mae", "MAE"),
-
-            ("bias", "Bias (obs-pred)"),
-
-        ]
-
-        metric_defs_coverage = [
-
-            ("coverage50", "within 50% band"),
-
-            ("coverage90", "within 90% band"),
-
-            ("coverage100", "within 100% band"),
-
-            ("coverage_minmax", "within min-max envelope"),
-
-        ]
-
-        for series_name in series_order:
-
-            if series_name not in series_groups:
-
-                continue
-
-            series_stats = series_groups[series_name]
-
-            if not series_stats:
-
-                continue
-
-            display_name = series_name
-
-            if series_name.startswith("p") and series_name[1:].isdigit():
-
-                display_name = f"{series_name[1:]}{series_name[0]}"  # p05 -> 05p
-
-            elif series_name.startswith("extra_"):
-
-                display_name = series_name[6:]
-
-            lines.append(f"<i>vs {display_name}:</i>")
-
-            for metric, label_text in metric_defs_numeric:
-
-                val = series_stats.get(metric)
-
-                if isinstance(val, (int, float)) and np.isfinite(val):
-
-                    lines.append(f"  {label_text} = {val:.3g}")
-
-            for metric, label_text in metric_defs_coverage:
-
-                val = series_stats.get(metric)
-
-                if isinstance(val, (int, float)) and np.isfinite(val):
-
-                    lines.append(f"  {label_text} = {val * 100:.1f}%")
-
-
-
     overlay_cmp = stats.get("overlay_comparison", {}) or {}
-
     if overlay_cmp:
-
         lines.append("<b>Overlay Comparison</b>")
-
         cmp_dict = dict(overlay_cmp)
-
         baseline_entry = cmp_dict.pop("__baseline__", None)
-
         if isinstance(baseline_entry, dict):
-
             rel = baseline_entry.get("relative_width")
-
             if isinstance(rel, (int, float)) and np.isfinite(rel):
-
                 lines.append(f"Model relative width (min-max / median) = {rel:.3g}")
-
+            for label_key in ("median", "mean", "sd"):
+                val = baseline_entry.get(label_key)
+                if isinstance(val, (int, float)) and np.isfinite(val):
+                    lines.append(f"Model {label_key} = {val:.3g}")
         for name, comp in cmp_dict.items():
-
             if not isinstance(comp, dict):
-
                 continue
-
             lines.append(f"<i>{name}:</i>")
-
             delta = comp.get("median_delta")
-
             if isinstance(delta, (int, float)) and np.isfinite(delta):
-
-                lines.append(f"  Median Δ vs overlay = {delta:.3g} kg/d")
-
+                lines.append(f"  Median delta (baseline - overlay) = {delta:.3g}")
+            delta_pct = comp.get("median_delta_pct")
+            if isinstance(delta_pct, (int, float)) and np.isfinite(delta_pct):
+                lines.append(f"  Median delta (%) = {delta_pct:.2f}%")
             rel = comp.get("relative_width")
-
             if isinstance(rel, (int, float)) and np.isfinite(rel):
-
                 lines.append(f"  Relative width = {rel:.3g}")
+            rmse_val = comp.get("rmse")
+            if isinstance(rmse_val, (int, float)) and np.isfinite(rmse_val):
+                lines.append(f"  RMSE = {rmse_val:.3g}")
+            r_val = comp.get("r")
+            if isinstance(r_val, (int, float)) and np.isfinite(r_val):
+                lines.append(f"  r = {r_val:.3f}")
 
-
+    overlay_full = stats.get("overlay_full_series", {}) or {}
+    if overlay_full:
+        lines.append("<b>Overlay Full-Series</b>")
+        metric_order = [
+            "r",
+            "R2",
+            "MAE",
+            "RMSE",
+            "Bias(obs-pred)",
+            "MedAE",
+        ]
+        for name, metrics in overlay_full.items():
+            if not isinstance(metrics, dict):
+                continue
+            lines.append(f"<i>{name}:</i>")
+            n_pairs = metrics.get("n_pairs")
+            if isinstance(n_pairs, (int, float)) and np.isfinite(n_pairs):
+                lines.append(f"  n = {int(n_pairs)}")
+            for key in metric_order:
+                if key in metrics:
+                    formatted = _format_metric(key, metrics[key])
+                    if formatted:
+                        lines.append(f"  {formatted}")
+            for key, val in metrics.items():
+                if key in metric_order or key == "n_pairs":
+                    continue
+                formatted = _format_metric(str(key), val)
+                if formatted:
+                    lines.append(f"  {formatted}")
 
     coverage_debug = stats.get("coverage_debug", {}) or {}
-
     if coverage_debug:
-
         lines.append("<b>Coverage Debug</b>")
-
         for label, messages in coverage_debug.items():
-
             lines.append(f"{label}:")
-
             for msg in messages:
-
                 lines.append(f"  {msg}")
 
-
-
-    # Join with HTML <br>
-
     return "<br>".join(lines)
-
-
-
-
-
-# -----------------------------
-
-# Public diagnostics: figures for exploration inside/outside dashboard
-
-# -----------------------------
-
-
 
 def local_window_matching_detail(
 

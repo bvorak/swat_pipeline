@@ -471,8 +471,6 @@ def fan_compare_simulations_dashboard(
     except Exception:
         pass
     cb_show_diags = widgets.Checkbox(value=True, description="Show diagnostics")
-    # New checkbox: when enabled, add sediment net (SED_IN - SED_OUT) overlay to load duration curve diagnostics
-    cb_ldc_sediment = widgets.Checkbox(value=True, description="LDC sediment overlay")
     # Stats behavior controls
     dd_lag_metric = widgets.Dropdown(options=["r", "NSE"], value="r", description="Lag by:", layout=widgets.Layout(width="140px"))
     sl_max_lag = widgets.IntSlider(value=2, min=0, max=5, step=1, description="Lag±:", continuous_update=False, layout=widgets.Layout(width="220px"))
@@ -1085,39 +1083,6 @@ def fan_compare_simulations_dashboard(
         _last["aligned_df"] = aligned_df
         _dbg("aligned", dict(T=arr.shape[0], N=arr.shape[1]))
 
-        # Capture sediment net series for later diagnostics (LDC overlay) early, before resampling alters availability.
-        try:
-            sed_series_candidate = None
-            # Look in original simulation frames for chosen reach
-            for df_run in sim_dfs.values():
-                cols = getattr(df_run, 'columns', [])
-                has_precomp = 'SED_IN_MINUS_OUT' in cols
-                sin = next((c for c in ['SED_INtons','SED_IN'] if c in cols), None)
-                sout = next((c for c in ['SED_OUTtons','SED_OUT'] if c in cols), None)
-                if has_precomp:
-                    tmp = df_run[df_run[reach_col] == dd_reach.value][[date_col, 'SED_IN_MINUS_OUT']].copy()
-                    if not tmp.empty:
-                        tmp = _ensure_dt_index(tmp, date_col)
-                        sed_series_candidate = tmp['SED_IN_MINUS_OUT'].dropna()
-                        break
-                elif sin and sout:
-                    tmp = df_run[df_run[reach_col] == dd_reach.value][[date_col, sin, sout]].copy()
-                    if not tmp.empty:
-                        tmp = _ensure_dt_index(tmp, date_col)
-                        with np.errstate(invalid='ignore'):
-                            sed_series_candidate = (tmp[sin].astype(float) - tmp[sout].astype(float)).dropna()
-                        if sed_series_candidate is not None and not sed_series_candidate.empty:
-                            break
-            if sed_series_candidate is not None and not sed_series_candidate.empty:
-                _last['sed_series_for_ldc'] = sed_series_candidate.sort_index()
-                _dbg('store sed_series_for_ldc', dict(n=len(sed_series_candidate)))
-            else:
-                _last['sed_series_for_ldc'] = None
-                _dbg('store sed_series_for_ldc', 'none available')
-        except Exception as e:
-            _last['sed_series_for_ldc'] = None
-            _dbg('store sed_series_for_ldc failed', str(e))
-
         # Compute quantiles across runs (ignore NaNs)
         percs = [5, 10, 25, 50, 60, 75, 90, 95]
         if arr.shape[1] == 0:
@@ -1357,21 +1322,7 @@ def fan_compare_simulations_dashboard(
 
         # Store band data for comprehensive statistics (grouped by series)
         band_groups: Dict[str, Dict[str, pd.Series]] = {}
-        ensemble_band_raw: Dict[str, pd.Series] = {}
         ensemble_band: Dict[str, pd.Series] = {}
-        if arr.size:
-            idx_full = aligned_df.index
-            with np.errstate(invalid='ignore'):
-                raw_min = np.nanmin(arr, axis=1)
-                raw_max = np.nanmax(arr, axis=1)
-                raw_mean = np.nanmean(arr, axis=1)
-            ensemble_band_raw["min"] = pd.Series(raw_min, index=idx_full, name="min")
-            ensemble_band_raw["max"] = pd.Series(raw_max, index=idx_full, name="max")
-            ensemble_band_raw["mean"] = pd.Series(raw_mean, index=idx_full, name="mean")
-            for perc in (5, 10, 25, 50, 60, 75, 90, 95):
-                if perc in q:
-                    name = f"p{perc:02d}"
-                    ensemble_band_raw[name] = pd.Series(q[perc], index=idx_full, name=name)
         if n_runs_here >= min_runs_for_bands:
             # Fan chart mode: store percentile series
             # Determine if event filtering is active; relax threshold in that case
@@ -1585,8 +1536,6 @@ def fan_compare_simulations_dashboard(
                     # Keep plotting even if one overlay fails
                     continue
 
-        if ensemble_band_raw:
-            band_groups["ensemble_raw"] = {k: v for k, v in ensemble_band_raw.items() if isinstance(v, pd.Series)}
         _extend_relative_bands(band_groups, _last.get("extra_series", {}), prefix="extra")
         _last["band_data"] = band_groups
 
@@ -2388,50 +2337,7 @@ def fan_compare_simulations_dashboard(
                         for key in ["obs_vs_pred", "resid_hist", "resid_vs_pred", "lag_hist", "load_duration_curve"]:
                             if key in figs:
                                 try:
-                                    fig_here = figs[key]
-                                    # Inject sediment overlay into LDC if requested
-                                    if key == "load_duration_curve" and cb_ldc_sediment.value:
-                                        try:
-                                            sed_series = _last.get('sed_series_for_ldc')
-                                            if sed_series is not None:
-                                                print('[LDC-SED][debug] using stored sed_series_for_ldc length', len(sed_series))
-                                            else:
-                                                # Fallback to aligned_df scan (legacy path)
-                                                aligned_df_any = _last.get("aligned_df")
-                                                if isinstance(aligned_df_any, pd.DataFrame):
-                                                    candidate_cols = [c for c in ["SED_INtons", "SED_IN", "SED_OUTtons", "SED_OUT", "SED_IN_MINUS_OUT"] if c in aligned_df_any.columns]
-                                                    print("[LDC-SED][debug] fallback candidate sediment cols:", candidate_cols)
-                                                    sin = next((c for c in ["SED_INtons", "SED_IN"] if c in candidate_cols), None)
-                                                    sout = next((c for c in ["SED_OUTtons", "SED_OUT"] if c in candidate_cols), None)
-                                                    if "SED_IN_MINUS_OUT" in candidate_cols:
-                                                        sed_series = aligned_df_any["SED_IN_MINUS_OUT"].dropna()
-                                                    elif sin and sout:
-                                                        sed_series = (aligned_df_any[sin] - aligned_df_any[sout]).dropna()
-                                                else:
-                                                    print("[LDC-SED][debug] aligned_df missing or not DataFrame")
-                                            if sed_series is not None and not sed_series.empty:
-            					# Build exceedance curve
-                                                import numpy as _np
-                                                from .stats import _duration_curve_from_series as _dcfs  # type: ignore
-                                                levels = _np.linspace(1.0, 99.0, 99)
-                                                x_sed, y_sed = _dcfs(sed_series, levels)
-                                                print("[LDC-SED][debug] first 5 exceedance pairs:", list(zip(x_sed[:5], y_sed[:5])))
-                                                fig_here.update_layout(
-                                                    yaxis2=dict(title="Net sediment (tons/day)", overlaying="y", side="right", showgrid=False)
-                                                )
-                                                fig_here.add_trace(go.Scatter(
-                                                    x=x_sed,
-                                                    y=y_sed,
-                                                    mode="lines",
-                                                    name="Net sediment",
-                                                    line=dict(color="brown", width=2, dash="dot"),
-                                                    yaxis="y2",
-                                                ))
-                                            else:
-                                                print("[LDC-SED][debug] No sediment series available for overlay")
-                                        except Exception as e:
-                                            print("[LDC-SED][debug] exception:", e)
-                                    children.append(go.FigureWidget(fig_here))
+                                    children.append(go.FigureWidget(figs[key]))
                                 except Exception:
                                     children.append(widgets.HTML(f"<pre>Unable to render {key}</pre>"))
                         if children:
@@ -2734,7 +2640,7 @@ def fan_compare_simulations_dashboard(
     cb_range_slider.observe(_on_range_slider_toggle, names="value")
 
     # Stats/dx toggles
-    for _w in (dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment):
+    for _w in (dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags):
         try:
             _w.observe(lambda *_: _mark_stale(), names="value")
         except Exception:
@@ -2803,7 +2709,7 @@ def fan_compare_simulations_dashboard(
             controls_right = widgets.VBox(rows)
 
     # Stats controls group (small toggles)
-    stats_controls = widgets.HBox([dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment])
+    stats_controls = widgets.HBox([dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags])
     controls = widgets.HBox([controls_left, widgets.HBox([widgets.Label(""), controls_right])])
     stats_row = widgets.HBox([stats_html, diag_box], layout=widgets.Layout(width="100%"))
     # Wire reload button
