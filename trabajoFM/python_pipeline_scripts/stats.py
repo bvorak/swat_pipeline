@@ -1477,6 +1477,7 @@ def compute_stats_for_view(
             return float('nan')
         if SHIFT_AGG == 'mean':
             return float(np.nanmean(arr))
+        # default median (for 'median' or fallback when not both)
         return float(np.nanmedian(arr))
 
     stats: Dict[str, object] = {}
@@ -2165,11 +2166,18 @@ def compute_stats_for_view(
 
     baseline_median_width = float("nan")
     baseline_p90_width = float("nan")
+    baseline_mean_width = float("nan")
     baseline_coverage_fraction = float("nan")
     if isinstance(baseline_series_for_overlay, pd.Series):
         baseline_width_index = baseline_series_for_overlay.dropna().index
         if isinstance(baseline_width_index, pd.Index) and baseline_width_index.size:
             baseline_median_width, baseline_p90_width = _width_stats_for_index(baseline_width_index)
+            # Compute mean raw width directly (not just median/p90) for user-requested display
+            if isinstance(raw_width_series, pd.Series) and not raw_width_series.empty:
+                try:
+                    baseline_mean_width = float(np.nanmean(raw_width_series.reindex(baseline_width_index).to_numpy(dtype=float)))
+                except Exception:
+                    baseline_mean_width = float("nan")
         baseline_coverage_fraction = _coverage_fraction_for_series(baseline_series_for_overlay, baseline_series_for_overlay.index)
 
     event_mode_label = "all"
@@ -2204,7 +2212,8 @@ def compute_stats_for_view(
         "all_days": int(event_idx_all.size) if event_idx_all is not None else 0,
     }
 
-    baseline_relative_width = float("nan")
+    baseline_relative_width = float("nan")  # median-based relative width (min-max/median)
+    baseline_mean_relative_width = float("nan")  # mean-based relative width (min-max/mean)
     p05_series_full = _window_series(raw_ensemble.get("p05")) if isinstance(raw_ensemble, dict) else None
     p95_series_full = _window_series(raw_ensemble.get("p95")) if isinstance(raw_ensemble, dict) else None
     if p05_series_full is None and q_df is not None and "p05" in q_df.columns:
@@ -2219,16 +2228,23 @@ def compute_stats_for_view(
     ):
         idx = baseline_summary_series.index.intersection(p05_series_full.index).intersection(p95_series_full.index)
         if len(idx) > 0:
-            med_vals = baseline_summary_series.reindex(idx).to_numpy(dtype=float)
+            base_subset = baseline_summary_series.reindex(idx).to_numpy(dtype=float)
             width_vals = (
                 p95_series_full.reindex(idx).to_numpy(dtype=float)
                 - p05_series_full.reindex(idx).to_numpy(dtype=float)
             )
-            denom = np.where(np.abs(med_vals) > 0, np.abs(med_vals), np.nan)
-            rel_vals = width_vals / denom
-            rel_vals = rel_vals[np.isfinite(rel_vals)]
-            if rel_vals.size:
-                baseline_relative_width = float(np.nanmedian(rel_vals))
+            # Median-based relative width
+            denom_median = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
+            rel_vals_median = width_vals / denom_median
+            rel_vals_median = rel_vals_median[np.isfinite(rel_vals_median)]
+            if rel_vals_median.size:
+                baseline_relative_width = float(np.nanmedian(rel_vals_median))
+            # Mean-based relative width (uses mean of base_subset for each day equivalently -> width/base)
+            denom_mean = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
+            rel_vals_mean = width_vals / denom_mean
+            rel_vals_mean = rel_vals_mean[np.isfinite(rel_vals_mean)]
+            if rel_vals_mean.size:
+                baseline_mean_relative_width = float(np.nanmean(rel_vals_mean))
 
     allowed_overlay_metrics = {"r", "R2", "MAE", "RMSE", "Bias(obs-pred)", "MedAE"}
 
@@ -2258,7 +2274,16 @@ def compute_stats_for_view(
             overlay_vals = paired_overlay.to_numpy(dtype=float)
             diff = base_vals - overlay_vals
             # SHIFT AGGREGATION POINT: Change np.nanmedian -> np.nanmean below to switch to mean shifts
-            median_delta = _shift_agg(diff) if diff.size else float("nan")
+            # Primary shift (baseline - overlay) summary. Supports SHIFT_AGG in {'median','mean','both'}
+            median_delta = float('nan')
+            mean_delta = float('nan')
+            if diff.size:
+                if SHIFT_AGG == 'both':
+                    with np.errstate(all='ignore'):
+                        median_delta = float(np.nanmedian(diff))
+                        mean_delta = float(np.nanmean(diff))
+                else:
+                    median_delta = _shift_agg(diff)
             denom_series = paired_base.abs().replace(0, np.nan)
             rel_series = (diff_series.abs() / denom_series).replace([np.inf, -np.inf], np.nan)
             rel_vals = rel_series.dropna().to_numpy(dtype=float)
@@ -2267,7 +2292,16 @@ def compute_stats_for_view(
             percent_series = percent_series.replace([np.inf, -np.inf], np.nan)
             percent_vals = percent_series.dropna().to_numpy(dtype=float)
             # SHIFT AGGREGATION POINT (%): Change np.nanmedian -> np.nanmean to use mean percent shift
-            median_delta_pct = _shift_agg(percent_vals) if percent_vals.size else float("nan")
+            if percent_vals.size:
+                if SHIFT_AGG == 'both':
+                    with np.errstate(all='ignore'):
+                        median_delta_pct = float(np.nanmedian(percent_vals))
+                        mean_delta_pct = float(np.nanmean(percent_vals))
+                else:
+                    median_delta_pct = _shift_agg(percent_vals)
+            else:
+                median_delta_pct = float('nan')
+                mean_delta_pct = float('nan') if SHIFT_AGG == 'both' else None
             rmse_overlay = _rmse(base_vals, overlay_vals)
             r_overlay = _pearson_r(base_vals, overlay_vals)
             paired_index = paired_base.index
@@ -2340,6 +2374,8 @@ def compute_stats_for_view(
             # Controlled by global SHIFT_AGG (median/mean)
             delta_event_pairs = float("nan")
             delta_non_event_pairs = float("nan")
+            delta_event_pairs_mean = float("nan")
+            delta_non_event_pairs_mean = float("nan")
             try:
                 if event_mask is not None and np.any(event_mask):
                     ev_base = paired_base.loc[event_mask].to_numpy(dtype=float)
@@ -2347,7 +2383,12 @@ def compute_stats_for_view(
                     if ev_base.size and ev_overlay.size:
                         ev_diff = ev_base - ev_overlay
                         if ev_diff.size:
-                            delta_event_pairs = _shift_agg(ev_diff)
+                            if SHIFT_AGG == 'both':
+                                with np.errstate(all='ignore'):
+                                    delta_event_pairs = float(np.nanmedian(ev_diff))
+                                    delta_event_pairs_mean = float(np.nanmean(ev_diff))
+                            else:
+                                delta_event_pairs = _shift_agg(ev_diff)
             except Exception:
                 pass
             try:
@@ -2357,7 +2398,12 @@ def compute_stats_for_view(
                     if nev_base.size and nev_overlay.size:
                         nev_diff = nev_base - nev_overlay
                         if nev_diff.size:
-                            delta_non_event_pairs = _shift_agg(nev_diff)
+                            if SHIFT_AGG == 'both':
+                                with np.errstate(all='ignore'):
+                                    delta_non_event_pairs = float(np.nanmedian(nev_diff))
+                                    delta_non_event_pairs_mean = float(np.nanmean(nev_diff))
+                            else:
+                                delta_non_event_pairs = _shift_agg(nev_diff)
             except Exception:
                 pass
 
@@ -2385,7 +2431,18 @@ def compute_stats_for_view(
             delta_p50 = base_p50 - overlay_p50 if np.isfinite(base_p50) and np.isfinite(overlay_p50) else float("nan")
             delta_p90 = base_p90 - overlay_p90 if np.isfinite(base_p90) and np.isfinite(overlay_p90) else float("nan")
 
-            overlay_comparison[str(name)] = {
+            # Normalized shift metrics (using baseline central tendency).
+            normalized_median_delta = float('nan')
+            normalized_mean_delta = float('nan')
+            if np.isfinite(base_p50) and base_p50 != 0 and np.isfinite(median_delta):
+                normalized_median_delta = float(median_delta / base_p50)
+            if SHIFT_AGG in ('mean','both') and np.isfinite(base_mean) and base_mean != 0:
+                # if using mean-only mode, median_delta holds mean but we compute explicit mean_delta where both
+                ref_delta = mean_delta if SHIFT_AGG == 'both' else median_delta
+                if np.isfinite(ref_delta):
+                    normalized_mean_delta = float(ref_delta / base_mean)
+
+            entry = {
                 "median_delta": median_delta,
                 "median_delta_pct": median_delta_pct,
                 "relative_width": relative_width,
@@ -2419,7 +2476,24 @@ def compute_stats_for_view(
                 "delta_p90": delta_p90,
                 "delta_event_pairs": delta_event_pairs,
                 "delta_non_event_pairs": delta_non_event_pairs,
+                "normalized_median_delta": normalized_median_delta,
             }
+            if SHIFT_AGG == 'both':
+                entry.update({
+                    "mean_delta": mean_delta,
+                    "mean_delta_pct": mean_delta_pct,
+                    "delta_event_pairs_mean": delta_event_pairs_mean,
+                    "delta_non_event_pairs_mean": delta_non_event_pairs_mean,
+                    "normalized_mean_delta": normalized_mean_delta,
+                })
+            elif SHIFT_AGG == 'mean':
+                # For clarity when using mean-only mode, provide alias keys.
+                entry.update({
+                    "mean_delta": median_delta,  # median_delta holds mean shift value
+                    "mean_delta_pct": median_delta_pct,
+                    "normalized_mean_delta": normalized_mean_delta,
+                })
+            overlay_comparison[str(name)] = entry
 
             overlay_metrics = _pairwise_metrics(overlay_vals, base_vals)
             filtered_metrics = {k: overlay_metrics[k] for k in allowed_overlay_metrics if k in overlay_metrics and np.isfinite(overlay_metrics[k])}
@@ -2433,8 +2507,27 @@ def compute_stats_for_view(
     baseline_entry = overlay_comparison.setdefault("__baseline__", {})
     if np.isfinite(baseline_relative_width):
         baseline_entry["relative_width"] = baseline_relative_width
+    # Mean-based relative width (if computed)
+    if 'baseline_mean_relative_width' not in locals():
+        baseline_mean_relative_width = float('nan')  # safety
+    if np.isfinite(baseline_mean_relative_width):
+        baseline_entry["relative_width_mean"] = baseline_mean_relative_width
+    # Normalized widths (dimensionless) if possible
+    try:
+        if np.isfinite(baseline_relative_width) and baseline_summary.get('median') not in (None, 0):
+            median_val = baseline_summary.get('median')
+            if isinstance(median_val, (int, float)) and np.isfinite(median_val) and median_val != 0:
+                baseline_entry["relative_width_norm_median"] = float(baseline_relative_width)
+        if np.isfinite(baseline_mean_relative_width) and baseline_summary.get('mean') not in (None, 0):
+            mean_val = baseline_summary.get('mean')
+            if isinstance(mean_val, (int, float)) and np.isfinite(mean_val) and mean_val != 0:
+                baseline_entry["relative_width_norm_mean"] = float(baseline_mean_relative_width)
+    except Exception:
+        pass
     if np.isfinite(baseline_median_width):
         baseline_entry["median_W"] = baseline_median_width
+    if np.isfinite(baseline_mean_width):
+        baseline_entry["mean_W"] = baseline_mean_width
     if np.isfinite(baseline_p90_width):
         baseline_entry["p90_W"] = baseline_p90_width
     if np.isfinite(baseline_coverage_fraction):
@@ -2638,9 +2731,21 @@ def format_stats_text(stats: Dict[str, object]) -> str:
             rel = baseline_entry.get("relative_width")
             if isinstance(rel, (int, float)) and np.isfinite(rel):
                 lines.append(f"Model relative width (min-max / median) = {rel:.3g}")
+            rel_mean = baseline_entry.get("relative_width_mean")
+            if isinstance(rel_mean, (int, float)) and np.isfinite(rel_mean):
+                lines.append(f"Model relative width (min-max / mean) = {rel_mean:.3g}")
+            rel_norm_med = baseline_entry.get("relative_width_norm_median")
+            if isinstance(rel_norm_med, (int, float)) and np.isfinite(rel_norm_med):
+                lines.append(f"Model normalized relative width (using median) = {rel_norm_med:.3g}")
+            rel_norm_mean = baseline_entry.get("relative_width_norm_mean")
+            if isinstance(rel_norm_mean, (int, float)) and np.isfinite(rel_norm_mean):
+                lines.append(f"Model normalized relative width (using mean) = {rel_norm_mean:.3g}")
             median_w = baseline_entry.get("median_W")
             if isinstance(median_w, (int, float)) and np.isfinite(median_w):
                 lines.append(f"Model raw width median (W) = {median_w:.3g}")
+            mean_w = baseline_entry.get("mean_W")
+            if isinstance(mean_w, (int, float)) and np.isfinite(mean_w):
+                lines.append(f"Model raw width mean (W) = {mean_w:.3g}")
             p90_w = baseline_entry.get("p90_W")
             if isinstance(p90_w, (int, float)) and np.isfinite(p90_w):
                 lines.append(f"Model raw width p90 (W) = {p90_w:.3g}")
@@ -2715,12 +2820,41 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         lines.append("")  # Blank line between entries
         lines.append(f"<i>{name}:</i>")
         printed_keys = {"median_delta", "median_delta_pct", "relative_width", "rmse", "r"}
-        delta = comp.get("median_delta")
-        if isinstance(delta, (int, float)) and np.isfinite(delta):
-            lines.append(f"  Median delta (baseline - overlay) = {delta:.3g}")
-        delta_pct = comp.get("median_delta_pct")
-        if isinstance(delta_pct, (int, float)) and np.isfinite(delta_pct):
-            lines.append(f"  Median delta (%) = {delta_pct:.2f}%")
+        # Determine aggregation mode availability
+        has_mean = "mean_delta" in comp and np.isfinite(comp.get("mean_delta", float("nan")))
+        has_both = has_mean and ("median_delta" in comp) and np.isfinite(comp.get("median_delta", float("nan"))) and comp.get("mean_delta") != comp.get("median_delta")
+        median_delta_val = comp.get("median_delta")
+        mean_delta_val = comp.get("mean_delta") if has_mean else None
+        if has_both:
+            if isinstance(median_delta_val, (int, float)) and np.isfinite(median_delta_val):
+                lines.append(f"  Median shift (baseline - overlay) = {median_delta_val:.3g}")
+            if isinstance(mean_delta_val, (int, float)) and np.isfinite(mean_delta_val):
+                lines.append(f"  Mean shift (baseline - overlay) = {mean_delta_val:.3g}")
+        else:
+            # Single mode (median or mean); label generically as 'Shift'
+            single_label = "Shift" if has_mean and not ("median_delta" in comp) else ("Median shift" if not has_mean else "Mean shift")
+            val = mean_delta_val if has_mean and not has_both else median_delta_val
+            if isinstance(val, (int, float)) and np.isfinite(val):
+                lines.append(f"  {single_label} (baseline - overlay) = {val:.3g}")
+        # Percent shift
+        if has_both:
+            mdp = comp.get("median_delta_pct")
+            mnp = comp.get("mean_delta_pct")
+            if isinstance(mdp, (int, float)) and np.isfinite(mdp):
+                lines.append(f"  Median shift (%) = {mdp:.2f}%")
+            if isinstance(mnp, (int, float)) and np.isfinite(mnp):
+                lines.append(f"  Mean shift (%) = {mnp:.2f}%")
+        else:
+            mdp = comp.get("median_delta_pct") if not has_mean or not has_both else comp.get("mean_delta_pct")
+            if isinstance(mdp, (int, float)) and np.isfinite(mdp):
+                lines.append(f"  Shift (%) = {mdp:.2f}%")
+        # Normalized shifts
+        nmed = comp.get("normalized_median_delta")
+        if isinstance(nmed, (int, float)) and np.isfinite(nmed):
+            lines.append(f"  Normalized median shift (delta / baseline p50) = {nmed:.3g}")
+        nmean = comp.get("normalized_mean_delta")
+        if isinstance(nmean, (int, float)) and np.isfinite(nmean):
+            lines.append(f"  Normalized mean shift (delta / baseline mean) = {nmean:.3g}")
         rel = comp.get("relative_width")
         #if isinstance(rel, (int, float)) and np.isfinite(rel):
          #   lines.append(f"  Relative width = {rel:.3g}")
@@ -2761,8 +2895,20 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         for key, label in delta_stat_metrics:
             value = comp.get(key)
             if isinstance(value, (int, float)) and np.isfinite(value):
-                lines.append(f"  {label} = {value:.3g}")
+                # Avoid re-printing median/mean shifts already shown
+                if key in {"delta_mean", "delta_p50"} and has_both:
+                    pass
+                else:
+                    lines.append(f"  {label} = {value:.3g}")
                 printed_keys.add(key)
+        # If both modes, also expose event/non-event mean variant shifts if present
+        if has_both:
+            evm = comp.get("delta_event_pairs_mean")
+            if isinstance(evm, (int, float)) and np.isfinite(evm):
+                lines.append(f"  Shift event pairs (mean) = {evm:.3g}")
+            nvm = comp.get("delta_non_event_pairs_mean")
+            if isinstance(nvm, (int, float)) and np.isfinite(nvm):
+                lines.append(f"  Shift non-event pairs (mean) = {nvm:.3g}")
 
         event_pairs = comp.get("event_pairs")
         if isinstance(event_pairs, (int, float)) and event_pairs > 0:

@@ -832,6 +832,18 @@ def fan_compare_simulations_dashboard(
                 ("min", "Simulation min", dict(color="#00441b", width=1.2)),  # optional (band bottom)
             ]
 
+            # --------------------------------------------------------------
+            # Log-scale toggle (base 10) for the Load Duration Curve.
+            # Provide via ui_defaults={"ldc_log_scale": True} when invoking
+            # fan_compare_simulations_dashboard. Falls back to False.
+            # Data aren't transformed; only axis scaling changes. Non-positive
+            # values are suppressed automatically by Plotly on a log axis.
+            # --------------------------------------------------------------
+            try:
+                LDC_LOG_SCALE = bool((ui_defaults or {}).get("ldc_log_scale", False))  # type: ignore
+            except Exception:
+                LDC_LOG_SCALE = False
+
             # Min-max shaded band (only if both columns exist and non-empty)
             if all(c in q_plot.columns for c in ("min", "max")):
                 try:
@@ -940,10 +952,25 @@ def fan_compare_simulations_dashboard(
                 except Exception as _e_meas_dc:
                     _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
+                # Apply optional log scaling before final layout so we can adjust label
+                if 'LDC_LOG_SCALE' in locals() and LDC_LOG_SCALE:
+                    try:
+                        candidate_cols = [c for c in ["p05","p10","p25","p50","p60","p75","p90","p95","min","max"] if c in q_plot.columns]
+                        vals = q_plot[candidate_cols].to_numpy(dtype=float) if candidate_cols else np.array([])
+                        if vals.size and np.any(vals > 0):
+                            fig_ldc.update_yaxes(type="log")
+                            y_axis_final = f"load (log10): {y_axis_title}"
+                        else:
+                            y_axis_final = "load: " + y_axis_title
+                    except Exception:
+                        y_axis_final = "load: " + y_axis_title
+                else:
+                    y_axis_final = "load: " + y_axis_title
+
                 fig_ldc.update_layout(
                     title="Simulation Load Duration Curve",
                     xaxis_title=r"% of Time where load is Exceeded",
-                    yaxis_title="load: " + y_axis_title,
+                    yaxis_title=y_axis_final,
                 )
                 widgets_out.append(go.FigureWidget(fig_ldc))
         sim_flow_series = None
