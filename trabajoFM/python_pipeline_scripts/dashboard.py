@@ -473,7 +473,7 @@ def fan_compare_simulations_dashboard(
         pass
     cb_show_diags = widgets.Checkbox(value=True, description="Show diagnostics")
     # New checkbox: when enabled, add sediment net (SED_IN - SED_OUT) overlay to load duration curve diagnostics
-    cb_ldc_sediment = widgets.Checkbox(value=True, description="LDC sediment overlay")
+    cb_ldc_sediment = widgets.Checkbox(value=False, description="LDC sediment overlay")
     # Stats behavior controls
     dd_lag_metric = widgets.Dropdown(options=["r", "NSE"], value="r", description="Lag by:", layout=widgets.Layout(width="140px"))
     sl_max_lag = widgets.IntSlider(value=2, min=0, max=5, step=1, description="Lag±:", continuous_update=False, layout=widgets.Layout(width="220px"))
@@ -676,6 +676,9 @@ def fan_compare_simulations_dashboard(
         # Erosion toggle via ui_defaults
         if isinstance(ui_defaults.get("erosion_on"), bool):
             cb_erosion_on.value = bool(ui_defaults.get("erosion_on"))
+        # LDC sediment overlay toggle
+        if isinstance(ui_defaults.get("cb_ldc_sediment"), bool):
+            cb_ldc_sediment.value = bool(ui_defaults.get("cb_ldc_sediment"))
         # Measured toggles
         if isinstance(ui_defaults.get("measured_on"), bool):
             cb_meas_on.value = bool(ui_defaults.get("measured_on"))
@@ -794,15 +797,18 @@ def fan_compare_simulations_dashboard(
         levels = np.linspace(1.0, 99.0, 99)
         if isinstance(q_plot, pd.DataFrame) and not q_plot.empty:
             fig_ldc = go.Figure(layout=dict(template=template_name))
-            # Ensure min/max columns exist (fallback compute from aligned_df if omitted earlier)
+            # Ensure min/max columns exist (fallback compute from UNFILTERED aligned_df_plot if omitted earlier)
             try:
-                if ("min" not in q_plot.columns or "max" not in q_plot.columns) and isinstance(_last.get("aligned_df"), pd.DataFrame):
-                    base_aligned: pd.DataFrame = _last.get("aligned_df")  # type: ignore
-                    if base_aligned is not None and not base_aligned.empty:
+                # IMPORTANT: We intentionally do NOT use the filtered aligned_df here because
+                # the duration curve quantile lines are derived from the UNFILTERED data.
+                # Using filtered min/max caused visual deviation when selecting "Non-event days".
+                if ("min" not in q_plot.columns or "max" not in q_plot.columns) and isinstance(_last.get("aligned_df_plot"), pd.DataFrame):
+                    base_plot: pd.DataFrame = _last.get("aligned_df_plot")  # type: ignore
+                    if base_plot is not None and not base_plot.empty:
                         if "min" not in q_plot.columns:
-                            q_plot["min"] = base_aligned.min(axis=1, skipna=True)
+                            q_plot["min"] = base_plot.min(axis=1, skipna=True)
                         if "max" not in q_plot.columns:
-                            q_plot["max"] = base_aligned.max(axis=1, skipna=True)
+                            q_plot["max"] = base_plot.max(axis=1, skipna=True)
             except Exception:
                 pass
             try:
@@ -1413,8 +1419,20 @@ def fan_compare_simulations_dashboard(
             qs_plot = np.nanpercentile(arr_plot, percs_plot, axis=1) if arr_plot.shape[1] else np.full((len(percs_plot), 0), np.nan)
             q_plot = {p: qs_plot[i, :] if arr_plot.shape[1] else np.array([]) for i, p in enumerate(percs_plot)}
             _last["aligned_df_plot"] = aligned_df_plot
+            # Compute per-timestamp min/max for UNFILTERED data so duration curve band
+            # matches the quantile lines (avoids mismatch under Non-event filtering)
+            try:
+                row_min_plot = np.nanmin(arr_plot, axis=1)
+            except Exception:
+                row_min_plot = np.full(arr_plot.shape[0], np.nan)
+            try:
+                row_max_plot = np.nanmax(arr_plot, axis=1)
+            except Exception:
+                row_max_plot = np.full(arr_plot.shape[0], np.nan)
             _last["q_plot_df"] = pd.DataFrame({
-                "p05": q_plot[5], "p10": q_plot[10], "p25": q_plot[25], "p50": q_plot[50], "p60": q_plot[60], "p75": q_plot[75], "p90": q_plot[90], "p95": q_plot[95]
+                "min": row_min_plot,
+                "p05": q_plot[5], "p10": q_plot[10], "p25": q_plot[25], "p50": q_plot[50], "p60": q_plot[60], "p75": q_plot[75], "p90": q_plot[90], "p95": q_plot[95],
+                "max": row_max_plot,
             }, index=aligned_df_plot.index)
             # y-range based on UNFILTERED data
             finite_vals_plot = arr_plot[np.isfinite(arr_plot)]
