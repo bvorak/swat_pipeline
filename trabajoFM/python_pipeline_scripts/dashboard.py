@@ -454,6 +454,7 @@ def fan_compare_simulations_dashboard(
         pass
     # Stats view (HTML) and diagnostics panel; shown side-by-side
     stats_html = widgets.HTML(value="")
+    duration_box = widgets.HBox([], layout=widgets.Layout(width="100%", flex_wrap="wrap", justify_content="flex-start"))
     diag_box = widgets.VBox([])
     # Styling and initial layout
     try:
@@ -505,7 +506,7 @@ def fan_compare_simulations_dashboard(
         "extra_series": {},   # name -> pd.Series for extra overlays (current settings)
         "erosion_series": None,  # mean across runs of (SED_IN - SED_OUT)
     }
-    _state = {"updating": False}
+    _state = {"updating": False, "duration_refresher": None}
 
     TICK_STOPS = [
         dict(dtickrange=[None, 1000 * 60 * 60 * 24], value="%Y-%m-%d\n%H:%M"),
@@ -766,6 +767,78 @@ def fan_compare_simulations_dashboard(
             + "p95: %{customdata[4]}<extra></extra>"
         )
 
+    def _build_sim_duration_widgets(
+        q_plot: Optional[pd.DataFrame],
+        flow_series: Optional[pd.Series],
+        template_name: str,
+        y_axis_title: str,
+    ) -> List[widgets.Widget]:
+        widgets_out: List[widgets.Widget] = []
+        try:
+            from .stats import _duration_curve_from_series as _dcfs  # type: ignore
+        except Exception:
+            _dbg("duration", "_duration_curve_from_series import failed")
+            return widgets_out
+        levels = np.linspace(1.0, 99.0, 99)
+        if isinstance(q_plot, pd.DataFrame) and not q_plot.empty:
+            fig_ldc = go.Figure(layout=dict(template=template_name))
+            added = False
+            for col, name, style in (
+                ("p95", "Simulation p95", dict(color="rgba(31,119,180,0.35)", width=0.5)),
+                ("p75", "Simulation p75", dict(color="rgba(31,119,180,0.45)", width=0.5, dash="dot")),
+                ("p50", "Simulation median", dict(color="black", width=2)),
+                ("p25", "Simulation p25", dict(color="rgba(31,119,180,0.45)", width=0.5, dash="dot")),
+                ("p05", "Simulation p05", dict(color="rgba(31,119,180,0.35)", width=0.5)),
+            ):
+                if col not in q_plot.columns:
+                    continue
+                series = q_plot[col].dropna()
+                if series.empty:
+                    continue
+                x_vals, y_vals = _dcfs(series, levels)
+                if not np.any(np.isfinite(y_vals)):
+                    continue
+                fig_ldc.add_trace(
+                    go.Scatter(
+                        x=x_vals,
+                        y=y_vals,
+                        mode="lines",
+                        name=name,
+                        line=style,
+                    )
+                )
+                added = True
+            if added:
+                fig_ldc.update_layout(
+                    title="Simulation Load Duration Curve",
+                    xaxis_title="Exceedance probability (%)",
+                    yaxis_title=y_axis_title,
+                )
+                widgets_out.append(go.FigureWidget(fig_ldc))
+        sim_flow_series = None
+        if isinstance(flow_series, pd.Series) and not flow_series.empty:
+            sim_flow_series = flow_series.dropna()
+        if sim_flow_series is not None and not sim_flow_series.empty:
+            fig_fdc = go.Figure(layout=dict(template=template_name))
+            x_flow, y_flow = _dcfs(sim_flow_series, levels)
+            if np.any(np.isfinite(y_flow)):
+                fig_fdc.add_trace(
+                    go.Scatter(
+                        x=x_flow,
+                        y=y_flow,
+                        mode="lines",
+                        name="Simulation flow",
+                        line=dict(color="#17becf", width=2),
+                    )
+                )
+                fig_fdc.update_layout(
+                    title="Simulation Flow Duration Curve",
+                    xaxis_title="Exceedance probability (%)",
+                    yaxis_title="Flow (m3/day)",
+                )
+                widgets_out.append(go.FigureWidget(fig_fdc))
+        return widgets_out
+
     def _compute_and_plot():
         #reload(.stats)
         if _state.get("updating"):
@@ -808,6 +881,11 @@ def fan_compare_simulations_dashboard(
         # Ensure method options match mode (may correct invalid states)
         _update_method_options_for_mode()
         _dbg("compute", dict(var=var, reach=dd_reach.value, freq=freq_str, method=method, mode=("conc" if is_conc_mode else "load")))
+
+        try:
+            duration_box.children = [widgets.HTML("<i>Loading duration curves...</i>")]
+        except Exception:
+            pass
 
         # Pre-compute daily external flow series and SWAT avg daily flow series for conversions
         s_external_flow_daily: Optional[pd.Series] = None
@@ -2265,6 +2343,7 @@ def fan_compare_simulations_dashboard(
 
         # fixed Y; optional live update on zoom (apply only to primary y-axis)
         y_title = ("Concentration (mg/L)" if is_conc_mode else f"{var} (kg/day)")
+        _last["y_axis_title"] = y_title
         fig.update_layout(yaxis=dict(autorange=False, range=_last["y_fixed"], title_text=y_title))
 
         # Update conversion statement label
@@ -2616,6 +2695,26 @@ def fan_compare_simulations_dashboard(
         with out:
             clear_output(wait=True)
             display(fig)
+
+        def _async_update_duration_curves():
+            try:
+                q_plot_local = _last.get("q_plot_df")
+                flow_series_local = _last.get("swat_flow_series") or _last.get("flow_series")
+                y_axis_title = _last.get("y_axis_title", "Value")
+                widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title)
+                if widgets_list:
+                    duration_box.children = widgets_list
+                else:
+                    duration_box.children = []
+            except Exception as exc:
+                try:
+                    duration_box.children = [widgets.HTML(f"<i>Duration curves unavailable: {exc}</i>")]
+                except Exception:
+                    pass
+
+        import threading as _dur_threading
+        _dur_threading.Thread(target=_async_update_duration_curves, daemon=True).start()
+
         # Trigger stats computation after figure is on screen
         try:
             stats_html.value = "<i>⏳ Computing stats…</i>"
@@ -2861,7 +2960,7 @@ def fan_compare_simulations_dashboard(
             except Exception:
                 pass
     btn_reload.on_click(_on_reload)
-    display(controls, reload_bar, out, stats_controls, stats_row)
+    display(controls, reload_bar, out, stats_controls, duration_box, stats_row)
 
     _compute_and_plot()
 
