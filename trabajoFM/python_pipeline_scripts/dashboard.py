@@ -680,6 +680,9 @@ def fan_compare_simulations_dashboard(
             cb_meas_on.value = bool(ui_defaults.get("measured_on"))
         if isinstance(ui_defaults.get("flow_on"), bool):
             cb_flow_on.value = bool(ui_defaults.get("flow_on"))
+        if isinstance(ui_defaults.get("swat_flow_on"), bool):
+            cb_swat_flow_on.value = bool(ui_defaults.get("swat_flow_on"))
+        # Cleaning policies
         if ui_defaults.get("meas_nonnum_policy") in ("as_na", "drop", "zero", "half_MDL"):
             dd_meas_nonnum.value = ui_defaults.get("meas_nonnum_policy")
         if ui_defaults.get("meas_negative_policy") in ("keep", "drop", "zero"):
@@ -873,8 +876,10 @@ def fan_compare_simulations_dashboard(
         selected_days_set = None
         event_day_set = None
         buffered_event_days = None
+        full_days_set = None
         try:
-            if event_mode in {"events", "non_events"}:
+            candidate_modes = {"events", "non_events", "all"}
+            if event_mode in candidate_modes:
                 ev_source = str(dd_event_source.value)
                 if ev_source == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
                     s_events_flow = s_external_flow_daily.copy()
@@ -897,21 +902,55 @@ def fan_compare_simulations_dashboard(
                         if "main_event" in df_flags.columns:
                             event_days = pd.to_datetime(df_flags.loc[df_flags["main_event"], :].index).floor('D').unique()
                             event_day_set = set(pd.to_datetime(event_days).tolist())
+                            full_days_set = set(pd.to_datetime(df_ev["date"]).unique().tolist())
                             buf = int(sl_event_buffer_days.value) if isinstance(sl_event_buffer_days.value, (int, float)) else 0
                             buffered_event_days = set()
                             for d in event_day_set:
                                 d0 = pd.Timestamp(d).normalize()
                                 for k in range(-buf, buf + 1):
                                     buffered_event_days.add(d0 + pd.Timedelta(days=int(k)))
-                            full_days_set = set(pd.to_datetime(df_ev["date"]).unique().tolist())
                             if event_mode == "events":
                                 selected_days_set = buffered_event_days
-                            else:
+                            elif event_mode == "non_events" and full_days_set is not None:
                                 selected_days_set = full_days_set - (buffered_event_days or set())
-                            _dbg("events", dict(mode=event_mode, events=len(event_day_set), buffer=len((buffered_event_days or set()) - (event_day_set or set())), keep=len(selected_days_set or [])))
+                            _dbg("events", dict(mode=event_mode, events=len(event_day_set or []), buffer=len((buffered_event_days or set()) - (event_day_set or set())), keep=len(selected_days_set or [])))
         except Exception as e:
             _dbg("event detection failed", e)
             selected_days_set = None
+
+        def _event_index(values):
+            if values is None:
+                return None
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(list(values)))
+                idx = idx.floor('D')
+                idx = idx.unique()
+                idx = idx.sort_values()
+                return idx
+            except Exception:
+                return None
+
+        idx_events = _event_index(event_day_set)
+        idx_buffered = _event_index(buffered_event_days)
+        if idx_buffered is None:
+            idx_buffered = idx_events
+        idx_all_days = _event_index(full_days_set)
+        idx_selected = _event_index(selected_days_set)
+        if idx_all_days is not None and idx_buffered is not None:
+            idx_non_events = idx_all_days.difference(idx_buffered)
+            if idx_non_events.empty:
+                idx_non_events = None
+        else:
+            idx_non_events = None
+        _last["event_context"] = {
+            "mode": event_mode,
+            "events": idx_events,
+            "buffered_events": idx_buffered,
+            "non_events": idx_non_events,
+            "selected": idx_selected,
+            "all_days": idx_all_days,
+        }
+
         # Extract a single resampled series per run for the selected reach/variable
         # Maintain filtered (stats) and unfiltered (plot) collections
         per_sim: Dict[str, pd.Series] = {}
@@ -2340,6 +2379,7 @@ def fan_compare_simulations_dashboard(
                         local_strategy="nearest",
                         choose_best_lag_by=str(dd_lag_metric.value),
                         band_data=_last.get("band_data", {}),
+                        event_context=_last.get("event_context"),
                     )
                 except Exception as e:
                     # If stats computation fails, provide error details
