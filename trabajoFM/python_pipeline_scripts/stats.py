@@ -2669,8 +2669,8 @@ def format_stats_text(stats: Dict[str, object]) -> str:
         if isinstance(delta_pct, (int, float)) and np.isfinite(delta_pct):
             lines.append(f"  Median delta (%) = {delta_pct:.2f}%")
         rel = comp.get("relative_width")
-        if isinstance(rel, (int, float)) and np.isfinite(rel):
-            lines.append(f"  Relative width = {rel:.3g}")
+        #if isinstance(rel, (int, float)) and np.isfinite(rel):
+         #   lines.append(f"  Relative width = {rel:.3g}")
         rmse_val = comp.get("rmse")
         if isinstance(rmse_val, (int, float)) and np.isfinite(rmse_val):
             lines.append(f"  RMSE = {rmse_val:.3g}")

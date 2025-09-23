@@ -1469,7 +1469,7 @@ def fan_compare_simulations_dashboard(
                 x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
                 name="mean",
                 customdata=combined_customdata,
-                hovertemplate=("max: %{customdata[4]:.4g}%{customdata[5]}<br>mean: %{customdata[2]:.4g}%{customdata[3]}<br>min: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>"),
+                hovertemplate=("max: %{customdata[4]:.8g}%{customdata[5]}<br>mean: %{customdata[2]:.8g}%{customdata[3]}<br>min: %{customdata[0]:.8g}%{customdata[1]}<extra></extra>"),
             ))
 
         # Store band data for comprehensive statistics (grouped by series)
