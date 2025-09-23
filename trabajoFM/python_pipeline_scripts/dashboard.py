@@ -958,7 +958,20 @@ def fan_compare_simulations_dashboard(
                         candidate_cols = [c for c in ["p05","p10","p25","p50","p60","p75","p90","p95","min","max"] if c in q_plot.columns]
                         vals = q_plot[candidate_cols].to_numpy(dtype=float) if candidate_cols else np.array([])
                         if vals.size and np.any(vals > 0):
-                            fig_ldc.update_yaxes(type="log")
+                            # Determine min/max positive for dynamic tick range
+                            pos_vals = vals[vals > 0]
+                            vmin = float(np.nanmin(pos_vals)) if pos_vals.size else 1.0
+                            vmax = float(np.nanmax(pos_vals)) if pos_vals.size else 10.0
+                            # Compute integer exponent bounds
+                            emin = int(np.floor(np.log10(vmin)))
+                            emax = int(np.ceil(np.log10(vmax)))
+                            # ui_defaults key 'ldc_log_ticks_full' -> if True keep default (2,5) minor ticks
+                            full_ticks = bool((ui_defaults or {}).get("ldc_log_ticks_full", False))
+                            if full_ticks:
+                                fig_ldc.update_yaxes(type="log")
+                            else:
+                                tickvals = [10 ** e for e in range(emin, emax + 1)]
+                                fig_ldc.update_yaxes(type="log", tickvals=tickvals, ticktext=[f"1e{e}" if abs(e) > 2 else f"{10**e:g}" for e in range(emin, emax + 1)])
                             y_axis_final = f"load (log10): {y_axis_title}"
                         else:
                             y_axis_final = "load: " + y_axis_title
