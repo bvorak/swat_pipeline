@@ -1433,6 +1433,8 @@ def compute_stats_for_view(
 
     band_data: Optional[Dict[str, pd.Series]] = None,
 
+    event_context: Optional[Dict[str, object]] = None,
+
 ) -> Dict[str, object]:
 
     """Compute an extensible suite of stats for the dashboard view.
@@ -1444,6 +1446,8 @@ def compute_stats_for_view(
     - band_data: Optional dict with keys like 'min', 'max', 'mean', 'p25', 'p75', 'p05', 'p95' 
 
                  containing time series for band deviation analysis
+
+    - event_context: Optional dict capturing event/non-event day indices and current view mode
 
 
 
@@ -2035,6 +2039,72 @@ def compute_stats_for_view(
     def _window_series(series: Optional[pd.Series]) -> Optional[pd.Series]:
         return _apply_window_to_series(series) if isinstance(series, pd.Series) else None
 
+    raw_min_series = _window_series(raw_ensemble.get("min")) if isinstance(raw_ensemble, dict) else None
+    raw_max_series = _window_series(raw_ensemble.get("max")) if isinstance(raw_ensemble, dict) else None
+    raw_width_series: Optional[pd.Series] = None
+    if isinstance(raw_min_series, pd.Series) and isinstance(raw_max_series, pd.Series):
+        raw_width_series = (raw_max_series - raw_min_series).abs()
+        raw_width_series = raw_width_series.dropna()
+
+    def _width_stats_for_index(idx: Optional[pd.Index]) -> Tuple[float, float]:
+        if not isinstance(idx, pd.Index) or idx.empty:
+            return float("nan"), float("nan")
+        if not isinstance(raw_width_series, pd.Series) or raw_width_series.empty:
+            return float("nan"), float("nan")
+        width_subset = raw_width_series.reindex(idx)
+        if not isinstance(width_subset, pd.Series):
+            return float("nan"), float("nan")
+        width_values = width_subset.to_numpy(dtype=float)
+        width_values = width_values[np.isfinite(width_values)]
+        if width_values.size == 0:
+            return float("nan"), float("nan")
+        return float(np.nanmedian(width_values)), float(np.nanpercentile(width_values, 90))
+
+    def _coverage_fraction_for_series(series: Optional[pd.Series], idx: Optional[pd.Index]) -> float:
+        if not isinstance(series, pd.Series) or series.empty:
+            return float("nan")
+        if not isinstance(idx, pd.Index) or idx.empty:
+            return float("nan")
+        if not isinstance(raw_min_series, pd.Series) or not isinstance(raw_max_series, pd.Series):
+            return float("nan")
+        min_subset = raw_min_series.reindex(idx)
+        max_subset = raw_max_series.reindex(idx)
+        value_subset = series.reindex(idx)
+        mask = value_subset.notna() & min_subset.notna() & max_subset.notna()
+        if not mask.any():
+            return float("nan")
+        val = value_subset.loc[mask].to_numpy(dtype=float)
+        min_vals = min_subset.loc[mask].to_numpy(dtype=float)
+        max_vals = max_subset.loc[mask].to_numpy(dtype=float)
+        if val.size == 0:
+            return float("nan")
+        safe_min = np.minimum(min_vals, max_vals)
+        safe_max = np.maximum(min_vals, max_vals)
+        coverage_mask = (val >= safe_min) & (val <= safe_max)
+        if coverage_mask.size == 0:
+            return float("nan")
+        return float(np.mean(coverage_mask))
+
+    def _normalize_day_collection(values: Optional[Iterable[object]]) -> Optional[pd.DatetimeIndex]:
+        if values is None:
+            return None
+        if isinstance(values, pd.DatetimeIndex):
+            idx = values
+        else:
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(list(values)))
+            except Exception:
+                return None
+        if idx.size == 0:
+            return None
+        idx = idx.floor('D')
+        idx = idx.unique()
+        try:
+            idx = idx.sort_values()
+        except Exception:
+            idx = idx.sort_values()
+        return idx
+
     baseline_raw_series = _window_series(raw_ensemble.get("p50")) if isinstance(raw_ensemble, dict) else None
     if baseline_raw_series is not None:
         baseline_series_for_overlay = baseline_raw_series
@@ -2060,6 +2130,57 @@ def compute_stats_for_view(
 
     raw_baseline_total = int(baseline_raw_series.index.size) if isinstance(baseline_raw_series, pd.Series) else 0
     raw_baseline_finite = int(baseline_raw_series.dropna().size) if isinstance(baseline_raw_series, pd.Series) else 0
+
+    baseline_quantiles: Dict[str, float] = {}
+    if isinstance(baseline_series_for_overlay, pd.Series):
+        baseline_nonnull_for_quantiles = baseline_series_for_overlay.dropna()
+        if not baseline_nonnull_for_quantiles.empty:
+            baseline_values_for_quantiles = baseline_nonnull_for_quantiles.to_numpy(dtype=float)
+            baseline_quantiles = {
+                "q10": float(np.nanpercentile(baseline_values_for_quantiles, 10)),
+                "q90": float(np.nanpercentile(baseline_values_for_quantiles, 90)),
+            }
+
+    baseline_median_width = float("nan")
+    baseline_p90_width = float("nan")
+    baseline_coverage_fraction = float("nan")
+    if isinstance(baseline_series_for_overlay, pd.Series):
+        baseline_width_index = baseline_series_for_overlay.dropna().index
+        if isinstance(baseline_width_index, pd.Index) and baseline_width_index.size:
+            baseline_median_width, baseline_p90_width = _width_stats_for_index(baseline_width_index)
+        baseline_coverage_fraction = _coverage_fraction_for_series(baseline_series_for_overlay, baseline_series_for_overlay.index)
+
+    event_mode_label = "all"
+    event_idx_raw: Optional[pd.DatetimeIndex] = None
+    event_idx_buffered: Optional[pd.DatetimeIndex] = None
+    event_idx_non: Optional[pd.DatetimeIndex] = None
+    event_idx_selected: Optional[pd.DatetimeIndex] = None
+    event_idx_all: Optional[pd.DatetimeIndex] = None
+    if isinstance(event_context, dict):
+        mode_val = event_context.get("mode") or event_context.get("view")
+        if isinstance(mode_val, str) and mode_val.strip():
+            event_mode_label = mode_val.strip()
+        event_idx_raw = _normalize_day_collection(event_context.get("events"))
+        event_idx_buffered = _normalize_day_collection(event_context.get("buffered_events"))
+        if event_idx_buffered is None:
+            event_idx_buffered = event_idx_raw
+        event_idx_non = _normalize_day_collection(event_context.get("non_events"))
+        event_idx_selected = _normalize_day_collection(event_context.get("selected"))
+        event_idx_all = _normalize_day_collection(event_context.get("all_days"))
+        if event_idx_all is not None and event_idx_buffered is not None and event_idx_non is None:
+            tmp_non = event_idx_all.difference(event_idx_buffered)
+            if tmp_non.size:
+                event_idx_non = tmp_non
+        if event_idx_non is not None and event_idx_non.size == 0:
+            event_idx_non = None
+    event_stats_summary = {
+        "view": event_mode_label,
+        "event_days": int(event_idx_raw.size) if event_idx_raw is not None else 0,
+        "buffered_days": int(event_idx_buffered.size) if event_idx_buffered is not None else 0,
+        "non_event_days": int(event_idx_non.size) if event_idx_non is not None else 0,
+        "selected_days": int(event_idx_selected.size) if event_idx_selected is not None else 0,
+        "all_days": int(event_idx_all.size) if event_idx_all is not None else 0,
+    }
 
     baseline_relative_width = float("nan")
     p05_series_full = _window_series(raw_ensemble.get("p05")) if isinstance(raw_ensemble, dict) else None
@@ -2106,26 +2227,108 @@ def compute_stats_for_view(
             mask = aligned_base.notna() & overlay_series.notna()
             if not mask.any():
                 continue
-            base_vals = aligned_base.loc[mask].to_numpy(dtype=float)
-            overlay_vals = overlay_series.loc[mask].to_numpy(dtype=float)
+            paired_base = aligned_base.loc[mask]
+            paired_overlay = overlay_series.loc[mask]
+            if paired_base.empty or paired_overlay.empty:
+                continue
+            diff_series = paired_base - paired_overlay
+            base_vals = paired_base.to_numpy(dtype=float)
+            overlay_vals = paired_overlay.to_numpy(dtype=float)
             diff = base_vals - overlay_vals
             median_delta = float(np.nanmedian(diff)) if diff.size else float("nan")
-            denom = np.where(np.abs(base_vals) > 0, np.abs(base_vals), np.nan)
-            rel_vals = np.abs(diff) / denom
-            rel_vals = rel_vals[np.isfinite(rel_vals)]
+            denom_series = paired_base.abs().replace(0, np.nan)
+            rel_series = (diff_series.abs() / denom_series).replace([np.inf, -np.inf], np.nan)
+            rel_vals = rel_series.dropna().to_numpy(dtype=float)
             relative_width = float(np.nanmedian(rel_vals)) if rel_vals.size else float("nan")
-            percent_vals = diff / denom * 100.0
-            percent_vals = percent_vals[np.isfinite(percent_vals)]
+            percent_series = (diff_series / denom_series) * 100.0
+            percent_series = percent_series.replace([np.inf, -np.inf], np.nan)
+            percent_vals = percent_series.dropna().to_numpy(dtype=float)
             median_delta_pct = float(np.nanmedian(percent_vals)) if percent_vals.size else float("nan")
             rmse_overlay = _rmse(base_vals, overlay_vals)
             r_overlay = _pearson_r(base_vals, overlay_vals)
+            paired_index = paired_base.index
+            median_w, p90_w = _width_stats_for_index(paired_index)
+            coverage_fraction = _coverage_fraction_for_series(paired_overlay, paired_index)
+            relative_width_low = float("nan")
+            relative_width_high = float("nan")
+            relative_width_event_contrast = float("nan")
+            lower_thresh = baseline_quantiles.get("q10") if baseline_quantiles else None
+            upper_thresh = baseline_quantiles.get("q90") if baseline_quantiles else None
+            if lower_thresh is not None and upper_thresh is not None and not np.isnan(lower_thresh) and not np.isnan(upper_thresh):
+                low_rel = rel_series.loc[paired_base <= lower_thresh].dropna()
+                high_rel = rel_series.loc[paired_base >= upper_thresh].dropna()
+                if not low_rel.empty:
+                    low_vals = low_rel.to_numpy(dtype=float)
+                    low_vals = low_vals[np.isfinite(low_vals)]
+                    if low_vals.size:
+                        relative_width_low = float(np.nanmedian(low_vals))
+                if not high_rel.empty:
+                    high_vals = high_rel.to_numpy(dtype=float)
+                    high_vals = high_vals[np.isfinite(high_vals)]
+                    if high_vals.size:
+                        relative_width_high = float(np.nanmedian(high_vals))
+                if np.isfinite(relative_width_low) and np.isfinite(relative_width_high) and relative_width_low != 0:
+                    relative_width_event_contrast = float(relative_width_high / relative_width_low)
+            relative_width_event = float("nan")
+            relative_width_nonevent = float("nan")
+            event_ratio = float("nan")
+            event_pairs_count = 0
+            nonevent_pairs_count = 0
+            paired_days_floor = None
+            if isinstance(paired_index, pd.DatetimeIndex):
+                paired_days_floor = paired_index.floor('D')
+            else:
+                try:
+                    paired_days_floor = pd.DatetimeIndex(paired_index).floor('D')
+                except Exception:
+                    paired_days_floor = None
+            event_mask = None
+            nonevent_mask = None
+            if paired_days_floor is not None and event_idx_buffered is not None:
+                event_mask = paired_days_floor.isin(event_idx_buffered)
+                if event_idx_non is not None:
+                    nonevent_mask = paired_days_floor.isin(event_idx_non)
+                else:
+                    nonevent_mask = ~event_mask
+            elif paired_days_floor is not None and event_idx_non is not None:
+                nonevent_mask = paired_days_floor.isin(event_idx_non)
+            if event_mask is not None and np.any(event_mask):
+                rel_event_series = rel_series.loc[event_mask].dropna()
+                if not rel_event_series.empty:
+                    event_pairs_count = int(rel_event_series.size)
+                    event_vals = rel_event_series.to_numpy(dtype=float)
+                    event_vals = event_vals[np.isfinite(event_vals)]
+                    if event_vals.size:
+                        relative_width_event = float(np.nanmedian(event_vals))
+            if nonevent_mask is not None and np.any(nonevent_mask):
+                rel_nonevent_series = rel_series.loc[nonevent_mask].dropna()
+                if not rel_nonevent_series.empty:
+                    nonevent_pairs_count = int(rel_nonevent_series.size)
+                    nonevent_vals = rel_nonevent_series.to_numpy(dtype=float)
+                    nonevent_vals = nonevent_vals[np.isfinite(nonevent_vals)]
+                    if nonevent_vals.size:
+                        relative_width_nonevent = float(np.nanmedian(nonevent_vals))
+            if np.isfinite(relative_width_event) and np.isfinite(relative_width_nonevent) and relative_width_nonevent != 0:
+                event_ratio = float(relative_width_event / relative_width_nonevent)
             overlay_comparison[str(name)] = {
                 "median_delta": median_delta,
                 "median_delta_pct": median_delta_pct,
                 "relative_width": relative_width,
                 "rmse": rmse_overlay,
                 "r": r_overlay,
+                "median_W": median_w,
+                "p90_W": p90_w,
+                "coverage_fraction": coverage_fraction,
+                "relative_width_low": relative_width_low,
+                "relative_width_high": relative_width_high,
+                "relative_width_event_contrast": relative_width_event_contrast,
+                "relative_width_event": relative_width_event,
+                "relative_width_nonevent": relative_width_nonevent,
+                "event_ratio": event_ratio,
+                "event_pairs": int(event_pairs_count),
+                "non_event_pairs": int(nonevent_pairs_count),
             }
+
             overlay_metrics = _pairwise_metrics(overlay_vals, base_vals)
             filtered_metrics = {k: overlay_metrics[k] for k in allowed_overlay_metrics if k in overlay_metrics and np.isfinite(overlay_metrics[k])}
             filtered_metrics.update({
@@ -2140,9 +2343,17 @@ def compute_stats_for_view(
             })
             overlay_full_stats[str(name)] = filtered_metrics
 
+    stats["event_context"] = event_stats_summary
+
     baseline_entry = overlay_comparison.setdefault("__baseline__", {})
     if np.isfinite(baseline_relative_width):
         baseline_entry["relative_width"] = baseline_relative_width
+    if np.isfinite(baseline_median_width):
+        baseline_entry["median_W"] = baseline_median_width
+    if np.isfinite(baseline_p90_width):
+        baseline_entry["p90_W"] = baseline_p90_width
+    if np.isfinite(baseline_coverage_fraction):
+        baseline_entry["coverage_fraction"] = baseline_coverage_fraction
     if baseline_summary:
         baseline_entry.setdefault("median", baseline_summary.get("median"))
         baseline_entry.setdefault("mean", baseline_summary.get("mean"))
@@ -2346,14 +2557,58 @@ def format_stats_text(stats: Dict[str, object]) -> str:
             rel = baseline_entry.get("relative_width")
             if isinstance(rel, (int, float)) and np.isfinite(rel):
                 lines.append(f"Model relative width (min-max / median) = {rel:.3g}")
+            median_w = baseline_entry.get("median_W")
+            if isinstance(median_w, (int, float)) and np.isfinite(median_w):
+                lines.append(f"Model raw width median (W) = {median_w:.3g}")
+            p90_w = baseline_entry.get("p90_W")
+            if isinstance(p90_w, (int, float)) and np.isfinite(p90_w):
+                lines.append(f"Model raw width p90 (W) = {p90_w:.3g}")
+            cov_frac = baseline_entry.get("coverage_fraction")
+            if isinstance(cov_frac, (int, float)) and np.isfinite(cov_frac):
+                lines.append(f"Model coverage fraction (baseline inside envelope) = {cov_frac:.1%}")
             for label_key in ("median", "mean", "sd"):
                 val = baseline_entry.get(label_key)
                 if isinstance(val, (int, float)) and np.isfinite(val):
                     lines.append(f"Model {label_key} = {val:.3g}")
+        event_ctx = stats.get("event_context", {}) or {}
+        raw_view_label = str(event_ctx.get("view") or "all").strip() or "all"
+        view_key = raw_view_label.lower()
+        summary_bits = []
+        for key, label in (("selected_days", "selected"), ("buffered_days", "buffered"), ("event_days", "events"), ("non_event_days", "non-events")):
+            val = event_ctx.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                summary_bits.append(f"{label}={int(val)}")
+        total_days_val = event_ctx.get("all_days")
+        if isinstance(total_days_val, (int, float)) and total_days_val > 0:
+            summary_bits.append(f"total={int(total_days_val)}")
+        if summary_bits or view_key != "all":
+            summary_txt = ", ".join(summary_bits) if summary_bits else "no event counts available"
+            lines.append(f"Event filter view: {raw_view_label} ({summary_txt})")
+        general_metrics = [
+            ("median_W", "Raw width median (W)", False),
+            ("p90_W", "Raw width p90 (W)", False),
+            ("coverage_fraction", "Coverage fraction (overlay inside envelope)", True),
+        ]
+        quantile_metrics = [
+            ("relative_width_low", "Relative width low decile"),
+            ("relative_width_high", "Relative width high decile"),
+            ("relative_width_event_contrast", "Event contrast (high / low)"),
+        ]
+        event_metric_map = {
+            "events": [("relative_width_event", "Relative width (event days)")],
+            "non_events": [("relative_width_nonevent", "Relative width (non-event days)")],
+            "all": [
+                ("relative_width_event", "Relative width (event days)"),
+                ("relative_width_nonevent", "Relative width (non-event days)"),
+                ("event_ratio", "Event ratio (event / non-event)"),
+            ],
+        }
+        event_metrics = event_metric_map.get(view_key, event_metric_map["all"])
         for name, comp in cmp_dict.items():
             if not isinstance(comp, dict):
                 continue
             lines.append(f"<i>{name}:</i>")
+            printed_keys = {"median_delta", "median_delta_pct", "relative_width", "rmse", "r"}
             delta = comp.get("median_delta")
             if isinstance(delta, (int, float)) and np.isfinite(delta):
                 lines.append(f"  Median delta (baseline - overlay) = {delta:.3g}")
@@ -2369,6 +2624,38 @@ def format_stats_text(stats: Dict[str, object]) -> str:
             r_val = comp.get("r")
             if isinstance(r_val, (int, float)) and np.isfinite(r_val):
                 lines.append(f"  r = {r_val:.3f}")
+            for key, label, is_percent in general_metrics:
+                value = comp.get(key)
+                if isinstance(value, (int, float)) and np.isfinite(value):
+                    if is_percent:
+                        lines.append(f"  {label} = {value:.1%}")
+                    else:
+                        lines.append(f"  {label} = {value:.3g}")
+                    printed_keys.add(key)
+            for key, label in quantile_metrics:
+                value = comp.get(key)
+                if isinstance(value, (int, float)) and np.isfinite(value):
+                    lines.append(f"  {label} = {value:.3g}")
+                    printed_keys.add(key)
+            for key, label in event_metrics:
+                value = comp.get(key)
+                if isinstance(value, (int, float)) and np.isfinite(value):
+                    lines.append(f"  {label} = {value:.3g}")
+                    printed_keys.add(key)
+            event_pairs = comp.get("event_pairs")
+            if isinstance(event_pairs, (int, float)) and event_pairs > 0:
+                lines.append(f"  Event pairs = {int(event_pairs)}")
+                printed_keys.add("event_pairs")
+            nonevent_pairs = comp.get("non_event_pairs")
+            if isinstance(nonevent_pairs, (int, float)) and nonevent_pairs > 0:
+                lines.append(f"  Non-event pairs = {int(nonevent_pairs)}")
+                printed_keys.add("non_event_pairs")
+            for extra_key, extra_val in comp.items():
+                if extra_key in printed_keys:
+                    continue
+                if isinstance(extra_val, (int, float)) and np.isfinite(extra_val):
+                    label = str(extra_key).replace("_", " ")
+                    lines.append(f"  {label} = {extra_val:.3g}")
 
     overlay_full = stats.get("overlay_full_series", {}) or {}
     if overlay_full:
