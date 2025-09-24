@@ -469,6 +469,25 @@ def fan_compare_simulations_dashboard(
     # New checkbox: when enabled, add sediment net (SED_IN - SED_OUT) overlay to load duration curve diagnostics
     cb_ldc_sediment = widgets.Checkbox(value=False, description="LDC sediment overlay")
     cb_flow_strat = widgets.Checkbox(value=False, description="Flow-strat curve")
+    ms_flow_regimes = widgets.SelectMultiple(
+        options=["event", "non-event"],
+        value=("event", "non-event"),
+        description="Regimes:",
+        layout=widgets.Layout(width="170px", height="60px")
+    )
+    cb_flow_total_band = widgets.Checkbox(value=False, description="Total band")
+    cb_flow_total_only = widgets.Checkbox(value=False, description="Total only")
+    cb_flow_overlay = widgets.Checkbox(value=True, description="Overlay")
+    # New: total aggregation semantics dropdown (median collapse vs full envelope)
+    dd_flow_total_mode = widgets.Dropdown(
+        options=[
+            ("Median collapse", "median"),
+            ("Min/Max envelope", "extents"),  # min(min) / max(max) semantics
+        ],
+        value="median",
+        description="Total mode:",
+        layout=widgets.Layout(width="190px")
+    )
     # Stats behavior controls
     dd_lag_metric = widgets.Dropdown(options=["r", "NSE"], value="r", description="Lag by:", layout=widgets.Layout(width="140px"))
     sl_max_lag = widgets.IntSlider(value=2, min=0, max=5, step=1, description="Lag±:", continuous_update=False, layout=widgets.Layout(width="220px"))
@@ -500,6 +519,13 @@ def fan_compare_simulations_dashboard(
         "flow_y_range": None, # last y2 range
         "extra_series": {},   # name -> pd.Series for extra overlays (current settings)
         "erosion_series": None,  # mean across runs of (SED_IN - SED_OUT)
+        "event_context": None,
+        "flow_strat_bundle": None,
+        "flow_regime_visible": {"event", "non-event"},
+        "flow_total_band": False,
+        "flow_total_only": False,
+        "flow_overlay": True,
+        "flow_total_mode": "median",  # 'median' | 'extents'
     }
     _state = {"updating": False, "duration_refresher": None}
 
@@ -658,6 +684,33 @@ def fan_compare_simulations_dashboard(
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
         if isinstance(ui_defaults.get("flow_strat_curve"), bool):
             cb_flow_strat.value = bool(ui_defaults.get("flow_strat_curve"))
+        # Flow strat additional presets
+        if isinstance(ui_defaults.get("flow_total_band"), bool):
+            cb_flow_total_band.value = bool(ui_defaults.get("flow_total_band"))
+        if isinstance(ui_defaults.get("flow_total_only"), bool):
+            cb_flow_total_only.value = bool(ui_defaults.get("flow_total_only"))
+        if isinstance(ui_defaults.get("flow_overlay"), bool):
+            cb_flow_overlay.value = bool(ui_defaults.get("flow_overlay"))
+        # Total mode mapping: accept internal values or display labels
+        _total_mode_map = {
+            "median": "median",
+            "median collapse": "median",
+            "min/max envelope": "extents",
+            "minmax envelope": "extents",
+            "extents": "extents",
+        }
+        if isinstance(ui_defaults.get("flow_total_mode"), str):
+            key = ui_defaults.get("flow_total_mode").strip().lower()
+            if key in _total_mode_map:
+                dd_flow_total_mode.value = _total_mode_map[key]
+        # Regime visibility preset
+        if isinstance(ui_defaults.get("flow_regimes"), (list, tuple, set)):
+            regs = [r for r in ui_defaults.get("flow_regimes") if r in ("event","non-event")]
+            if regs:
+                try:
+                    ms_flow_regimes.value = tuple(dict.fromkeys(regs))  # preserve order, unique
+                except Exception:
+                    pass
         # Stats controls
         if ui_defaults.get("lag_metric") in ("r", "NSE"):
             dd_lag_metric.value = ui_defaults.get("lag_metric")
@@ -725,6 +778,15 @@ def fan_compare_simulations_dashboard(
         for name, chk in (cb_extra or {}).items():
             if name in extra_vis:
                 chk.value = bool(extra_vis[name])
+        # Sync _last early with any preset values for flow strat so first render honors them
+        try:
+            _last["flow_regime_visible"] = set(ms_flow_regimes.value)
+            _last["flow_total_band"] = bool(cb_flow_total_band.value)
+            _last["flow_total_only"] = bool(cb_flow_total_only.value)
+            _last["flow_overlay"] = bool(cb_flow_overlay.value)
+            _last["flow_total_mode"] = dd_flow_total_mode.value
+        except Exception:
+            pass
 
     def _refresh_stations_for_cat(cat: int, *_):
         if not measured_present:
@@ -845,19 +907,65 @@ def fan_compare_simulations_dashboard(
                 ]
             if agg.empty: return None
             fig = go.Figure(layout=dict(template=template_name))
-            colors = {"event":"#d62728", "non-event":"#1f77b4"}
-            for reg in ["non-event","event"]:
-                sub = agg[agg.regime == reg].sort_values("x_mid")
-                if sub.empty: continue
+            colors = {"event":"#d62728", "non-event":"#1f77b4", "total":"#555555"}
+            visible_regimes = _last.get("flow_regime_visible", {"event","non-event"})
+            total_only = bool(_last.get("flow_total_only", False))
+            want_total_band = bool(_last.get("flow_total_band", False) or total_only)
+            # Optional total aggregation (ignores regime)
+            total_agg = None
+            if want_total_band:
+                mode = _last.get("flow_total_mode", "median")
+                if mode == "extents":
+                    # min(min)/max(max) envelope across regimes per bin; y_mean still central tendency (median of means)
+                    tmp = agg.groupby("x_mid", as_index=False).agg({
+                        "y_min": "min",
+                        "y_mean": "median",
+                        "y_max": "max",
+                    })
+                else:  # median collapse (previous behavior)
+                    tmp = agg.groupby("x_mid", as_index=False).agg({
+                        "y_min": "median",
+                        "y_mean": "median",
+                        "y_max": "median",
+                    })
+                total_agg = tmp.sort_values("x_mid")
+            if not total_only:
+                for reg in ["non-event","event"]:
+                    if reg not in visible_regimes:
+                        continue
+                    sub = agg[agg.regime == reg].sort_values("x_mid")
+                    if sub.empty:
+                        continue
+                    x_pct = sub.x_mid.to_numpy()*100.0
+                    y_low = sub.y_min.to_numpy(); y_up = sub.y_max.to_numpy()
+                    # Upper line (max)
+                    fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name=f"{reg} max", line=dict(color=colors[reg], width=0.6), showlegend=False))
+                    # Fill
+                    if colors[reg].startswith('#') and len(colors[reg]) == 7:
+                        r = int(colors[reg][1:3],16); g = int(colors[reg][3:5],16); b = int(colors[reg][5:7],16)
+                        fill_col = f"rgba({r},{g},{b},0.20)"
+                    else:
+                        fill_col = 'rgba(0,0,0,0.15)'
+                    fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color=colors[reg], width=0.6), fill="tonexty", fillcolor=fill_col, hoverinfo="skip", showlegend=False))
+                    # Mean line
+                    fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name=f"{reg} mean", line=dict(color=colors[reg], width=2)))
+            if total_agg is not None:
+                sub = total_agg
                 x_pct = sub.x_mid.to_numpy()*100.0
                 y_low = sub.y_min.to_numpy(); y_up = sub.y_max.to_numpy()
-                fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name=f"{reg} max", line=dict(color=colors[reg], width=0.6), showlegend=False))
-                rgba_fill = colors[reg].replace('#','rgba(')+',0.20)' if colors[reg].startswith('#') else 'rgba(0,0,0,0.15)'
-                fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color=colors[reg], width=0.6), fill="tonexty", fillcolor=rgba_fill, hoverinfo="skip"))
-                fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name=f"{reg} mean", line=dict(color=colors[reg], width=2)))
+                # Total upper
+                fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name="total max", line=dict(color=colors["total"], width=0.6), showlegend=False))
+                # Total fill (lighter opacity if overlaying with regimes)
+                r,g,b = 85,85,85
+                overlay_flag = bool(_last.get("flow_overlay", True))
+                total_only = bool(_last.get("flow_total_only", False))
+                alpha = 0.10 if (overlay_flag and not total_only and not (visible_regimes == {"event","non-event"} and not want_total_band)) else 0.18
+                fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name="total band", line=dict(color=colors["total"], width=0.6), fill="tonexty", fillcolor=f"rgba({r},{g},{b},{alpha})", hoverinfo="skip", showlegend=False))
+                # Total mean
+                fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name="total mean", line=dict(color=colors["total"], width=3, dash="dot")))
             # Unified title to match event-context variant
             fig.update_layout(title="Flow-stratified (event vs non-event)", xaxis_title="Flow exceedance (% of time exceeded)", yaxis_title="Load (units)")
-            return go.FigureWidget(fig), {"threshold": thr, "flow_source": flow_src, "binned": agg, "raw_count": N}
+            return go.FigureWidget(fig), {"threshold": thr, "flow_source": flow_src, "binned": agg, "raw_count": N, "total": bool(total_agg is not None), "total_only": total_only, "visible_regimes": list(visible_regimes)}
         except Exception as _e_fsc:
             _dbg("flow_strat_curve_fail", str(_e_fsc))
             return None
@@ -3102,50 +3210,61 @@ def fan_compare_simulations_dashboard(
                                                 })
                                             agg = pd.DataFrame(rows)
                                             if not agg.empty:
-                                                fig2 = go.Figure(layout=dict(template=template))
-                                                colors = {"event": "#d62728", "non-event": "#1f77b4"}
-                                                for rg in ['non-event', 'event']:
-                                                    sub = agg[agg['regime'] == rg].sort_values('x_mid')
-                                                    if sub.empty:
-                                                        continue
-                                                    x_pct = sub['x_mid'].to_numpy() * 100.0
-                                                    y_up = sub['y_max'].to_numpy()
-                                                    y_low = sub['y_min'].to_numpy()
-                                                    fig2.add_trace(go.Scatter(
-                                                        x=x_pct, y=y_up, mode='lines', name=f"{rg} max",
-                                                        line=dict(color=colors[rg], width=0.6), showlegend=False
-                                                    ))
-                                                    # Convert hex #RRGGBB to rgba(R,G,B,alpha)
-                                                    if colors[rg].startswith('#') and len(colors[rg]) == 7:
-                                                        try:
-                                                            r = int(colors[rg][1:3], 16)
-                                                            g = int(colors[rg][3:5], 16)
-                                                            b = int(colors[rg][5:7], 16)
-                                                            fill_col = f"rgba({r},{g},{b},0.20)"
-                                                        except Exception:
-                                                            fill_col = 'rgba(0,0,0,0.15)'
+                                                colors = {"event": "#d62728", "non-event": "#1f77b4", "total": "#555555"}
+                                                visible_regimes = _last.get("flow_regime_visible", {"event","non-event"})
+                                                total_only = bool(_last.get("flow_total_only", False))
+                                                want_total_band = bool(_last.get("flow_total_band", False) or total_only)
+                                                # Build optional total collapse
+                                                total_agg = None
+                                                if want_total_band:
+                                                    mode = _last.get('flow_total_mode', 'median')
+                                                    if mode == 'extents':
+                                                        tmp = agg.groupby('x_mid', as_index=False).agg({
+                                                            'y_min':'min','y_mean':'median','y_max':'max'
+                                                        }).sort_values('x_mid')
                                                     else:
-                                                        fill_col = 'rgba(0,0,0,0.15)'
-                                                    fig2.add_trace(go.Scatter(
-                                                        x=x_pct, y=y_low, mode='lines', name=f"{rg} band",
-                                                        line=dict(color=colors[rg], width=0.6), fill='tonexty',
-                                                        fillcolor=fill_col, hoverinfo='skip'
-                                                    ))
-                                                    fig2.add_trace(go.Scatter(
-                                                        x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean",
-                                                        line=dict(color=colors[rg], width=2)
-                                                    ))
-                                                fig2.update_layout(
-                                                    title='Flow-stratified (event vs non-event)',
-                                                    xaxis_title='Flow exceedance (% of time exceeded)',
-                                                    yaxis_title=y_axis_title
-                                                )
+                                                        tmp = agg.groupby('x_mid', as_index=False).agg({
+                                                            'y_min':'median','y_mean':'median','y_max':'median'
+                                                        }).sort_values('x_mid')
+                                                    total_agg = tmp
+                                                fig2 = go.Figure(layout=dict(template=template))
+                                                if not total_only:
+                                                    for rg in ['non-event','event']:
+                                                        if rg not in visible_regimes:
+                                                            continue
+                                                        sub = agg[agg['regime'] == rg].sort_values('x_mid')
+                                                        if sub.empty:
+                                                            continue
+                                                        x_pct = sub['x_mid'].to_numpy()*100.0
+                                                        y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
+                                                        fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name=f"{rg} max", line=dict(color=colors[rg], width=0.6), showlegend=False))
+                                                        if colors[rg].startswith('#') and len(colors[rg])==7:
+                                                            r=int(colors[rg][1:3],16); g=int(colors[rg][3:5],16); b=int(colors[rg][5:7],16)
+                                                            fill_col=f"rgba({r},{g},{b},0.20)"
+                                                        else:
+                                                            fill_col='rgba(0,0,0,0.15)'
+                                                        fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name=f"{rg} band", line=dict(color=colors[rg], width=0.6), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
+                                                        fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean", line=dict(color=colors[rg], width=2)))
+                                                if total_agg is not None:
+                                                    sub = total_agg
+                                                    x_pct = sub['x_mid'].to_numpy()*100.0
+                                                    y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
+                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name='total max', line=dict(color=colors['total'], width=0.6), showlegend=False))
+                                                    overlay_flag = bool(_last.get('flow_overlay', True))
+                                                    total_only_flag = bool(_last.get('flow_total_only', False))
+                                                    alpha = 0.10 if (overlay_flag and not total_only_flag) else 0.18
+                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name='total band', line=dict(color=colors['total'], width=0.6), fill='tonexty', fillcolor=f'rgba(85,85,85,{alpha})', hoverinfo='skip', showlegend=False))
+                                                    fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name='total mean', line=dict(color=colors['total'], width=3, dash='dot')))
+                                                fig2.update_layout(title='Flow-stratified (event vs non-event)', xaxis_title='Flow exceedance (% of time exceeded)', yaxis_title=y_axis_title)
                                                 fig_fsc = go.FigureWidget(fig2)
                                                 bundle = {
                                                     'source': 'event_context',
                                                     'events': int(len(idx_events)),
                                                     'non_events': int(len(idx_non_events)),
-                                                    'binned_points': int(len(agg))
+                                                    'binned_points': int(len(agg)),
+                                                    'total': bool(total_agg is not None),
+                                                    'total_only': total_only,
+                                                    'visible_regimes': list(visible_regimes)
                                                 }
                                 except Exception as _e_reg_curve:
                                     _dbg('flow_strat_event_ctx_fail', str(_e_reg_curve))
@@ -3176,12 +3295,28 @@ def fan_compare_simulations_dashboard(
                         ))
                 # If both load duration and flow-strat figures exist, place them side-by-side
                 if widgets_list:
+                    # Update flow strat state from widgets before deciding layout
+                    try:
+                        _last['flow_regime_visible'] = set(ms_flow_regimes.value)
+                        _last['flow_total_band'] = bool(cb_flow_total_band.value)
+                        _last['flow_total_only'] = bool(cb_flow_total_only.value)
+                        _last['flow_overlay'] = bool(cb_flow_overlay.value)
+                        _last['flow_total_mode'] = dd_flow_total_mode.value
+                    except Exception:
+                        pass
                     if cb_flow_strat.value and len(widgets_list) >= 2:
-                        try:
-                            # First is the load duration (possibly plus flow?), last should be flow-strat
-                            duration_box.children = [widgets.HBox(widgets_list, layout=widgets.Layout(justify_content='space-between'))]
-                        except Exception:
-                            duration_box.children = widgets_list
+                        overlay_layout = bool(cb_flow_overlay.value)
+                        if overlay_layout:
+                            try:
+                                duration_box.children = [widgets.HBox(widgets_list, layout=widgets.Layout(justify_content='space-between'))]
+                            except Exception:
+                                duration_box.children = widgets_list
+                        else:
+                            # Vertical stacking
+                            try:
+                                duration_box.children = widgets_list
+                            except Exception:
+                                duration_box.children = widgets_list
                     else:
                         duration_box.children = widgets_list
                 else:
@@ -3359,6 +3494,16 @@ def fan_compare_simulations_dashboard(
         except Exception:
             pass
 
+    # Flow strat controls observers (mark stale)
+    try:
+        ms_flow_regimes.observe(_mark_stale, names="value")
+        cb_flow_total_band.observe(_mark_stale, names="value")
+        cb_flow_total_only.observe(_mark_stale, names="value")
+        cb_flow_overlay.observe(_mark_stale, names="value")
+        dd_flow_total_mode.observe(_mark_stale, names="value")
+    except Exception:
+        pass
+
     # Layout controls
     controls_left = widgets.VBox([num_sim, dd_var, tg_units, dd_method, dd_flow_source, lbl_units])
     base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider]
@@ -3422,7 +3567,20 @@ def fan_compare_simulations_dashboard(
             controls_right = widgets.VBox(rows)
 
     # Stats controls group (small toggles)
-    stats_controls = widgets.HBox([dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment, cb_flow_strat])
+    stats_controls = widgets.HBox([
+        dd_lag_metric,
+        sl_max_lag,
+        sel_local_K,
+        cb_log_metrics,
+        cb_show_diags,
+        cb_ldc_sediment,
+        cb_flow_strat,
+        ms_flow_regimes,
+        cb_flow_total_band,
+        cb_flow_total_only,
+        cb_flow_overlay,
+        dd_flow_total_mode,
+    ])
     controls = widgets.HBox([controls_left, widgets.HBox([widgets.Label(""), controls_right])])
     stats_row = widgets.HBox([stats_html, diag_box], layout=widgets.Layout(width="100%"))
     # Wire reload button
@@ -3441,6 +3599,16 @@ def fan_compare_simulations_dashboard(
                 pass
     btn_reload.on_click(_on_reload)
     display(controls, reload_bar, out, stats_controls, duration_box, stats_row)
+
+    # Initial sync in case ui_defaults not provided or partial
+    try:
+        _last["flow_regime_visible"] = set(ms_flow_regimes.value)
+        _last["flow_total_band"] = bool(cb_flow_total_band.value)
+        _last["flow_total_only"] = bool(cb_flow_total_only.value)
+        _last["flow_overlay"] = bool(cb_flow_overlay.value)
+        _last["flow_total_mode"] = dd_flow_total_mode.value
+    except Exception:
+        pass
 
     _compute_and_plot()
 
