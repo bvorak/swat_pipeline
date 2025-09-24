@@ -7,10 +7,9 @@ import numpy as np
 import pandas as pd
 import re
 
-import plotly.graph_objects as go
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from importlib import reload
+import plotly.graph_objects as go
 
 from .stats import compute_stats_for_view, format_stats_text, build_fit_diagnostics
 from .dashboard_helper import (
@@ -27,26 +26,20 @@ from .dashboard_helper import (
     _period_day_counts,
     convert_measured_mgL_to_kg_per_day,
 )
-
 DASHBOARD_VERSION = "2025-09-11-chem-ui-3"
 
 # moved helpers to dashboard_helper.py
 
-
 # -----------------------------
 # Dashboard with measured overlay
-# -----------------------------
-
 def fan_compare_simulations_dashboard(
     sim_dfs: Dict[str, pd.DataFrame],
     variables: List[str],
-    *,
     reach: Optional[int] = None,
     freq_options: Iterable[str] = ("D", "W", "M", "A"),
     max_bin_size: int = 12,
     start: Optional[Union[str, datetime, date]] = None,
     end: Optional[Union[str, datetime, date]] = None,
-    season_months: Optional[List[int]] = None,
     how_map_defaults: Optional[Dict[str, str]] = None,
     reach_col: str = "RCH",
     date_col: str = "date",
@@ -87,6 +80,7 @@ def fan_compare_simulations_dashboard(
     `date_col`, and target variable columns). These traces follow the same
     frequency/method/filters as the fan chart.
 
+    # (flow_strat debug line removed)
     measured_var_map expected formats per SWAT variable key:
         - dict with keys 1/2/3 (or '1'/'2'/'3') -> list of NOMBRE strings
         - list/tuple of up to three lists of NOMBRE strings
@@ -127,6 +121,9 @@ def fan_compare_simulations_dashboard(
         except Exception:
             _run_label = None
 
+    # Ensure season_months is defined before any debug/log usage; it can be overridden by ui_defaults below.
+    season_months: Optional[Iterable[int]] = None
+
     # Debug helper
     def _dbg(*args, **kwargs):
         if debug or (isinstance(ui_defaults, dict) and bool(ui_defaults.get("debug", False))):
@@ -150,11 +147,8 @@ def fan_compare_simulations_dashboard(
             n = int(df.shape[0])
             rng = None
             if date_col and (date_col in df.columns):
-                try:
-                    dt = pd.to_datetime(df[date_col])
-                    rng = (dt.min(), dt.max())
-                except Exception:
-                    rng = None
+                dt = pd.to_datetime(df[date_col])
+                rng = (dt.min(), dt.max())
             print(f"[dash] {label}: n={n}" + (f", {date_col}=[{rng[0]}..{rng[1]}]" if rng else ""))
         except Exception:
             pass
@@ -474,6 +468,7 @@ def fan_compare_simulations_dashboard(
     cb_show_diags = widgets.Checkbox(value=True, description="Show diagnostics")
     # New checkbox: when enabled, add sediment net (SED_IN - SED_OUT) overlay to load duration curve diagnostics
     cb_ldc_sediment = widgets.Checkbox(value=False, description="LDC sediment overlay")
+    cb_flow_strat = widgets.Checkbox(value=False, description="Flow-strat curve")
     # Stats behavior controls
     dd_lag_metric = widgets.Dropdown(options=["r", "NSE"], value="r", description="Lag by:", layout=widgets.Layout(width="140px"))
     sl_max_lag = widgets.IntSlider(value=2, min=0, max=5, step=1, description="Lag±:", continuous_update=False, layout=widgets.Layout(width="220px"))
@@ -661,6 +656,8 @@ def fan_compare_simulations_dashboard(
             cb_range_slider.value = bool(ui_defaults.get("range_slider"))
         if isinstance(ui_defaults.get("show_diags"), bool):
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
+        if isinstance(ui_defaults.get("flow_strat_curve"), bool):
+            cb_flow_strat.value = bool(ui_defaults.get("flow_strat_curve"))
         # Stats controls
         if ui_defaults.get("lag_metric") in ("r", "NSE"):
             dd_lag_metric.value = ui_defaults.get("lag_metric")
@@ -769,6 +766,101 @@ def fan_compare_simulations_dashboard(
             + "p75: %{customdata[3]}<br>"
             + "p95: %{customdata[4]}<extra></extra>"
         )
+
+    # Flow-stratified duration curve helper (min/mean/max by flow exceedance and regime)
+    def _build_flow_stratified_curve(
+        load_min: Optional[pd.Series], load_mean: Optional[pd.Series], load_max: Optional[pd.Series],
+        flow_external: Optional[pd.Series], flow_swat: Optional[pd.Series], *,
+        threshold_spec: Union[str, float] = "p75", bin_step: float = 0.05,
+        prefer: str = "auto", template_name: str = "plotly_white"
+    ) -> Optional[Tuple[go.FigureWidget, Dict[str, Any]]]:
+        try:
+            if not (isinstance(load_min, pd.Series) and isinstance(load_mean, pd.Series) and isinstance(load_max, pd.Series)):
+                return None
+            df_load = pd.DataFrame({"L_min": load_min, "L_mean": load_mean, "L_max": load_max}).dropna(how="any")
+            if df_load.empty:
+                return None
+            candidates: Dict[str, pd.Series] = {}
+            if isinstance(flow_external, pd.Series) and not flow_external.empty:
+                candidates["external"] = flow_external
+            if isinstance(flow_swat, pd.Series) and not flow_swat.empty:
+                candidates["swat"] = flow_swat
+            if prefer == "external" and "external" in candidates:
+                flow_src = "external"; flow = candidates["external"]
+            elif prefer == "swat" and "swat" in candidates:
+                flow_src = "swat"; flow = candidates["swat"]
+            else:
+                if len(candidates) == 1:
+                    flow_src, flow = next(iter(candidates.items()))
+                elif len(candidates) == 2:
+                    flow_src = "swat" if "swat" in candidates else "external"; flow = candidates[flow_src]
+                else:
+                    return None
+            df = df_load.join(flow.rename("flow"), how="inner").dropna(how="any")
+            if df.empty:
+                return None
+            # Enforce ordering per row
+            bad = (df.L_min > df.L_mean) | (df.L_mean > df.L_max) | (df.L_min > df.L_max)
+            if bad.any():
+                reordered = np.sort(df.loc[bad, ["L_min","L_mean","L_max"]].to_numpy(dtype=float), axis=1)
+                df.loc[bad, ["L_min","L_mean","L_max"]] = reordered
+            # Threshold selection
+            if isinstance(threshold_spec, str) and threshold_spec.lower().startswith("p"):
+                try:
+                    p = float(threshold_spec.lower().lstrip("p")) / 100.0
+                except Exception:
+                    p = 0.75
+                p = min(max(p, 0.0), 1.0)
+                thr = float(np.nanquantile(df.flow.to_numpy(dtype=float), p))
+            else:
+                try:
+                    thr = float(threshold_spec)
+                except Exception:
+                    thr = float(np.nanquantile(df.flow.to_numpy(dtype=float), 0.75))
+            df["regime"] = np.where(df.flow >= thr, "event", "non-event")
+            df_sorted = df.sort_values("flow", ascending=False).copy()
+            N = len(df_sorted)
+            if N < 5:
+                return None
+            df_sorted["exceedance"] = (np.arange(N) + 1) / (N + 1.0)
+            if bin_step > 0:
+                edges = np.arange(0.0, 1.0 + 1e-9, bin_step)
+                if edges[-1] < 1.0: edges = np.append(edges, 1.0)
+                bins = pd.IntervalIndex.from_breaks(edges, closed="right")
+                df_sorted["bin"] = pd.cut(df_sorted["exceedance"], bins)
+                rows = []
+                for (b, reg), g in df_sorted.groupby(["bin","regime"], observed=True):
+                    if g.empty: continue
+                    left = b.left if hasattr(b, 'left') else 0.0
+                    right = b.right if hasattr(b, 'right') else 0.0
+                    x_mid = 0.5 * (left + right)
+                    rows.append({"x_mid": x_mid, "regime": reg,
+                                 "y_min": float(np.nanmedian(g.L_min)),
+                                 "y_mean": float(np.nanmedian(g.L_mean)),
+                                 "y_max": float(np.nanmedian(g.L_max))})
+                agg = pd.DataFrame(rows)
+            else:
+                agg = df_sorted.rename(columns={"exceedance":"x_mid","L_min":"y_min","L_mean":"y_mean","L_max":"y_max"})[
+                    ["x_mid","regime","y_min","y_mean","y_max"]
+                ]
+            if agg.empty: return None
+            fig = go.Figure(layout=dict(template=template_name))
+            colors = {"event":"#d62728", "non-event":"#1f77b4"}
+            for reg in ["non-event","event"]:
+                sub = agg[agg.regime == reg].sort_values("x_mid")
+                if sub.empty: continue
+                x_pct = sub.x_mid.to_numpy()*100.0
+                y_low = sub.y_min.to_numpy(); y_up = sub.y_max.to_numpy()
+                fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name=f"{reg} max", line=dict(color=colors[reg], width=0.6), showlegend=False))
+                rgba_fill = colors[reg].replace('#','rgba(')+',0.20)' if colors[reg].startswith('#') else 'rgba(0,0,0,0.15)'
+                fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color=colors[reg], width=0.6), fill="tonexty", fillcolor=rgba_fill, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name=f"{reg} mean", line=dict(color=colors[reg], width=2)))
+            # Unified title to match event-context variant
+            fig.update_layout(title="Flow-stratified (event vs non-event)", xaxis_title="Flow exceedance (% of time exceeded)", yaxis_title="Load (units)")
+            return go.FigureWidget(fig), {"threshold": thr, "flow_source": flow_src, "binned": agg, "raw_count": N}
+        except Exception as _e_fsc:
+            _dbg("flow_strat_curve_fail", str(_e_fsc))
+            return None
 
     def _build_sim_duration_widgets(
         q_plot: Optional[pd.DataFrame],
@@ -989,7 +1081,8 @@ def fan_compare_simulations_dashboard(
         sim_flow_series = None
         if isinstance(flow_series, pd.Series) and not flow_series.empty:
             sim_flow_series = flow_series.dropna()
-        if sim_flow_series is not None and not sim_flow_series.empty:
+        # Skip legacy flow duration curve if flow-stratified curve will be displayed
+        if sim_flow_series is not None and not sim_flow_series.empty and not bool(cb_flow_strat.value):
             fig_fdc = go.Figure(layout=dict(template=template_name))
             x_flow, y_flow = _dcfs(sim_flow_series, levels)
             if np.any(np.isfinite(y_flow)):
@@ -1163,10 +1256,20 @@ def fan_compare_simulations_dashboard(
                                 for k in range(-buf, buf + 1):
                                     buffered_event_days.add(d0 + pd.Timedelta(days=int(k)))
                             if event_mode == "events":
-                                selected_days_set = buffered_event_days
+                                selected_days_set = set(buffered_event_days)
                             elif event_mode == "non_events" and full_days_set is not None:
-                                selected_days_set = full_days_set - (buffered_event_days or set())
-                            _dbg("events", dict(mode=event_mode, events=len(event_day_set or []), buffer=len((buffered_event_days or set()) - (event_day_set or set())), keep=len(selected_days_set or [])))
+                                selected_days_set = set(full_days_set) - set(buffered_event_days)
+                            elif event_mode == "all":
+                                # All modeled days regardless of event classification
+                                selected_days_set = set(full_days_set)
+                            else:  # fallback
+                                selected_days_set = set(full_days_set) if full_days_set is not None else set(event_day_set)
+                            _dbg("events", dict(
+                                mode=event_mode,
+                                events=len(event_day_set or []),
+                                buffer=len(set(buffered_event_days) - set(event_day_set)),
+                                keep=len(selected_days_set)
+                            ))
         except Exception as e:
             _dbg("event detection failed", e)
             selected_days_set = None
@@ -2904,11 +3007,183 @@ def fan_compare_simulations_dashboard(
         def _async_update_duration_curves():
             try:
                 q_plot_local = _last.get("q_plot_df")
-                flow_series_local = _last.get("swat_flow_series") or _last.get("flow_series")
+                # Explicitly choose flow series (prefer swat) without boolean or on Series
+                flow_series_local = _last.get("swat_flow_series")
+                if not (isinstance(flow_series_local, pd.Series) and not flow_series_local.empty):
+                    flow_series_local = _last.get("flow_series")
+                _dbg("duration context", dict(
+                    has_q_plot=isinstance(q_plot_local, pd.DataFrame),
+                    q_plot_shape=None if not isinstance(q_plot_local, pd.DataFrame) else q_plot_local.shape,
+                    swat_flow_valid=isinstance(_last.get("swat_flow_series"), pd.Series) and not (_last.get("swat_flow_series") is None or _last.get("swat_flow_series").empty),
+                    ext_flow_valid=isinstance(_last.get("flow_series"), pd.Series) and not (_last.get("flow_series") is None or _last.get("flow_series").empty)
+                ))
                 y_axis_title = _last.get("y_axis_title", "Value")
                 widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title)
+                # Optionally add flow-stratified curve (min/mean/max by flow exceedance) using current ensemble
+                if cb_flow_strat.value:
+                    try:
+                        aligned_df_plot = _last.get("aligned_df_plot")
+                        _dbg("flow_strat:aligned_df_plot_info", dict(
+                            valid=isinstance(aligned_df_plot, pd.DataFrame) and not aligned_df_plot.empty,
+                            shape=None if not isinstance(aligned_df_plot, pd.DataFrame) else aligned_df_plot.shape
+                        ))
+                        if isinstance(aligned_df_plot, pd.DataFrame) and not aligned_df_plot.empty:
+                            # Derive per-day min/mean/max across runs
+                            load_min = aligned_df_plot.min(axis=1, skipna=True)
+                            load_mean = aligned_df_plot.mean(axis=1, skipna=True)
+                            load_max = aligned_df_plot.max(axis=1, skipna=True)
+                            # Flow candidates already daily aggregated
+                            flow_ext = _last.get("flow_series")  # external aggregated
+                            flow_swat = _last.get("swat_flow_series")
+                            # Use event definition from _last["event_context"] if available to override percentile split
+                            event_ctx = _last.get("event_context") or {}
+                            idx_events = event_ctx.get("buffered_events")
+                            if idx_events is None:
+                                idx_events = event_ctx.get("events")
+                            idx_non_events = event_ctx.get("non_events")
+                            fig_fsc = None
+                            bundle = None
+                            _dbg("flow_strat:event_ctx_indices", dict(
+                                has_events=isinstance(idx_events, pd.DatetimeIndex),
+                                n_events=None if not isinstance(idx_events, pd.DatetimeIndex) else len(idx_events),
+                                has_non_events=isinstance(idx_non_events, pd.DatetimeIndex),
+                                n_non_events=None if not isinstance(idx_non_events, pd.DatetimeIndex) else len(idx_non_events)
+                            ))
+                            # Require both event and non-event indices present with minimum length
+                            if (
+                                isinstance(idx_events, pd.DatetimeIndex) and len(idx_events) >= 3 and
+                                isinstance(idx_non_events, pd.DatetimeIndex) and len(idx_non_events) >= 3
+                            ):
+                                # Build regimes explicitly from event indices instead of percentile threshold
+                                try:
+                                    # Align flows and loads to daily index
+                                    df_env = pd.DataFrame({
+                                        "L_min": load_min, "L_mean": load_mean, "L_max": load_max
+                                    })
+                                    # choose flow source priority as in helper (swat first)
+                                    flow_primary = None
+                                    if isinstance(flow_swat, pd.Series) and not flow_swat.empty:
+                                        flow_primary = flow_swat
+                                    elif isinstance(flow_ext, pd.Series) and not flow_ext.empty:
+                                        flow_primary = flow_ext
+                                    if flow_primary is not None:
+                                        df_env = df_env.join(flow_primary.rename("flow"), how="inner")
+                                    df_env = df_env.dropna(how="any")
+                                    if not df_env.empty:
+                                        days = df_env.index.floor('D')
+                                        reg = np.full(len(days), 'non-event', dtype=object)
+                                        ev_set = set(pd.to_datetime(idx_events).floor('D').tolist())
+                                        reg[[d in ev_set for d in days]] = 'event'
+                                        df_env['regime'] = reg
+                                        # Compute exceedance
+                                        df_sorted = df_env.sort_values('flow', ascending=False).copy()
+                                        N = len(df_sorted)
+                                        if N >= 5:
+                                            df_sorted['exceedance'] = (np.arange(N) + 1) / (N + 1.0)
+                                            # Bin
+                                            edges = np.arange(0.0, 1.0 + 1e-9, 0.05)
+                                            if edges[-1] < 1.0:
+                                                edges = np.append(edges, 1.0)
+                                            bins = pd.IntervalIndex.from_breaks(edges, closed='right')
+                                            df_sorted['bin'] = pd.cut(df_sorted['exceedance'], bins)
+                                            rows = []
+                                            for (b, rg), g in df_sorted.groupby(['bin','regime'], observed=True):
+                                                if g.empty:
+                                                    continue
+                                                left = b.left if hasattr(b, 'left') else 0.0
+                                                right = b.right if hasattr(b, 'right') else 0.0
+                                                mid = 0.5 * (left + right)
+                                                rows.append({
+                                                    'x_mid': mid,
+                                                    'regime': rg,
+                                                    'y_min': float(np.nanmedian(g['L_min'])),
+                                                    'y_mean': float(np.nanmedian(g['L_mean'])),
+                                                    'y_max': float(np.nanmedian(g['L_max']))
+                                                })
+                                            agg = pd.DataFrame(rows)
+                                            if not agg.empty:
+                                                fig2 = go.Figure(layout=dict(template=template))
+                                                colors = {"event": "#d62728", "non-event": "#1f77b4"}
+                                                for rg in ['non-event', 'event']:
+                                                    sub = agg[agg['regime'] == rg].sort_values('x_mid')
+                                                    if sub.empty:
+                                                        continue
+                                                    x_pct = sub['x_mid'].to_numpy() * 100.0
+                                                    y_up = sub['y_max'].to_numpy()
+                                                    y_low = sub['y_min'].to_numpy()
+                                                    fig2.add_trace(go.Scatter(
+                                                        x=x_pct, y=y_up, mode='lines', name=f"{rg} max",
+                                                        line=dict(color=colors[rg], width=0.6), showlegend=False
+                                                    ))
+                                                    # Convert hex #RRGGBB to rgba(R,G,B,alpha)
+                                                    if colors[rg].startswith('#') and len(colors[rg]) == 7:
+                                                        try:
+                                                            r = int(colors[rg][1:3], 16)
+                                                            g = int(colors[rg][3:5], 16)
+                                                            b = int(colors[rg][5:7], 16)
+                                                            fill_col = f"rgba({r},{g},{b},0.20)"
+                                                        except Exception:
+                                                            fill_col = 'rgba(0,0,0,0.15)'
+                                                    else:
+                                                        fill_col = 'rgba(0,0,0,0.15)'
+                                                    fig2.add_trace(go.Scatter(
+                                                        x=x_pct, y=y_low, mode='lines', name=f"{rg} band",
+                                                        line=dict(color=colors[rg], width=0.6), fill='tonexty',
+                                                        fillcolor=fill_col, hoverinfo='skip'
+                                                    ))
+                                                    fig2.add_trace(go.Scatter(
+                                                        x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean",
+                                                        line=dict(color=colors[rg], width=2)
+                                                    ))
+                                                fig2.update_layout(
+                                                    title='Flow-stratified (event vs non-event)',
+                                                    xaxis_title='Flow exceedance (% of time exceeded)',
+                                                    yaxis_title=y_axis_title
+                                                )
+                                                fig_fsc = go.FigureWidget(fig2)
+                                                bundle = {
+                                                    'source': 'event_context',
+                                                    'events': int(len(idx_events)),
+                                                    'non_events': int(len(idx_non_events)),
+                                                    'binned_points': int(len(agg))
+                                                }
+                                except Exception as _e_reg_curve:
+                                    _dbg('flow_strat_event_ctx_fail', str(_e_reg_curve))
+                            # After attempting event-context approach, fallback if needed
+                            if fig_fsc is None:
+                                try:
+                                    _dbg("flow_strat:fallback_attempt", dict(
+                                        load_len=int(len(load_mean) if isinstance(load_mean, pd.Series) else -1),
+                                        flow_ext_valid=isinstance(flow_ext, pd.Series) and not (flow_ext is None or flow_ext.empty),
+                                        flow_swat_valid=isinstance(flow_swat, pd.Series) and not (flow_swat is None or flow_swat.empty)
+                                    ))
+                                    built = _build_flow_stratified_curve(load_min, load_mean, load_max, flow_ext, flow_swat, template_name=template)
+                                    if built:
+                                        fig_fsc, bundle = built
+                                except Exception as _e_helper_fail:
+                                    _dbg('flow_strat_curve_fail', str(_e_helper_fail))
+                            if fig_fsc is not None:
+                                widgets_list.append(fig_fsc)
+                                _last['flow_strat_bundle'] = bundle
+                            else:
+                                _dbg("flow_strat:no_figure", dict(reason="no fig_fsc after attempts"))
+                    except Exception as _e_fsc_outer:
+                        _dbg('flow_strat_integration_fail', str(_e_fsc_outer))
+                        _dbg("flow_strat:exception_context", dict(
+                            aligned_valid=isinstance(_last.get("aligned_df_plot"), pd.DataFrame) and not (_last.get("aligned_df_plot") is None or _last.get("aligned_df_plot").empty),
+                            event_ctx_keys=list((_last.get("event_context") or {}).keys()),
+                            cb_flow_strat=cb_flow_strat.value
+                        ))
+                # If both load duration and flow-strat figures exist, place them side-by-side
                 if widgets_list:
-                    duration_box.children = widgets_list
+                    if cb_flow_strat.value and len(widgets_list) >= 2:
+                        try:
+                            # First is the load duration (possibly plus flow?), last should be flow-strat
+                            duration_box.children = [widgets.HBox(widgets_list, layout=widgets.Layout(justify_content='space-between'))]
+                        except Exception:
+                            duration_box.children = widgets_list
+                    else:
+                        duration_box.children = widgets_list
                 else:
                     duration_box.children = []
             except Exception as exc:
@@ -3147,7 +3422,7 @@ def fan_compare_simulations_dashboard(
             controls_right = widgets.VBox(rows)
 
     # Stats controls group (small toggles)
-    stats_controls = widgets.HBox([dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment])
+    stats_controls = widgets.HBox([dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment, cb_flow_strat])
     controls = widgets.HBox([controls_left, widgets.HBox([widgets.Label(""), controls_right])])
     stats_row = widgets.HBox([stats_html, diag_box], layout=widgets.Layout(width="100%"))
     # Wire reload button
