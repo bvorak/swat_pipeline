@@ -3063,7 +3063,7 @@ def build_fit_diagnostics(
     title: Optional[str] = None,
 
     lag_hist_K: int = 1,
-
+    ldc_log_scale: bool = False,
     compare_mode: str = "load",
 
 ) -> Dict[str, go.Figure]:
@@ -3077,6 +3077,21 @@ def build_fit_diagnostics(
 
 
     compare_mode controls whether load-oriented diagnostics are included (set to "load" to add the load duration curve).
+
+    Parameters
+    ----------
+    q_df : DataFrame
+        DataFrame of quantile (or statistic) time series (expects columns like 'p05','p50','p95').
+    measured_series : Sequence[pd.Series]
+        Collection of measured observation series.
+    window : (Timestamp, Timestamp), optional
+        Optional inclusive time window to restrict analysis.
+    lag_hist_K : int
+        Half-width (in days) for local window lag histogram.
+    ldc_log_scale : bool, default False
+        If True, the diagnostic load duration curve (when produced) will use a log-scaled y-axis and a modified axis title.
+    compare_mode : {"load","conc"}
+        If "load" include load duration curve; any other value skips it.
 
     """
 
@@ -3259,10 +3274,14 @@ def build_fit_diagnostics(
                     ldc_title = "Load duration curve"
                     if title:
                         ldc_title = f"{title} - Load duration curve"
+                    # Apply optional log scaling
+                    y_axis_title = "Load"
+                    if ldc_log_scale:
+                        y_axis_title = "Load (log10)"
                     fig_ldc.update_layout(
                         title=ldc_title,
                         xaxis=dict(title="Exceedance probability (%)", autorange="reversed", range=[0, 100]),
-                        yaxis=dict(title="Load"),
+                        yaxis=dict(title=y_axis_title, type=("log" if ldc_log_scale else "linear")),
                         legend=dict(orientation="h", y=-0.15),
                         margin=dict(l=60, r=20, t=60, b=80),
                     )

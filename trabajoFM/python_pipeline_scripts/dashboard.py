@@ -1016,6 +1016,33 @@ def fan_compare_simulations_dashboard(
             except Exception:
                 pass
             added = False
+            # --------------------------------------------------------------
+            # Band mode toggle:
+            #   order_stats (default): current behavior using order statistics (independent sorting via _dcfs)
+            #   paired: preserve day-level pairing of min/max (and quantile lines) by ordering days using a reference
+            #           series (median by default, mean if requested). This keeps relative relationships intact and
+            #           allows adding additional aligned series later.
+            # ui_defaults keys:
+            #   ldc_band_mode: 'order_stats' | 'paired'
+            #   ldc_band_order_ref: 'median' | 'mean' (only used if ldc_band_mode == 'paired')
+            # --------------------------------------------------------------
+            # Prepare placeholders for paired ordering reuse (for measurement overlay alignment)
+            paired_index: Optional[pd.Index] = None
+            paired_x_rank: Optional[np.ndarray] = None
+            try:
+                _ui_mode = (ui_defaults or {}).get("ldc_band_mode", "order_stats")  # type: ignore
+                BAND_MODE = str(_ui_mode).lower()
+                if BAND_MODE not in ("order_stats", "paired"):
+                    BAND_MODE = "order_stats"
+            except Exception:
+                BAND_MODE = "order_stats"
+            try:
+                _order_ref_key = str((ui_defaults or {}).get("ldc_band_order_ref", "median")).lower()
+                if _order_ref_key not in ("median", "mean"):
+                    _order_ref_key = "median"
+                BAND_ORDER_REF = _order_ref_key
+            except Exception:
+                BAND_ORDER_REF = "median"
             # ------------------------------------------------------------------
             # Configurable quantile/min-max lines to show on the duration curve.
             # COMMENT OUT or REORDER entries below to customize quickly.
@@ -1039,78 +1066,172 @@ def fan_compare_simulations_dashboard(
             # Data aren't transformed; only axis scaling changes. Non-positive
             # values are suppressed automatically by Plotly on a log axis.
             # --------------------------------------------------------------
+            # Log scale toggle (alias keys supported):
+            #   ui_defaults{"ldc_log_scale": True}
+            #   ui_defaults{"ldc_log": True}  (new alias)
             try:
-                LDC_LOG_SCALE = bool((ui_defaults or {}).get("ldc_log_scale", False))  # type: ignore
+                _ui = ui_defaults or {}
+                if "ldc_log_scale" in _ui:
+                    LDC_LOG_SCALE = bool(_ui.get("ldc_log_scale"))  # type: ignore
+                elif "ldc_log" in _ui:
+                    LDC_LOG_SCALE = bool(_ui.get("ldc_log"))  # type: ignore
+                else:
+                    LDC_LOG_SCALE = False
             except Exception:
                 LDC_LOG_SCALE = False
 
-            # Min-max shaded band (only if both columns exist and non-empty)
-            if all(c in q_plot.columns for c in ("min", "max")):
+            if BAND_MODE == "paired" and all(c in q_plot.columns for c in ("min", "max")):
                 try:
-                    s_max = q_plot["max"].dropna()
-                    s_min = q_plot["min"].dropna()
-                    if not s_max.empty and not s_min.empty:
-                        x_max, y_max = _dcfs(s_max, levels)
-                        x_min, y_min = _dcfs(s_min, levels)
-                        if np.any(np.isfinite(y_max)) and np.any(np.isfinite(y_min)):
-                            # Ascending reorder so low values left
+                    # Determine ordering reference series
+                    order_ref_series: Optional[pd.Series] = None
+                    if BAND_ORDER_REF == "mean":
+                        base_plot_df = _last.get("aligned_df_plot")
+                        if isinstance(base_plot_df, pd.DataFrame) and not base_plot_df.empty:
                             try:
-                                y_max_ord = np.sort(y_max)
-                                y_min_ord = np.sort(y_min)
+                                order_ref_series = base_plot_df.mean(axis=1, skipna=True)
                             except Exception:
-                                y_max_ord, y_min_ord = y_max, y_min
+                                order_ref_series = None
+                    if order_ref_series is None:
+                        if "p50" in q_plot.columns:
+                            order_ref_series = q_plot["p50"].copy()
+                        else:
+                            # fallback: mid-point of min/max
+                            try:
+                                order_ref_series = (q_plot["min"] + q_plot["max"]) / 2.0
+                            except Exception:
+                                order_ref_series = None
+                    # Build ordering DataFrame
+                    if order_ref_series is not None:
+                        df_order = pd.DataFrame({
+                            "min": q_plot["min"],
+                            "max": q_plot["max"],
+                            "ref": order_ref_series,
+                        }).dropna(subset=["min", "max", "ref"])  # keep complete cases
+                        if not df_order.empty:
+                            # Descending ordering so high reference values (rare/high loads) on left
+                            order_idx = np.argsort(-df_order["ref"].to_numpy())
+                            df_ordered = df_order.iloc[order_idx]
+                            n_ord = df_ordered.shape[0]
+                            x_rank = 100.0 * (np.arange(1, n_ord + 1) / (n_ord + 1))
+                            paired_index = df_ordered.index
+                            paired_x_rank = x_rank
+                            # Add band (max then min with fill)
                             fig_ldc.add_trace(
                                 go.Scatter(
-                                    x=x_max,
-                                    y=y_max_ord,
+                                    x=x_rank,
+                                    y=df_ordered["max"].to_numpy(dtype=float),
                                     mode="lines",
-                                    name="Max",
-                                    line=dict(color="rgba(127,0,0,0.8)", width=0.8),
+                                    name="Max (paired)",
+                                    line=dict(color="rgba(127,0,0,0.85)", width=0.8),
                                     showlegend=False,
                                 )
                             )
                             fig_ldc.add_trace(
                                 go.Scatter(
-                                    x=x_min,
-                                    y=y_min_ord,
+                                    x=x_rank,
+                                    y=df_ordered["min"].to_numpy(dtype=float),
                                     mode="lines",
-                                    name="Min-Max band",
-                                    line=dict(color="rgba(0,68,27,0.8)", width=0.8),
+                                    name="Min-Max band (paired)",
+                                    line=dict(color="rgba(0,68,27,0.85)", width=0.8),
                                     fill="tonexty",
                                     fillcolor="rgba(100,100,100,0.18)",
                                 )
                             )
                             added = True
-                except Exception:
-                    pass
+                            # Reorder quantile lines using same index if present
+                            for col, name, style in PLOT_LINES:
+                                if col in {"min", "max"}:
+                                    continue  # already displayed
+                                if col not in q_plot.columns:
+                                    continue
+                                try:
+                                    series_q = q_plot[col].reindex(df_ordered.index).to_numpy(dtype=float)
+                                except Exception:
+                                    continue
+                                fig_ldc.add_trace(
+                                    go.Scatter(
+                                        x=x_rank,
+                                        y=series_q,
+                                        mode="lines",
+                                        name=f"{name} (paired)",
+                                        line=style,
+                                    )
+                                )
+                            # Annotate mode
+                            fig_ldc.add_annotation(
+                                xref="paper", yref="paper", x=1.0, y=1.08, showarrow=False,
+                                text=f"band_mode=paired ref={BAND_ORDER_REF}",
+                                font=dict(size=10, color="#555")
+                            )
+                except Exception as _e_paired:
+                    _dbg("paired_band_error", str(_e_paired))
+            else:
+                # Existing order_stats behavior
+                # Min-max shaded band (only if both columns exist and non-empty)
+                if all(c in q_plot.columns for c in ("min", "max")):
+                    try:
+                        s_max = q_plot["max"].dropna()
+                        s_min = q_plot["min"].dropna()
+                        if not s_max.empty and not s_min.empty:
+                            x_max, y_max = _dcfs(s_max, levels)
+                            x_min, y_min = _dcfs(s_min, levels)
+                            if np.any(np.isfinite(y_max)) and np.any(np.isfinite(y_min)):
+                                try:
+                                    y_max_ord = np.sort(y_max)
+                                    y_min_ord = np.sort(y_min)
+                                except Exception:
+                                    y_max_ord, y_min_ord = y_max, y_min
+                                fig_ldc.add_trace(
+                                    go.Scatter(
+                                        x=x_max,
+                                        y=y_max_ord,
+                                        mode="lines",
+                                        name="Max",
+                                        line=dict(color="rgba(127,0,0,0.8)", width=0.8),
+                                        showlegend=False,
+                                    )
+                                )
+                                fig_ldc.add_trace(
+                                    go.Scatter(
+                                        x=x_min,
+                                        y=y_min_ord,
+                                        mode="lines",
+                                        name="Min-Max band",
+                                        line=dict(color="rgba(0,68,27,0.8)", width=0.8),
+                                        fill="tonexty",
+                                        fillcolor="rgba(100,100,100,0.18)",
+                                    )
+                                )
+                                added = True
+                    except Exception:
+                        pass
 
-            # Plot requested quantile lines (skip min/max here if already banded)
-            for col, name, style in PLOT_LINES:
-                if col in {"min", "max"} and all(c in q_plot.columns for c in ("min", "max")):
-                    # already represented in band – skip individual lines unless user comments band logic out
-                    continue
-                if col not in q_plot.columns:
-                    continue
-                series = q_plot[col].dropna()
-                if series.empty:
-                    continue
-                x_vals, y_vals = _dcfs(series, levels)
-                if not np.any(np.isfinite(y_vals)):
-                    continue
-                try:
-                    y_ordered = np.sort(y_vals)
-                except Exception:
-                    y_ordered = y_vals
-                fig_ldc.add_trace(
-                    go.Scatter(
-                        x=x_vals,
-                        y=y_ordered,
-                        mode="lines",
-                        name=name,
-                        line=style,
+                # Plot requested quantile lines (skip min/max here if already banded)
+                for col, name, style in PLOT_LINES:
+                    if col in {"min", "max"} and all(c in q_plot.columns for c in ("min", "max")):
+                        continue
+                    if col not in q_plot.columns:
+                        continue
+                    series = q_plot[col].dropna()
+                    if series.empty:
+                        continue
+                    x_vals, y_vals = _dcfs(series, levels)
+                    if not np.any(np.isfinite(y_vals)):
+                        continue
+                    try:
+                        y_ordered = np.sort(y_vals)
+                    except Exception:
+                        y_ordered = y_vals
+                    fig_ldc.add_trace(
+                        go.Scatter(
+                            x=x_vals,
+                            y=y_ordered,
+                            mode="lines",
+                            name=name,
+                            line=style,
+                        )
                     )
-                )
-                added = True
+                    added = True
             # ------------------------------------------------------------------
             # Overlay measured series (sparse points) from current view.
             # We DO NOT interpolate; each measured value is plotted at its
@@ -1123,32 +1244,79 @@ def fan_compare_simulations_dashboard(
             if ENABLE_MEASURED_DURATION_OVERLAY:
                 try:
                     meas_list = _last.get("meas_series") or []
-                    measured_vals: list[float] = []
-                    if isinstance(meas_list, (list, tuple)):
-                        for ms in meas_list:
-                            if isinstance(ms, pd.Series) and not ms.empty:
-                                measured_vals.extend(ms.dropna().to_numpy(dtype=float).tolist())
-                    if measured_vals:
-                        arr_meas = np.array(measured_vals, dtype=float)
-                        arr_meas = arr_meas[np.isfinite(arr_meas)]
-                        if arr_meas.size:
-                            arr_meas.sort()  # ascending
-                            n_meas = arr_meas.size
-                            # Empirical exceedance probability (percent rank) in ascending orientation
-                            # Using i/(n+1)*100 to keep within (0,100)
-                            x_meas = 100.0 * (np.arange(1, n_meas + 1) / (n_meas + 1))
-                            fig_ldc.add_trace(
-                                go.Scatter(
-                                    x=x_meas,
-                                    y=arr_meas,
-                                    mode="markers",
-                                    name="Measured (all)",
-                                    marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
-                                    hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                    if BAND_MODE == "paired" and paired_index is not None and paired_x_rank is not None:
+                        # Build a combined measured series (multiple categories) preserving dates
+                        combined: Dict[pd.Timestamp, list[float]] = {}
+                        if isinstance(meas_list, (list, tuple)):
+                            for ms in meas_list:
+                                if isinstance(ms, pd.Series) and not ms.empty:
+                                    for dt, val in ms.dropna().items():
+                                        try:
+                                            if not np.isfinite(val):
+                                                continue
+                                        except Exception:
+                                            continue
+                                        combined.setdefault(pd.Timestamp(dt), []).append(float(val))
+                        # Iterate in paired order; each date gets the x position from its rank
+                        if combined:
+                            x_pts: List[float] = []
+                            y_pts: List[float] = []
+                            for i, dt in enumerate(paired_index):
+                                if dt in combined:
+                                    x_here = float(paired_x_rank[i])
+                                    for val in combined[dt]:
+                                        x_pts.append(x_here)
+                                        y_pts.append(val)
+                            if x_pts:
+                                arr_x = np.array(x_pts, dtype=float)
+                                arr_y = np.array(y_pts, dtype=float)
+                                # measured extent is along the already-ranked axis
+                                try:
+                                    meas_x_extent = (float(np.nanmin(arr_x)), float(np.nanmax(arr_x)))  # type: ignore
+                                except Exception:
+                                    meas_x_extent = None  # type: ignore
+                                fig_ldc.add_trace(
+                                    go.Scatter(
+                                        x=arr_x,
+                                        y=arr_y,
+                                        mode="markers",
+                                        name="Measured (paired)",
+                                        marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
+                                        hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                    )
                                 )
-                            )
-                            added = True
-                            _dbg("duration measured overlay", dict(n_points=int(n_meas)))
+                                added = True
+                                _dbg("duration measured overlay (paired)", dict(n_points=int(arr_y.size)))
+                    else:
+                        # Fallback to order-statistics orientation (value sorted)
+                        measured_vals: list[float] = []
+                        if isinstance(meas_list, (list, tuple)):
+                            for ms in meas_list:
+                                if isinstance(ms, pd.Series) and not ms.empty:
+                                    measured_vals.extend(ms.dropna().to_numpy(dtype=float).tolist())
+                        if measured_vals:
+                            arr_meas = np.array(measured_vals, dtype=float)
+                            arr_meas = arr_meas[np.isfinite(arr_meas)]
+                            if arr_meas.size:
+                                arr_meas.sort()  # ascending values -> low values left for order_stats mode
+                                n_meas = arr_meas.size
+                                x_meas = 100.0 * (np.arange(1, n_meas + 1) / (n_meas + 1))
+                                try:
+                                    meas_x_extent = (float(np.nanmin(x_meas)), float(np.nanmax(x_meas)))  # type: ignore
+                                except Exception:
+                                    meas_x_extent = None  # type: ignore
+                                fig_ldc.add_trace(
+                                    go.Scatter(
+                                        x=x_meas,
+                                        y=arr_meas,
+                                        mode="markers",
+                                        name="Measured (all)",
+                                        marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
+                                        hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                    )
+                                )
+                                added = True
+                                _dbg("duration measured overlay", dict(n_points=int(n_meas)))
                 except Exception as _e_meas_dc:
                     _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
@@ -1180,9 +1348,74 @@ def fan_compare_simulations_dashboard(
                 else:
                     y_axis_final = "load: " + y_axis_title
 
+                # Ensure x-axis shows 0 (high flows) to 100 (low flows) from left to right (standard orientation)
+                # Decide x-axis range: optionally clip to measured overlay extent if requested in ui_defaults
+                clip_meas = bool((ui_defaults or {}).get("ldc_clip_meas_extent", False)) if 'ui_defaults' in locals() else False
+                if clip_meas and 'meas_x_extent' in locals() and isinstance(meas_x_extent, tuple) and meas_x_extent:
+                    try:
+                        xmin, xmax = meas_x_extent  # type: ignore
+                        if np.isfinite(xmin) and np.isfinite(xmax):
+                            # Add small padding (at least 0.5%)
+                            span = max(1e-6, xmax - xmin)
+                            pad = max(0.5, 0.02 * span)
+                            xmin_clip = max(0.0, xmin - pad)
+                            xmax_clip = min(100.0, xmax + pad)
+                            # Ensure reasonable minimum span
+                            if (xmax_clip - xmin_clip) < 2.0:
+                                need = 2.0 - (xmax_clip - xmin_clip)
+                                xmin_clip = max(0.0, xmin_clip - need/2)
+                                xmax_clip = min(100.0, xmax_clip + need/2)
+                            xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[xmin_clip, xmax_clip])
+                        else:
+                            xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+                    except Exception:
+                        xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+                else:
+                    xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+
+                # Optional y-axis clipping when x clipping is enabled to focus on visible measurement-driven subset
+                if clip_meas:
+                    try:
+                        # Gather all y values already plotted (simulation traces + measured) to compute focused range
+                        y_all = []
+                        for tr in fig_ldc.data:
+                            try:
+                                if hasattr(tr, 'y') and tr.y is not None:
+                                    arr_y = np.array(tr.y, dtype=float)
+                                    arr_y = arr_y[np.isfinite(arr_y)]
+                                    if arr_y.size:
+                                        y_all.append(arr_y)
+                            except Exception:
+                                continue
+                        if y_all:
+                            ycat = np.concatenate(y_all)
+                            ycat = ycat[np.isfinite(ycat)]
+                            if ycat.size:
+                                ymin = float(np.nanmin(ycat))
+                                ymax = float(np.nanmax(ycat))
+                                if ymin == ymax:
+                                    ymin -= 0.5 if ymin > 0 else 1.0
+                                    ymax += 0.5 if ymax > 0 else 1.0
+                                # Add padding 5%
+                                pad = 0.05 * (ymax - ymin) if (ymax - ymin) > 0 else 1.0
+                                y0_clip = ymin - pad
+                                y1_clip = ymax + pad
+                                if 'LDC_LOG_SCALE' in locals() and LDC_LOG_SCALE:
+                                    # Ensure positive lower bound for log scale
+                                    # Move ymin upward to smallest positive among data if needed
+                                    pos_vals = ycat[ycat > 0]
+                                    if pos_vals.size:
+                                        ymin_pos = float(np.nanmin(pos_vals))
+                                        # Keep at most one order of magnitude below min positive
+                                        y0_clip = max(ymin_pos / 10.0, ymin_pos * 0.5)
+                                        y1_clip = ymax + pad
+                                fig_ldc.update_yaxes(range=[y0_clip, y1_clip])
+                    except Exception:
+                        pass
+
                 fig_ldc.update_layout(
-                    title="Simulation Load Duration Curve",
-                    xaxis_title=r"% of Time where load is Exceeded",
+                    title="          Simulation Load Duration Curve",  # padded left ~10 spaces
+                    xaxis=xaxis_obj,
                     yaxis_title=y_axis_final,
                 )
                 widgets_out.append(go.FigureWidget(fig_ldc))
@@ -2456,14 +2689,14 @@ def fan_compare_simulations_dashboard(
                     y2_range = [fmin - fpad, fmax + fpad]
                     _last["flow_y_range"] = y2_range
                     fig.update_layout(yaxis2=dict(
-                        title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
+                        title="m3/day water flows", overlaying='y', side='right', showgrid=False,
                         autorange=False, range=y2_range, title_standoff=20, automargin=True,
                         title_font_color="#1f77b4"
                     ))
                     # Single dotted blue line, with legend label requested
                     fig.add_trace(go.Scatter(
                         x=_to_plotly_x(s_flow.index), y=s_flow.values, mode="lines",
-                        name="m3/day corrected water flow", yaxis='y2',
+                        name="m3/day water flows", yaxis='y2',
                         line=dict(color="#1f77b4", width=1.2, dash="dot"),
                         customdata=_make_customdata(s_flow.values),
                         hovertemplate="Water flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
@@ -2538,7 +2771,7 @@ def fan_compare_simulations_dashboard(
                     _last["swat_flow_series"] = s_swat_mean
                     # Ensure y2 axis exists and add SWAT flow trace
                     fig.update_layout(yaxis2=dict(
-                        title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
+                        title="m3/day water flows", overlaying='y', side='right', showgrid=False,
                         autorange=False, title_standoff=20, automargin=True,
                         title_font_color="#1f77b4"
                     ))
@@ -2578,7 +2811,7 @@ def fan_compare_simulations_dashboard(
                 y2_range = [fmin - fpad, fmax + fpad]
                 _last["flow_y_range"] = y2_range
                 fig.update_layout(yaxis2=dict(
-                    title="m3/day corrected water flow", overlaying='y', side='right', showgrid=False,
+                    title="m3/day water flows", overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y2_range, title_standoff=20, automargin=True,
                     title_font_color="#1f77b4"
                 ))
@@ -2916,6 +3149,7 @@ def fan_compare_simulations_dashboard(
                             template=template,
                             title=f"Diagnostics: {dd_var.value} (Reach {dd_reach.value})",
                             lag_hist_K=int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1,
+                            ldc_log_scale=(bool(LDC_LOG_SCALE) if 'LDC_LOG_SCALE' in locals() else False),
                             compare_mode=("conc" if is_conc_mode else "load"),
                         )
                         # Convert to FigureWidgets for better embedding
@@ -2976,7 +3210,7 @@ def fan_compare_simulations_dashboard(
                             call_str = (
                                 "from python_pipeline_scripts.stats import build_fit_diagnostics\n"
                                 "# assuming you have q_df (fan quantiles) and measured_series from the dashboard context\n"
-                                f"figs = build_fit_diagnostics(q_df, measured_series, window=(pd.Timestamp('{start_s}'), pd.Timestamp('{end_s}')), template='{template}', title='Diagnostics: {dd_var.value} (Reach {dd_reach.value})', lag_hist_K={int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1}, compare_mode=('conc' if is_conc_mode else 'load'))"
+                                f"figs = build_fit_diagnostics(q_df, measured_series, window=(pd.Timestamp('{start_s}'), pd.Timestamp('{end_s}')), template='{template}', title='Diagnostics: {dd_var.value} (Reach {dd_reach.value})', lag_hist_K={int(tuple(sorted(list(sel_local_K.value)))[0]) if sel_local_K.value else 1}, ldc_log_scale={(bool(LDC_LOG_SCALE) if 'LDC_LOG_SCALE' in locals() else False)}, compare_mode=('conc' if is_conc_mode else 'load'))"
                             )
                             children.append(widgets.HTML("<b>Reproduce diagnostics</b>"))
                             children.append(widgets.HTML(f"<pre style='white-space:pre-wrap'>{call_str}</pre>"))
