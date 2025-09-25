@@ -1158,11 +1158,7 @@ def fan_compare_simulations_dashboard(
                                     )
                                 )
                             # Annotate mode
-                            fig_ldc.add_annotation(
-                                xref="paper", yref="paper", x=1.0, y=1.08, showarrow=False,
-                                text=f"band_mode=paired ref={BAND_ORDER_REF}",
-                                font=dict(size=10, color="#555")
-                            )
+                            # (Removed previous top-right overlay annotation to declutter.)
                 except Exception as _e_paired:
                     _dbg("paired_band_error", str(_e_paired))
             else:
@@ -1413,8 +1409,16 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         pass
 
+                # Title horizontal shift (configurable). Use ui_defaults['ldc_title_x'] if provided.
+                try:
+                    _title_x_raw = (ui_defaults or {}).get('ldc_title_x', 0.35)  # default further right
+                    title_x = float(_title_x_raw)
+                    if not (0.0 <= title_x <= 1.0):
+                        title_x = 0.35
+                except Exception:
+                    title_x = 0.35
                 fig_ldc.update_layout(
-                    title="          Simulation Load Duration Curve",  # padded left ~10 spaces
+                    title=dict(text="Simulation Load Duration Curve", x=title_x, xanchor="center"),
                     xaxis=xaxis_obj,
                     yaxis_title=y_axis_final,
                 )
