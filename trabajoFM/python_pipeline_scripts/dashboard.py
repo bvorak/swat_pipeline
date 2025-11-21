@@ -2477,13 +2477,14 @@ def fan_compare_simulations_dashboard(
         if measured_present and cb_meas_on.value and isinstance(measured_use_df, pd.DataFrame) and not measured_use_df.empty:
             _meas_for_stats: List[pd.Series] = []
             # Color map for stations across categories (consistent colors per station)
-            # Build a global color palette
             palette = [
                 "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2",
                 "#7f7f7f", "#bcbd22", "#17becf", "#ff7f0e", "#1f77b4",
             ]
             station_colors: Dict[str, str] = {}
             color_idx = 0
+            # Store resampled series per map per station (for later intersection)
+            cat_resampled: Dict[int, Dict[str, pd.Series]] = {}
 
             # Prepare period day counts for sum-mode multiplication
             # Split measured data according to the selected event view (if any)
@@ -2562,12 +2563,9 @@ def fan_compare_simulations_dashboard(
                         )
                     except Exception:
                         per_station_daily_excl_union = {}
-                # One trace per station
+                # One trace per station (collected for later intersection logic)
                 for st, s_daily in per_station_daily.items():
                     _dbg_df_info(s_daily, f"measured {chem_name} st={st} daily")
-                    if st not in station_colors:
-                        station_colors[st] = palette[color_idx % len(palette)]
-                        color_idx += 1
                     # Resample measured series to selected bin according to method
                     if (not is_conc_mode) and dd_method.value == "sum":
                         per_mean = s_daily.resample(freq_str).mean()
@@ -2583,64 +2581,101 @@ def fan_compare_simulations_dashboard(
                     _dbg_df_info(s_plot, f"measured {chem_name} st={st} resampled")
                     if s_plot.empty:
                         continue
-                    _meas_for_stats.append(s_plot)
-                    # Color-code measured points:
-                    # - Red if within flow outlier period (outlier or buffer days)
-                    # - Orange if deviating vs p90 by factor threshold
-                    # - Green otherwise
+                    cat_resampled.setdefault(cat, {})[st] = s_plot
+                    if st not in station_colors:
+                        station_colors[st] = palette[color_idx % len(palette)]
+                        color_idx += 1
+
+            # Combine across active maps per station: only keep days where all active maps have data for that station, summing map values
+            active_for_intersection = [c for c in (1, 2, 3) if cb_cat[c].value and c in cat_resampled]
+            if active_for_intersection:
+                # Intersection of stations that exist in all active maps
+                station_sets = [set(cat_resampled[c].keys()) for c in active_for_intersection if cat_resampled.get(c)]
+                if station_sets:
+                    common_stations = set.intersection(*station_sets) if station_sets else set()
+                else:
+                    common_stations = set()
+                for st in sorted(common_stations):
+                    series_for_station = []
+                    for c in active_for_intersection:
+                        s = cat_resampled[c].get(st)
+                        if s is not None and not s.empty:
+                            series_for_station.append(s)
+                    if len(series_for_station) != len(active_for_intersection):
+                        continue  # require presence in all active maps
+                    # Intersect dates where all maps have values
+                    intersection_idx: Optional[pd.Index] = None
+                    for s in series_for_station:
+                        idx = s.index
+                        intersection_idx = idx if intersection_idx is None else intersection_idx.intersection(idx)
+                    if intersection_idx is None or len(intersection_idx) == 0:
+                        continue
+                    aligned = [s.reindex(intersection_idx) for s in series_for_station]
+                    df_sum = pd.concat(aligned, axis=1)
+                    combined_series = df_sum.sum(axis=1, min_count=len(aligned)).dropna().sort_index()
+                    if combined_series.empty:
+                        continue
+                    _meas_for_stats.append(combined_series)
+                    label_parts = []
+                    for c in active_for_intersection:
+                        chem_val = dd_cat_name[c].value
+                        cat_label = cat_labels.get(c, f"Map {c}")
+                        if chem_val:
+                            label_parts.append(f"{cat_label} [{chem_val}]")
+                        else:
+                            label_parts.append(cat_label)
+                    base_label = " + ".join(label_parts) + f" @ {st} (intersection sum)"
+                    # Color-code measured points similar to prior logic
                     try:
-                        idx_days = pd.to_datetime(s_plot.index, errors='coerce').floor('D')
-                        # Flow outlier period mask
+                        idx_days = pd.to_datetime(combined_series.index, errors='coerce').floor('D')
                         flow_excl_set: set = set()
                         if (outlier_day_set is not None) or (buffer_only_set is not None):
                             if outlier_day_set is not None:
                                 flow_excl_set |= set(outlier_day_set)
                             if buffer_only_set is not None:
                                 flow_excl_set |= set(buffer_only_set)
-                        red_mask = idx_days.isin(list(flow_excl_set)) if flow_excl_set else pd.Series(False, index=s_plot.index)
-                        # Deviation mask (vs p90) using factor-of threshold
-                        dev_mask = pd.Series(False, index=s_plot.index)
+                        red_mask = idx_days.isin(list(flow_excl_set)) if flow_excl_set else pd.Series(False, index=combined_series.index)
+                        dev_mask = pd.Series(False, index=combined_series.index)
                         if _last.get("q_df") is not None and bool(cb_flag_dev.value):
-                            base = _last.get("q_df")["p90"].reindex(s_plot.index)
+                            base = _last.get("q_df")["p90"].reindex(combined_series.index)
                             if base.isna().all() and ("p50" in _last.get("q_df").columns):
-                                base = _last.get("q_df")["p50"].reindex(s_plot.index)
+                                base = _last.get("q_df")["p50"].reindex(combined_series.index)
                             if base.isna().all() and (_last.get("aligned_df") is not None):
-                                base = _last.get("aligned_df").mean(axis=1, skipna=True).reindex(s_plot.index)
+                                base = _last.get("aligned_df").mean(axis=1, skipna=True).reindex(combined_series.index)
                             factor = float(sl_dev_factor.value)
                             with np.errstate(divide='ignore', invalid='ignore'):
-                                mvals = s_plot.to_numpy(dtype=float)
+                                mvals = combined_series.to_numpy(dtype=float)
                                 bvals = base.to_numpy(dtype=float)
                                 denom = np.abs(bvals)
                                 denom[~np.isfinite(denom) | (denom == 0.0)] = np.nan
                                 ratio = np.abs(mvals) / denom
                             arr_mask = np.isfinite(ratio) & ((ratio >= factor) | (ratio <= (1.0 / factor)))
-                            dev_mask = pd.Series(arr_mask, index=s_plot.index)
-                        # Segment into three groups with precedence: red > orange > green
+                            dev_mask = pd.Series(arr_mask, index=combined_series.index)
                         red_idx = red_mask[red_mask].index
                         orange_idx = dev_mask[~dev_mask.index.isin(red_idx) & dev_mask].index
-                        green_idx = s_plot.index.difference(red_idx.union(orange_idx))
+                        green_idx = combined_series.index.difference(red_idx.union(orange_idx))
                         def _add_pts(sel_index, color, name_suffix):
                             if sel_index is None or len(sel_index) == 0:
                                 return
-                            ss = s_plot.loc[sel_index]
+                            ss = combined_series.loc[sel_index]
                             fig.add_trace(go.Scatter(
                                 x=_to_plotly_x(ss.index), y=ss.values, mode="markers",
-                                name=f"{chem_name} - {st} ({name_suffix})",
-                                marker=dict(symbol=cat_symbols[cat], size=10, color=color, line=dict(width=0.5, color="#333")),
+                                name=f"{base_label} ({name_suffix})",
+                                marker=dict(symbol="diamond", size=11, color=color, line=dict(width=0.6, color="#333")),
                                 customdata=_make_customdata(ss.values),
                                 hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
                                 showlegend=True,
                             ))
+                        color_use = station_colors.get(st, "#2ca02c")
                         _add_pts(red_idx, "#d62728", "flow-outlier")
                         _add_pts(orange_idx, "#ff7f0e", "deviation")
-                        _add_pts(green_idx, "#2ca02c", "kept")
+                        _add_pts(green_idx, color_use, "kept")
                     except Exception:
-                        # Fallback: add all as green if something goes wrong
                         fig.add_trace(go.Scatter(
-                            x=_to_plotly_x(s_plot.index), y=s_plot.values, mode="markers",
-                            name=f"{chem_name} - {st} (kept)",
-                            marker=dict(symbol=cat_symbols[cat], size=10, color="#2ca02c", line=dict(width=0.5, color="#333")),
-                            customdata=_make_customdata(s_plot.values),
+                            x=_to_plotly_x(combined_series.index), y=combined_series.values, mode="markers",
+                            name=base_label,
+                            marker=dict(symbol="diamond", size=11, color=station_colors.get(st, "#2ca02c"), line=dict(width=0.6, color="#333")),
+                            customdata=_make_customdata(combined_series.values),
                             hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
                             showlegend=True,
                         ))
