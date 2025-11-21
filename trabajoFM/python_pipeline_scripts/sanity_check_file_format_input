@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""
+swat_sanity_checks.py
+
+A small suite of reusable sanity checks for SWAT-style text input files.
+
+Features
+--------
+- Check for trailing / internal blank lines
+- Check that all data lines have consistent line length
+- Check that all data lines have the same number of whitespace-separated fields
+- Check that numeric fields can be parsed as floats (with optional non-numeric columns)
+- Optional fixed-width column check by character positions
+
+Typical usage
+-------------
+from swat_sanity_checks import run_sanity_checks
+
+files = ["rcyr_1.dat", "rcyr_2.dat"]
+for f in files:
+    run_sanity_checks(f, skip_header_lines=6, non_numeric_field_indices={0})
+
+You can also call each check function individually if you want more control.
+"""
+
+from pathlib import Path
+from typing import List, Dict, Any, Iterable, Optional, Sequence, Tuple, Set, Union
+from collections import Counter
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+PathLike = Union[str, Path]
+
+
+def _read_lines(path: PathLike) -> List[str]:
+    """Read all lines from a text file, keeping newline characters."""
+    p = Path(path)
+    with p.open("r", errors="replace") as f:
+        return f.readlines()
+
+
+def _nice_header(title: str, char: str = "=") -> None:
+    """Print a nice section header."""
+    print()
+    print(char * 80)
+    print(title)
+    print(char * 80)
+
+
+def _short_path(path: PathLike) -> str:
+    """Return a nice short representation of a path."""
+    return str(Path(path))
+
+
+# ---------------------------------------------------------------------------
+# Core checks
+# ---------------------------------------------------------------------------
+
+def check_blank_lines(
+    path: PathLike,
+    skip_header_lines: int = 0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Check for blank lines (pure whitespace) in the file.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    verbose : bool, default True
+        If True, prints a nice summary.
+
+    Returns
+    -------
+    dict with keys:
+        - total_lines: int
+        - data_lines: int
+        - blank_line_numbers: list[int] (1-based file line numbers)
+    """
+    lines = _read_lines(path)
+    total_lines = len(lines)
+    data_lines = lines[skip_header_lines:]
+
+    blank_line_numbers: List[int] = []
+    for i, line in enumerate(lines, start=1):
+        if skip_header_lines and i <= skip_header_lines:
+            continue
+        if not line.strip():  # line is empty or whitespace
+            blank_line_numbers.append(i)
+
+    result = {
+        "total_lines": total_lines,
+        "data_lines": len(data_lines),
+        "blank_line_numbers": blank_line_numbers,
+    }
+
+    if verbose:
+        _nice_header(f"[BLANK LINES] { _short_path(path) }")
+        print(f"Total lines          : {total_lines}")
+        print(f"Data lines (checked) : {len(data_lines)}")
+        if blank_line_numbers:
+            print(f"Blank lines found    : {len(blank_line_numbers)}")
+            print(f"Line numbers         : {blank_line_numbers}")
+        else:
+            print("Blank lines found    : 0 (OK)")
+
+    return result
+
+
+def check_line_lengths(
+    path: PathLike,
+    skip_header_lines: int = 0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Check that line lengths are consistent for all data lines.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    verbose : bool, default True
+        If True, prints a nice summary.
+
+    Returns
+    -------
+    dict with keys:
+        - total_lines: int
+        - data_lines: int
+        - unique_lengths: set[int] (lengths without newline)
+        - length_counts: dict[length, count]
+    """
+    lines = _read_lines(path)
+    total_lines = len(lines)
+    data_lines = lines[skip_header_lines:]
+
+    lengths = [len(line.rstrip("\n")) for line in data_lines]
+    length_counter = Counter(lengths)
+    unique_lengths = set(lengths)
+
+    result = {
+        "total_lines": total_lines,
+        "data_lines": len(data_lines),
+        "unique_lengths": unique_lengths,
+        "length_counts": dict(length_counter),
+    }
+
+    if verbose:
+        _nice_header(f"[LINE LENGTHS] { _short_path(path) }")
+        print(f"Total lines          : {total_lines}")
+        print(f"Data lines (checked) : {len(data_lines)}")
+        print(f"Unique lengths       : {sorted(unique_lengths)}")
+
+        if len(unique_lengths) == 1:
+            print("Status               : OK (all data lines have the same length)")
+        else:
+            print("Status               : WARNING (inconsistent line lengths)")
+            print("Length counts:")
+            for length, count in sorted(length_counter.items()):
+                print(f"  Length {length:4d} : {count} lines")
+
+    return result
+
+
+def check_field_counts(
+    path: PathLike,
+    skip_header_lines: int = 0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Check that all data lines have the same number of whitespace-separated fields.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    verbose : bool, default True
+        If True, prints a nice summary.
+
+    Returns
+    -------
+    dict with keys:
+        - total_lines: int
+        - data_lines: int
+        - unique_field_counts: set[int]
+        - field_count_counts: dict[count, n_lines]
+    """
+    lines = _read_lines(path)
+    total_lines = len(lines)
+    data_lines = lines[skip_header_lines:]
+
+    field_counts = [len(line.split()) for line in data_lines]
+    counter = Counter(field_counts)
+    unique_counts = set(field_counts)
+
+    result = {
+        "total_lines": total_lines,
+        "data_lines": len(data_lines),
+        "unique_field_counts": unique_counts,
+        "field_count_counts": dict(counter),
+    }
+
+    if verbose:
+        _nice_header(f"[FIELD COUNTS] { _short_path(path) }")
+        print(f"Total lines          : {total_lines}")
+        print(f"Data lines (checked) : {len(data_lines)}")
+        print(f"Unique field counts  : {sorted(unique_counts)}")
+
+        if len(unique_counts) == 1:
+            print("Status               : OK (all data lines have same number of fields)")
+        else:
+            print("Status               : WARNING (field counts differ)")
+            print("Field count distribution:")
+            for count, n in sorted(counter.items()):
+                print(f"  {count:3d} fields : {n} lines")
+
+    return result
+
+
+def check_numeric_fields(
+    path: PathLike,
+    skip_header_lines: int = 0,
+    non_numeric_field_indices: Optional[Set[int]] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Check that numeric fields can be parsed as floats.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    non_numeric_field_indices : set[int], optional
+        Zero-based indices of fields (after split()) that are *not* numeric.
+        Example: if column 0 is 'year' and you don't want to treat it as float,
+        use {0}. All other columns will be checked as float.
+    verbose : bool, default True
+        If True, prints a nice summary.
+
+    Returns
+    -------
+    dict with keys:
+        - total_lines: int
+        - data_lines: int
+        - bad_fields: list[dict] with keys:
+            - line_number: int (1-based in file)
+            - field_index: int (0-based in the split list)
+            - token: str
+            - error: str
+    """
+    if non_numeric_field_indices is None:
+        non_numeric_field_indices = set()
+
+    lines = _read_lines(path)
+    total_lines = len(lines)
+    data_lines = lines[skip_header_lines:]
+    bad_fields = []
+
+    for lineno, line in enumerate(data_lines, start=skip_header_lines + 1):
+        parts = line.split()
+        for idx, token in enumerate(parts):
+            if idx in non_numeric_field_indices:
+                continue
+            try:
+                float(token)
+            except ValueError as e:
+                bad_fields.append(
+                    {
+                        "line_number": lineno,
+                        "field_index": idx,
+                        "token": token,
+                        "error": str(e),
+                    }
+                )
+
+    result = {
+        "total_lines": total_lines,
+        "data_lines": len(data_lines),
+        "bad_fields": bad_fields,
+    }
+
+    if verbose:
+        _nice_header(f"[NUMERIC FIELDS] { _short_path(path) }")
+        print(f"Total lines          : {total_lines}")
+        print(f"Data lines (checked) : {len(data_lines)}")
+        print(f"Non-numeric indices  : {sorted(non_numeric_field_indices)}")
+        if bad_fields:
+            print(f"Bad numeric fields   : {len(bad_fields)} (ERROR)")
+            for bf in bad_fields[:10]:  # don't spam too much
+                print(
+                    f"  Line {bf['line_number']}, "
+                    f"field {bf['field_index']}, token='{bf['token']}'"
+                )
+            if len(bad_fields) > 10:
+                print(f"  ... and {len(bad_fields) - 10} more")
+        else:
+            print("Bad numeric fields   : 0 (OK)")
+
+    return result
+
+
+def check_fixed_width_columns(
+    path: PathLike,
+    column_specs: Sequence[Tuple[str, int, int]],
+    skip_header_lines: int = 0,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Optional: Check fixed-width columns by character position.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    column_specs : sequence of (name, start, end)
+        Definitions of columns, where `start` and `end` are 0-based indices
+        for string slicing: line[start:end]. Example:
+            [
+                ("year", 0, 4),
+                ("FLOYR", 5, 19),
+                ("SEDYR", 20, 34),
+            ]
+        All specified columns are treated as numeric except those whose name
+        is listed in `non_numeric_names`.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    verbose : bool, default True
+        If True, prints a nice summary.
+
+    Returns
+    -------
+    dict with keys:
+        - total_lines: int
+        - data_lines: int
+        - bad_fields: list[dict] with keys:
+            - line_number: int
+            - column_name: str
+            - raw_value: str
+            - error: str
+    """
+    lines = _read_lines(path)
+    total_lines = len(lines)
+    data_lines = lines[skip_header_lines:]
+    bad_fields = []
+
+    for lineno, line in enumerate(data_lines, start=skip_header_lines + 1):
+        line_clean = line.rstrip("\n")
+        for name, start, end in column_specs:
+            if end > len(line_clean):
+                bad_fields.append(
+                    {
+                        "line_number": lineno,
+                        "column_name": name,
+                        "raw_value": "",
+                        "error": f"column slice {start}:{end} exceeds line length {len(line_clean)}",
+                    }
+                )
+                continue
+
+            raw = line_clean[start:end].strip()
+            if not raw:
+                bad_fields.append(
+                    {
+                        "line_number": lineno,
+                        "column_name": name,
+                        "raw_value": raw,
+                        "error": "empty value",
+                    }
+                )
+                continue
+
+            # Try numeric parse
+            try:
+                float(raw)
+            except ValueError as e:
+                bad_fields.append(
+                    {
+                        "line_number": lineno,
+                        "column_name": name,
+                        "raw_value": raw,
+                        "error": str(e),
+                    }
+                )
+
+    result = {
+        "total_lines": total_lines,
+        "data_lines": len(data_lines),
+        "bad_fields": bad_fields,
+    }
+
+    if verbose:
+        _nice_header(f"[FIXED WIDTH] { _short_path(path) }")
+        print(f"Total lines          : {total_lines}")
+        print(f"Data lines (checked) : {len(data_lines)}")
+        print("Columns checked      :")
+        for name, start, end in column_specs:
+            print(f"  {name:10s} -> [{start}:{end})")
+        if bad_fields:
+            print(f"Bad fixed-width vals : {len(bad_fields)} (ERROR)")
+            for bf in bad_fields[:10]:
+                print(
+                    f"  Line {bf['line_number']}, column '{bf['column_name']}', "
+                    f"value='{bf['raw_value']}' -> {bf['error']}"
+                )
+            if len(bad_fields) > 10:
+                print(f"  ... and {len(bad_fields) - 10} more")
+        else:
+            print("Bad fixed-width vals : 0 (OK)")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+def run_sanity_checks(
+    path: PathLike,
+    skip_header_lines: int = 0,
+    non_numeric_field_indices: Optional[Set[int]] = None,
+    fixed_width_specs: Optional[Sequence[Tuple[str, int, int]]] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Run all available sanity checks on a file and return a combined result dict.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to check.
+    skip_header_lines : int, default 0
+        Number of initial lines to ignore (e.g. title + header lines).
+    non_numeric_field_indices : set[int], optional
+        See `check_numeric_fields`.
+    fixed_width_specs : sequence of (name, start, end), optional
+        If provided, `check_fixed_width_columns` is also run.
+    verbose : bool, default True
+        If True, prints all summaries.
+
+    Returns
+    -------
+    dict mapping check name -> result dict.
+    """
+    if verbose:
+        _nice_header(f"RUNNING SANITY CHECKS FOR: { _short_path(path) }", char="#")
+
+    results = {}
+    results["blank_lines"] = check_blank_lines(
+        path, skip_header_lines=skip_header_lines, verbose=verbose
+    )
+    results["line_lengths"] = check_line_lengths(
+        path, skip_header_lines=skip_header_lines, verbose=verbose
+    )
+    results["field_counts"] = check_field_counts(
+        path, skip_header_lines=skip_header_lines, verbose=verbose
+    )
+    results["numeric_fields"] = check_numeric_fields(
+        path,
+        skip_header_lines=skip_header_lines,
+        non_numeric_field_indices=non_numeric_field_indices,
+        verbose=verbose,
+    )
+
+    if fixed_width_specs is not None:
+        results["fixed_width"] = check_fixed_width_columns(
+            path,
+            column_specs=fixed_width_specs,
+            skip_header_lines=skip_header_lines,
+            verbose=verbose,
+        )
+
+    if verbose:
+        print()
+        print("#" * 80)
+        print("SUMMARY")
+        print("#" * 80)
+        print(f"File: { _short_path(path) }")
+        print("Checks run:", ", ".join(results.keys()))
+        print("Done.")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point (optional)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run simple sanity checks on SWAT-style text files."
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        help="One or more files to check.",
+    )
+    parser.add_argument(
+        "--skip-header-lines",
+        type=int,
+        default=0,
+        help="Number of header/title lines to skip before data (default: 0).",
+    )
+    parser.add_argument(
+        "--non-numeric-cols",
+        type=int,
+        nargs="*",
+        default=[],
+        help="Zero-based indices of fields that are non-numeric (e.g. year).",
+    )
+
+    args = parser.parse_args()
+
+    for f in args.files:
+        run_sanity_checks(
+            f,
+            skip_header_lines=args.skip_header_lines,
+            non_numeric_field_indices=set(args.non_numeric_cols),
+            fixed_width_specs=None,  # fill in if you want, or keep via API usage
+            verbose=True,
+        )

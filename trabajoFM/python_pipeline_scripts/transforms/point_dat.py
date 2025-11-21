@@ -515,9 +515,9 @@ def transform_write_point_dat_from_df(
             area_str = f"{drainage_area:.3f}" if drainage_area is not None else "0.000"
             y0 = int(grp_sorted["YEAR"].min()) if not grp_sorted.empty else (start_year or 0)
             y1 = int(grp_sorted["YEAR"].max()) if not grp_sorted.empty else (end_year or 0)
-            f.write(f" TITLE LINE 1 - Subbasin ID {int(sid)} | Simulation Years: {y0}-{y1} | DRAINAGE_AREA (km²): {area_str}\n")
+            f.write(f" TITLE LINE 1 - Subbasin ID {int(sid)} | Simulation Years: {y0}-{y1}\n")
             f.write(" TITLE LINE 2 - Source: TrabajoFM model\n")
-            f.write(" TITLE LINE 3 - Units: kg/day\n")
+            f.write(" TITLE LINE 3 - Units: kg/day | DRAINAGE_AREA (km²): {area_str}\n")
             f.write(f" TITLE LINE 4 - Period: {y0}-{y1}\n")
             f.write(" TITLE LINE 5 - \n")
 
