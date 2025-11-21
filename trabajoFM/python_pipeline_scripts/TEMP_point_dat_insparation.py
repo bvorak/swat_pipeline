@@ -747,9 +747,9 @@ def write_recyear_files(
         with open(filepath, 'w') as f:
             # Metadata
             area_str = f"{drainage_area:.3f}" if drainage_area else "0.000"
-            f.write(f" TITLE LINE 1 - Subbasin ID {id_value} | Simulation Years: {start_year}-{end_year} | DRAINAGE_AREA (km²): {area_str}\n")
+            f.write(f" TITLE LINE 1 - Subbasin ID {id_value} | Simulation Years: {start_year}-{end_year}\n")
             f.write(" TITLE LINE 2 - Source: TrabajoFM model\n")
-            f.write(" TITLE LINE 3 - Units: kg/day\n")
+            f.write(" TITLE LINE 3 - Units: kg/day | DRAINAGE_AREA (km²): {area_str}\n")
             f.write(f" TITLE LINE 4 - Period: {start_year}-{end_year}\n")
             f.write(" TITLE LINE 5 - \n")
 
