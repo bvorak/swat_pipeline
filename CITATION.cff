@@ -4,8 +4,8 @@ authors:
   - family-names: Walter
     given-names: Konstantin Pascal
     orcid: https://orcid.org/0009-0003-4693-0932
-title: "SWAT pipeline. Uncerteinty aware point and diffuse load data flows"
-version: "v1-beta"
+title: "(beta) SWAT python pipeline. Uncerteinty aware point- and diffuse-load data flows"
+version: "v1.1-beta"
 identifiers:
   - type: doi
     value: 10.5281/zenodo.17660544
