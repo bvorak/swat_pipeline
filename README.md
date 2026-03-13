@@ -1,6 +1,6 @@
 # trabajoFM SWAT Pipeline
 
-Lightweight but reproducible SWAT pipeline: modular transforms, Monte Carlo orchestration, and provenance logging. Designed for humans and LLMs to understand, run, and reproduce results.
+Lightweight but reproducible SWAT pipeline: modular transforms, Monte Carlo orchestration, and provenance logging. 
 
 - `trabajoFM/python_pipeline_scripts/`: importable modules (transforms, writers, MC engine, provenance, runner)
 - `trabajoFM/scripts/`: examples and setup scripts
