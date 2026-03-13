@@ -5,8 +5,8 @@ authors:
     given-names: Konstantin Pascal
     orcid: https://orcid.org/0009-0003-4693-0932
 title: "(beta) SWAT python pipeline. Uncerteinty aware point- and diffuse-load data flows"
-version: "v1.1-beta"
+version: "v1.3-beta"
 identifiers:
   - type: doi
     value: 10.5281/zenodo.17660544
-date-released: 2025-09-11
+date-released: 2026-03-20
