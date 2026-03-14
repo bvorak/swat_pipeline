@@ -269,7 +269,7 @@ import os
 import pandas as pd
 from pathlib import Path
 
-output_gpkg = r"..\..\Genil GEO_INFO_POOL\Input Data\Diffuse loads\Soil chemical composition\python calculated hru stats\hru_chem_stats.gpkg"
+output_gpkg = r"C:\Users\Usuario\OneDrive - UNIVERSIDAD DE HUELVA\Granada\TrabajoFM\Genil GEO_INFO_POOL\Input Data\Diffuse loads\Soil chemical composition\python calculated hru stats\hru_chem_stats.gpkg"
 
 result_layer_path = rasterZonalAggregationToGPKG(
     raster_folder=r"..\..\Genil_ArcGIS_Ruben\ArcGIS _ base de suelo quimico _ ruben _ 30-05-25\raster",
@@ -308,7 +308,7 @@ print(f"Exported to CSV: {csv_output}")
 
 # data from ArcGIS Pro Model
 #file_path = r'HRU_cubillas_HRUGIS_join_zonal_quimica.csv'
-file_path = r"..\..\Genil GEO_INFO_POOL\Input Data\Diffuse loads\Soil chemical composition\python calculated hru stats\hru_chem_stats.csv"
+file_path = r"C:\Users\Usuario\OneDrive - UNIVERSIDAD DE HUELVA\Granada\TrabajoFM\Genil GEO_INFO_POOL\Input Data\Diffuse loads\Soil chemical composition\python calculated hru stats\hru_chem_stats.csv"
 
 identifier_column = "HRU_GIS" # 'HRUGIS' for the old model
 df = pd.read_csv(file_path, sep=';')

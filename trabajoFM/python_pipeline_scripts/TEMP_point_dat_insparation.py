@@ -326,8 +326,8 @@ os.getcwd()
 
 basin_name = "Cubillas"
 # Population aggregated according to (sub)basins' subbasins:
-file_path = r'..\..\Genil GEO_INFO_POOL\Input Data\Population data\Basin Aggregations\Cubillas population loads\cuenca_cubillas_habitantes_decadas_1970_2021_arcgis_output.csv'
-file_path_2 = r"..\..\Genil GEO_INFO_POOL\Input Data\Population data\HIPGDAC-ES-v1.0.0\custom_aggregations\open_source\cubillas_population.csv"
+file_path = r'C:\Users\Usuario\OneDrive - UNIVERSIDAD DE HUELVA\Granada\TrabajoFM\Genil GEO_INFO_POOL\Input Data\Population data\Basin Aggregations\Cubillas population loads\cuenca_cubillas_habitantes_decadas_1970_2021_arcgis_output.csv'
+file_path_2 = r"C:\Users\Usuario\OneDrive - UNIVERSIDAD DE HUELVA\Granada\TrabajoFM\Genil GEO_INFO_POOL\Input Data\Point loads\Population data\HIPGDAC-ES-v1.0.0\custom_aggregations\open_source\cubillas_population.csv"
 identifier_column = "GRIDCODE"
 
 # to extract years that have been and shall be simulated
