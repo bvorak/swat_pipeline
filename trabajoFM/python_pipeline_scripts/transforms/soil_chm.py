@@ -49,7 +49,7 @@ def read_n_p_means_from_csv_to_df(
     # Basic sanity
     for col in (id_col, n_col, p_col):
         if col not in df.columns:
-            raise KeyError(f"Column not found in CSV: {col}")
+            raise KeyError(f"Column not found in CSV: {col} and file path is: {csv_path}")
     if rp:
         rp.record_input(Path(csv_path), compute_hash=False, kind="csv")
     log.info("Loaded HRU CSV: %s | rows=%s", csv_path, len(df))
