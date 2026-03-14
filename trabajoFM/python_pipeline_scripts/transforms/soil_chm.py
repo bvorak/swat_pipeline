@@ -526,13 +526,12 @@ def derive_global_uncertainty(
     prediction: PathOrArray,
     se: PathOrArray,
     q50: Optional[PathOrArray] = None,
-    prob: Optional[PathOrArray] = None,  # reserved for future checks
     method: Literal[
         "p95_rel_se",          # global: 95th pct of |SE/center|
         "rmse_rel_center",     # global: sqrt(mean(SE^2))/mean(center)
         "median_se_zscore",    # global: z * median(SE)/median(center)
         "fixed_rel",           # global: user constant
-        "hru_support"          # HRU-aware: per-HRU variance scaling (can collapse to one number)
+        "hru_support"          # HRU-level: per-HRU variance scaling (collapse to one number after?)
     ] = "p95_rel_se",
     center_mode: Literal["prediction", "median"] = "prediction",
     z: float = 1.96,                  # for median_se_zscore
