@@ -2,7 +2,12 @@ from __future__ import annotations
 
 
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+from datetime import date, datetime
+
+import json
+from pathlib import Path
 
 
 
@@ -3874,4 +3879,244 @@ def evaluate_fit(
         "figs": figs,
 
     }
+
+
+def json_safe_serialize(obj: Any) -> Any:
+    """Recursively convert numpy/pandas objects into JSON-safe values."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return None if not np.isfinite(obj) else obj
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return None if not np.isfinite(obj) else float(obj)
+    if isinstance(obj, np.ndarray):
+        return [json_safe_serialize(item) for item in obj.tolist()]
+    if isinstance(obj, (pd.Timestamp, datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, pd.Series):
+        return {
+            "index": json_safe_serialize(list(obj.index)),
+            "values": json_safe_serialize(obj.to_list()),
+            "name": obj.name,
+        }
+    if isinstance(obj, (pd.Index, pd.DatetimeIndex)):
+        return [json_safe_serialize(item) for item in obj.tolist()]
+    if isinstance(obj, dict):
+        return {str(key): json_safe_serialize(value) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [json_safe_serialize(item) for item in obj]
+    return str(obj)
+
+
+def _metric_provenance(section: str, metric_key: str) -> Dict[str, Any]:
+    key = str(metric_key)
+    section_name = str(section)
+    normalized = key.lower()
+
+    metric_map: Dict[str, Dict[str, Any]] = {
+        "r": {"source_function": "_pearson_r", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "r2": {"source_function": "_pearson_r", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "mae": {"source_function": "_mae", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "rmse": {"source_function": "_rmse", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "medae": {"source_function": "_medae", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "nse": {"source_function": "_nse", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "nse_rel": {"source_function": "_nse_relative", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs", "_nse"]},
+        "kge": {"source_function": "_kge", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs", "_pearson_r"]},
+        "pbias%": {"source_function": "_pbias", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs"]},
+        "bias(obs-pred)": {"source_function": "compute_stats_for_view", "source_arguments": ["q_df", "measured_series", "window"], "internal_functions_used": ["_collect_pairs"]},
+        "coverage50": {"source_function": "_coverage", "source_arguments": ["y", "lo", "hi"], "internal_functions_used": ["_finite_pairs"]},
+        "coverage90": {"source_function": "_coverage", "source_arguments": ["y", "lo", "hi"], "internal_functions_used": ["_finite_pairs"]},
+        "coverage100": {"source_function": "_coverage", "source_arguments": ["y", "lo", "hi"], "internal_functions_used": ["_finite_pairs"]},
+        "r_log": {"source_function": "_pearson_r", "source_arguments": ["y_log", "m_log"], "internal_functions_used": ["_finite_pairs"]},
+        "r2_log": {"source_function": "_pearson_r", "source_arguments": ["y_log", "m_log"], "internal_functions_used": ["_finite_pairs"]},
+        "nselog10": {"source_function": "_nse", "source_arguments": ["y_log", "m_log"], "internal_functions_used": ["_finite_pairs"]},
+        "nse_log": {"source_function": "_nse_log", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs", "_nse"]},
+        "d_log": {"source_function": "_index_of_agreement_log", "source_arguments": ["y", "m"], "internal_functions_used": ["_finite_pairs", "_index_of_agreement"]},
+        "best_lag_days": {"source_function": "_global_best_lag", "source_arguments": ["measured", "median_series", "max_lag", "window", "choose_by"]},
+        "median_lag_days": {"source_function": "_local_window_match", "source_arguments": ["measured", "median_series", "K", "window", "strategy"]},
+        "iqr_lag_days": {"source_function": "_local_window_match", "source_arguments": ["measured", "median_series", "K", "window", "strategy"]},
+        "fraction_zero_lag": {"source_function": "_local_window_match", "source_arguments": ["measured", "median_series", "K", "window", "strategy"]},
+    }
+
+    if normalized in metric_map:
+        return metric_map[normalized]
+    if section_name.startswith("distribution_"):
+        return {
+            "source_function": "_distribution_summary",
+            "source_arguments": ["values"],
+            "internal_functions_used": [],
+        }
+    if section_name == "data_usage":
+        return {
+            "source_function": "_calculate_data_usage",
+            "source_arguments": ["q_df", "measured_series", "window"],
+            "internal_functions_used": ["_collect_pairs"],
+        }
+    if section_name == "event_context":
+        return {
+            "source_function": "compute_stats_for_view",
+            "source_arguments": ["event_context"],
+            "internal_functions_used": [],
+        }
+    if section_name == "band_deviation":
+        return {
+            "source_function": "_band_deviation_stats",
+            "source_arguments": ["mean_series", "min_series", "max_series"],
+            "internal_functions_used": ["_percentile_band_deviation_stats"],
+        }
+    if section_name.startswith("overlay_comparison"):
+        return {
+            "source_function": "compute_stats_for_view",
+            "source_arguments": ["band_data", "event_context", "window"],
+            "internal_functions_used": ["_coverage", "_distribution_summary"],
+        }
+    if section_name.startswith("overlay_full_series"):
+        return {
+            "source_function": "_measured_vs_series_stats",
+            "source_arguments": ["measured", "target_series", "series_name"],
+            "internal_functions_used": ["_pearson_r", "_rmse", "_mae", "_nse", "_index_of_agreement", "_rsr"],
+        }
+    return {
+        "source_function": "compute_stats_for_view",
+        "source_arguments": ["q_df", "measured_series"],
+        "internal_functions_used": [],
+    }
+
+
+def _semantic_label(section: str, metric_key: str, *, component: Optional[str] = None) -> str:
+    label_map: Dict[str, str] = {
+        "n": "Number of paired observations",
+        "r": "Pearson correlation",
+        "R2": "Coefficient of determination",
+        "MAE": "Mean absolute error",
+        "RMSE": "Root mean squared error",
+        "Bias(obs-pred)": "Bias (observed - predicted)",
+        "PBIAS%": "Percent bias",
+        "NSE": "Nash-Sutcliffe efficiency",
+        "NSE_rel": "Relative Nash-Sutcliffe efficiency",
+        "KGE": "Kling-Gupta efficiency",
+        "MedAE": "Median absolute error",
+        "coverage50": "Coverage within 50% band",
+        "coverage90": "Coverage within 90% band",
+        "coverage100": "Coverage within min/max envelope",
+        "r_log": "Log-space Pearson correlation",
+        "R2_log": "Log-space coefficient of determination",
+        "MAElog10": "Log10 mean absolute error",
+        "RMSElog10": "Log10 root mean squared error",
+        "NSElog10": "Log10 Nash-Sutcliffe efficiency",
+        "NSE_log": "Log-space Nash-Sutcliffe efficiency",
+        "d_log": "Log-space index of agreement",
+        "n_pos": "Positive paired observations",
+        "best_lag_days": "Best lag in days",
+        "median_lag_days": "Median lag in days",
+        "IQR_lag_days": "Lag interquartile range",
+        "fraction_zero_lag": "Fraction of zero-lag matches",
+        "sim_days_total": "Total simulation days",
+        "sim_days_finite": "Simulation days with finite values",
+        "sim_days_windowed": "Simulation days in current window",
+        "sim_days_windowed_finite": "Simulation days in current window with finite values",
+        "sim_usage_percent": "Simulation usage percent",
+        "measured_days_total": "Total measured days",
+        "measured_days_finite": "Measured days with finite values",
+        "measured_days_windowed": "Measured days in current window",
+        "measured_days_windowed_finite": "Measured days in current window with finite values",
+        "measured_usage_percent": "Measured usage percent",
+        "paired_days_used": "Paired days used",
+        "paired_usage_percent": "Paired usage percent",
+    }
+    base_label = label_map.get(metric_key, str(metric_key).replace("_", " "))
+    if component:
+        return f"{component}: {base_label}"
+    return base_label
+
+
+def build_stats_catalog(stats: Dict[str, object]) -> List[Dict[str, Any]]:
+    """Flatten the structured stats dict into machine-readable metric entries."""
+    if not isinstance(stats, dict):
+        return []
+
+    catalog: List[Dict[str, Any]] = []
+
+    def add_entry(section: str, metric_key: str, value: Any, *, component: Optional[str] = None) -> None:
+        if isinstance(value, (dict, list, tuple, set, frozenset, pd.Series, pd.Index, pd.DatetimeIndex, np.ndarray)):
+            return
+        if isinstance(value, (float, np.floating)) and not np.isfinite(float(value)):
+            return
+        entry = {
+            "section": section,
+            "component": component,
+            "metric_key": metric_key,
+            "semantic_label": _semantic_label(section, metric_key, component=component),
+            "value": json_safe_serialize(value),
+        }
+        entry.update(_metric_provenance(section, metric_key))
+        catalog.append(entry)
+
+    for section_name in ["data_usage", "same_day", "log_space", "global_lag", "band_deviation", "event_context"]:
+        section = stats.get(section_name)
+        if isinstance(section, dict):
+            for metric_key, value in section.items():
+                add_entry(section_name, str(metric_key), value)
+
+    for key, section in stats.items():
+        if str(key).startswith("local_window_K") and isinstance(section, dict):
+            for metric_key, value in section.items():
+                add_entry(str(key), str(metric_key), value)
+
+    distribution_summary = stats.get("distribution_summary")
+    if isinstance(distribution_summary, dict):
+        paired = distribution_summary.get("paired")
+        if isinstance(paired, dict):
+            for component_name, component_value in paired.items():
+                if isinstance(component_value, dict):
+                    for metric_key, value in component_value.items():
+                        add_entry("distribution_paired", str(metric_key), value, component=str(component_name))
+        for component_name in ["observed_full", "predicted_full"]:
+            component_value = distribution_summary.get(component_name)
+            if isinstance(component_value, dict):
+                for metric_key, value in component_value.items():
+                    add_entry("distribution_full", str(metric_key), value, component=str(component_name))
+
+    overlay_comparison = stats.get("overlay_comparison")
+    if isinstance(overlay_comparison, dict):
+        for component_name, component_value in overlay_comparison.items():
+            if isinstance(component_value, dict):
+                for metric_key, value in component_value.items():
+                    add_entry("overlay_comparison", str(metric_key), value, component=str(component_name))
+
+    overlay_full_series = stats.get("overlay_full_series")
+    if isinstance(overlay_full_series, dict):
+        for component_name, component_value in overlay_full_series.items():
+            if isinstance(component_value, dict):
+                for metric_key, value in component_value.items():
+                    add_entry("overlay_full_series", str(metric_key), value, component=str(component_name))
+
+    extras = stats.get("extras")
+    if isinstance(extras, dict):
+        for component_name, component_value in extras.items():
+            if isinstance(component_value, dict):
+                for metric_key, value in component_value.items():
+                    add_entry("extras", str(metric_key), value, component=str(component_name))
+
+    return catalog
+
+
+def export_stats_to_json(payload: Dict[str, Any], export_dir: Union[str, Path]) -> str:
+    """Serialize and export a dashboard stats payload to a JSON file."""
+    export_path = Path(export_dir)
+    export_path.mkdir(parents=True, exist_ok=True)
+
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+    filename_stem = str(metadata.get("filename_stem") or payload.get("filename_stem") or "stats-export")
+    safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in filename_stem).strip("_") or "stats-export"
+    file_path = export_path / f"{safe_stem}.json"
+
+    with file_path.open("w", encoding="utf-8") as handle:
+        json.dump(json_safe_serialize(payload), handle, indent=2, ensure_ascii=False)
+
+    return str(file_path)
 
