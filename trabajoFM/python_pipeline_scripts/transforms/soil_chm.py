@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional, Tuple, Union, Literal
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -518,6 +519,150 @@ def _valid_mask(*arrays: Optional[ArrayLike]) -> ArrayLike:
 def _safe_rel(num: ArrayLike, den: ArrayLike, eps: float = 1e-12) -> ArrayLike:
     return num / np.maximum(np.abs(den), eps)
 
+
+_CSV_UNCERTAINTY_METHODS: Dict[str, Tuple[str, str]] = {
+    "csv_rmse": (
+        "RMSE",
+        "RMSE from the cross-validation CSV, converted to a relative half-width by dividing by the mean absolute raster center.",
+    ),
+    "csv_nrmse_range": (
+        "NRMSE_Range",
+        "RMSE from the cross-validation CSV divided by the observed value range: max(observed) - min(observed).",
+    ),
+    "csv_nrmse_mean": (
+        "NRMSE_Mean",
+        "RMSE from the cross-validation CSV divided by the observed mean.",
+    ),
+    "csv_mean_relative_error": (
+        "Mean_Relative_Error",
+        "Absolute value of the mean relative error from the cross-validation CSV: mean((predicted - observed) / observed).",
+    ),
+    "csv_mean_absolute_relative_error": (
+        "Mean_Absolute_Relative_Error",
+        "Mean absolute relative error from the cross-validation CSV: mean(abs((predicted - observed) / observed)).",
+    ),
+    "csv_median_relative_error": (
+        "Median_Relative_Error",
+        "Absolute value of the median relative error from the cross-validation CSV.",
+    ),
+    "csv_median_absolute_relative_error": (
+        "Median_Absolute_Relative_Error",
+        "Median absolute relative error from the cross-validation CSV.",
+    ),
+    "csv_p75_relative_error": (
+        "P75_Relative_Error",
+        "Absolute value of the 75th percentile of relative error from the cross-validation CSV.",
+    ),
+    "csv_p75_absolute_relative_error": (
+        "P75_Absolute_Relative_Error",
+        "75th percentile of absolute relative error from the cross-validation CSV.",
+    ),
+    "csv_p90_relative_error": (
+        "P90_Relative_Error",
+        "Absolute value of the 90th percentile of relative error from the cross-validation CSV.",
+    ),
+    "csv_p90_absolute_relative_error": (
+        "P90_Absolute_Relative_Error",
+        "90th percentile of absolute relative error from the cross-validation CSV.",
+    ),
+    "csv_std_relative_error": (
+        "Std_Relative_Error",
+        "Standard deviation of relative error from the cross-validation CSV.",
+    ),
+}
+
+_CSV_SIGNED_METRICS = {
+    "Mean_Relative_Error",
+    "Median_Relative_Error",
+    "P75_Relative_Error",
+    "P90_Relative_Error",
+}
+
+
+def _calculate_uncertainty_measures_from_csv(
+    csv_path: Path | str,
+    *,
+    value_col: str = "Measured",
+    pred_col: str = "Predicted",
+    filter_zeros: bool = True,
+    epsilon: float = 1e-10,
+) -> Dict[str, float]:
+    """Calculate summary uncertainty measures from a cross-validation CSV."""
+    df = pd.read_csv(csv_path)
+
+    if filter_zeros:
+        df = df[df[value_col] != 0].copy()
+
+    if df.empty:
+        raise ValueError("No valid rows remain after filtering zeros.")
+
+    rel_error = (df[pred_col] - df[value_col]) / (df[value_col] + epsilon)
+    abs_rel_error = np.abs(rel_error)
+
+    rmse = np.sqrt(np.mean((df[pred_col] - df[value_col]) ** 2))
+    obs_range = df[value_col].max() - df[value_col].min()
+    obs_mean = df[value_col].mean()
+
+    return {
+        "RMSE": float(rmse),
+        "NRMSE_Range": float(rmse / obs_range) if abs(obs_range) > epsilon else float("nan"),
+        "NRMSE_Mean": float(rmse / obs_mean) if abs(obs_mean) > epsilon else float("nan"),
+        "Mean_Relative_Error": float(np.mean(rel_error)),
+        "Mean_Absolute_Relative_Error": float(np.mean(abs_rel_error)),
+        "Median_Relative_Error": float(np.median(rel_error)),
+        "Median_Absolute_Relative_Error": float(np.median(abs_rel_error)),
+        "P75_Relative_Error": float(np.percentile(rel_error, 75)),
+        "P75_Absolute_Relative_Error": float(np.percentile(abs_rel_error, 75)),
+        "P90_Relative_Error": float(np.percentile(rel_error, 90)),
+        "P90_Absolute_Relative_Error": float(np.percentile(abs_rel_error, 90)),
+        "Std_Relative_Error": float(np.std(rel_error)),
+        "Count": float(len(df)),
+    }
+
+
+def _describe_data_source(source: object, label: str) -> str:
+    if source is None:
+        return f"{label}: <not used>"
+    if isinstance(source, np.ndarray):
+        return f"{label}: <in-memory ndarray>"
+    return f"{label}: {Path(source)}"
+
+
+def _finalize_uncertainty_result(
+    *,
+    half_width_rel: float,
+    per_hru: Optional[pd.DataFrame],
+    method_used: str,
+    calculation_details: str,
+    source_dataset: str,
+    source_paths: list[str],
+    clip_rel_range: Tuple[float, float],
+    print_summary: bool,
+    source_metrics: Optional[Dict[str, float]] = None,
+) -> Dict[str, object]:
+    half_width_rel = float(np.clip(half_width_rel, *clip_rel_range))
+    out: Dict[str, object] = {
+        "half_width_rel": half_width_rel,
+        "lower_factor": max(0.0, 1.0 - half_width_rel),
+        "upper_factor": 1.0 + half_width_rel,
+        "per_hru": per_hru,
+        "method_used": method_used,
+        "calculation_details": calculation_details,
+        "source_dataset": source_dataset,
+        "source_paths": source_paths,
+    }
+    if source_metrics is not None:
+        out["source_metrics"] = source_metrics
+
+    if print_summary:
+        print(f"Method used: {method_used}")
+        print(f"How it was calculated: {calculation_details}")
+        print(f"Source dataset: {source_dataset}")
+        for source_path in source_paths:
+            print(f"Source path: {source_path}")
+
+    return out
+
 # ---------------------------
 # Main function
 # ---------------------------
@@ -531,17 +676,35 @@ def derive_global_uncertainty(
         "rmse_rel_center",     # global: sqrt(mean(SE^2))/mean(center)
         "median_se_zscore",    # global: z * median(SE)/median(center)
         "fixed_rel",           # global: user constant
-        "hru_support"          # HRU-level: per-HRU variance scaling (collapse to one number after?)
+        "hru_support",         # HRU-level: per-HRU variance scaling (collapse to one number after?)
+        "csv_rmse",            # CSV: RMSE normalized by mean absolute raster center
+        "csv_nrmse_range",     # CSV: RMSE / observed range
+        "csv_nrmse_mean",      # CSV: RMSE / observed mean
+        "csv_mean_relative_error",
+        "csv_mean_absolute_relative_error",
+        "csv_median_relative_error",
+        "csv_median_absolute_relative_error",
+        "csv_p75_relative_error",
+        "csv_p75_absolute_relative_error",
+        "csv_p90_relative_error",
+        "csv_p90_absolute_relative_error",
+        "csv_std_relative_error"
     ] = "p95_rel_se",
     center_mode: Literal["prediction", "median"] = "prediction",
     z: float = 1.96,                  # for median_se_zscore
     fixed_rel: Optional[float] = None,  # for fixed_rel
+    csv_path: Optional[Path | str] = None,
+    csv_value_col: str = "Measured",
+    csv_pred_col: str = "Predicted",
+    csv_filter_zeros: bool = True,
+    csv_epsilon: float = 1e-10,
     # HRU options:
     hru_path: Optional[str] = None,   # path to polygons (any format geopandas can read)
     hru_id_field: Optional[str] = None, # column to use as ID; if None, index is used
     correlation_range_m: Optional[float] = None,  # r (meters) required if method="hru_support"
     collapse: Optional[Literal["median","p90","max"]] = "p90",  # how to collapse per-HRU to one number
-    clip_rel_range: Tuple[float, float] = (0.0, 2.0)  # clamp half-width to [0, 200%]
+    clip_rel_range: Tuple[float, float] = (0.0, 2.0),  # clamp half-width to [0, 200%]
+    print_summary: bool = True,
 ) -> Dict[str, object]:
     """
     Returns:
@@ -549,17 +712,25 @@ def derive_global_uncertainty(
         'half_width_rel': float,             # single global number (± relative)
         'lower_factor': float,               # 1 - half_width_rel
         'upper_factor': float,               # 1 + half_width_rel
-        'per_hru' : pandas.DataFrame or None # optional table with per-HRU half_width_rel if method='hru_support'
+        'per_hru' : pandas.DataFrame or None, # optional table with per-HRU half_width_rel if method='hru_support'
+        'method_used': str,
+        'calculation_details': str,
+        'source_dataset': str,
+        'source_paths': list[str]
       }
     Notes:
       - If method != 'hru_support', 'per_hru' is None.
       - If method == 'hru_support' and collapse is not None, the top-level number
         is the chosen summary (median/p90/max) across HRUs.
+      - If a CSV-based method is selected, csv_path must be provided.
     """
+    log = get_logger(__name__)
+
     # --- Load rasters ---
     if isinstance(prediction, np.ndarray):
         pred = prediction.astype(float)
-        transform = None; crs = None
+        transform = None
+        crs = None
     else:
         if rasterio is None:
             raise ImportError("rasterio required when passing file paths.")
@@ -580,34 +751,86 @@ def derive_global_uncertainty(
         raise ValueError("No valid pixels after masking NaNs.")
 
     # ------------- Global methods -------------
+    if method in _CSV_UNCERTAINTY_METHODS:
+        if csv_path is None:
+            raise ValueError(f"csv_path must be provided when method='{method}'.")
+
+        csv_metrics = _calculate_uncertainty_measures_from_csv(
+            csv_path,
+            value_col=csv_value_col,
+            pred_col=csv_pred_col,
+            filter_zeros=csv_filter_zeros,
+            epsilon=csv_epsilon,
+        )
+        metric_name, calculation_details = _CSV_UNCERTAINTY_METHODS[method]
+        raw_metric_value = csv_metrics[metric_name]
+
+        if method == "csv_rmse":
+            center_mean = np.nanmean(np.abs(center[m]))
+            half_width_rel = float(_safe_rel(raw_metric_value, center_mean))
+        elif metric_name in _CSV_SIGNED_METRICS:
+            half_width_rel = float(abs(raw_metric_value))
+        else:
+            half_width_rel = float(raw_metric_value)
+
+        source_dataset = f"cross-validation CSV ({Path(csv_path).name})"
+        source_paths = [str(Path(csv_path).resolve())]
+        log.info("derive_global_uncertainty | method=%s | source=%s", method, source_paths[0])
+        return _finalize_uncertainty_result(
+            half_width_rel=half_width_rel,
+            per_hru=None,
+            method_used=method,
+            calculation_details=calculation_details,
+            source_dataset=source_dataset,
+            source_paths=source_paths,
+            clip_rel_range=clip_rel_range,
+            print_summary=print_summary,
+            source_metrics=csv_metrics,
+        )
+
     if method in ("p95_rel_se", "rmse_rel_center", "median_se_zscore", "fixed_rel"):
         if method == "p95_rel_se":
             rel = _safe_rel(se_r[m], center[m])
             half_width_rel = np.nanpercentile(np.abs(rel), 95)
+            calculation_details = "95th percentile of abs(SE / center) using the raster prediction and SE inputs."
 
         elif method == "rmse_rel_center":
             rmse = np.sqrt(np.nanmean(se_r[m] ** 2))
             center_mean = np.nanmean(np.abs(center[m]))
             half_width_rel = _safe_rel(rmse, center_mean)
+            calculation_details = "sqrt(mean(SE^2)) divided by mean(abs(center)) using the raster prediction and SE inputs."
 
         elif method == "median_se_zscore":
             med_se = np.nanmedian(np.abs(se_r[m]))
             med_center = np.nanmedian(np.abs(center[m]))
             half_width_rel = _safe_rel(z * med_se, med_center)
+            calculation_details = f"z * median(abs(SE)) / median(abs(center)) with z={z}."
 
-        elif method == "fixed_rel":
+        else:
             if fixed_rel is None:
                 raise ValueError("fixed_rel must be provided when method='fixed_rel'.")
             half_width_rel = float(fixed_rel)
+            calculation_details = "User-provided fixed relative half-width from the fixed_rel parameter."
 
-        half_width_rel = float(np.clip(half_width_rel, *clip_rel_range))
-        out = {
-            "half_width_rel": half_width_rel,
-            "lower_factor": max(0.0, 1.0 - half_width_rel),
-            "upper_factor": 1.0 + half_width_rel,
-            "per_hru": None
-        }
-        return out
+        source_dataset = "prediction raster + standard error raster"
+        source_paths = [
+            _describe_data_source(prediction, "prediction"),
+            _describe_data_source(se, "standard error"),
+        ]
+        if q50 is not None and center_mode == "median":
+            source_dataset = "prediction raster + standard error raster + q50 raster"
+            source_paths.append(_describe_data_source(q50, "q50"))
+        log.info("derive_global_uncertainty | method=%s | sources=%s", method, source_paths)
+        return _finalize_uncertainty_result(
+            half_width_rel=float(half_width_rel),
+            per_hru=None,
+            method_used=method,
+            calculation_details=calculation_details,
+            source_dataset=source_dataset,
+            source_paths=source_paths,
+            clip_rel_range=clip_rel_range,
+            print_summary=print_summary,
+        )
 
     # ------------- HRU-aware method -------------
     if method == "hru_support":
@@ -620,25 +843,24 @@ def derive_global_uncertainty(
         if correlation_range_m is None:
             raise ValueError("correlation_range_m (r) is required for method='hru_support' (meters, same CRS).")
 
-        # Load polygons
         gdf = gpd.read_file(hru_path)
         if gdf.empty:
             raise ValueError("HRU polygon file is empty.")
         if hru_id_field is None:
-            gdf = gdf.reset_index().rename(columns={"index":"HRU_ID"})
+            gdf = gdf.reset_index().rename(columns={"index": "HRU_ID"})
             hru_id_field = "HRU_ID"
         if transform is None or crs is None:
-            raise ValueError("When using file rasters, we require prediction's transform/crs. "
-                             "If you passed arrays, please also pass file paths so CRS/transform are known.")
+            raise ValueError(
+                "When using file rasters, we require prediction's transform/crs. "
+                "If you passed arrays, please also pass file paths so CRS/transform are known."
+            )
 
-        # Ensure projected CRS in meters
         if gdf.crs is None:
             warnings.warn("HRU polygons have no CRS; assuming it matches the raster CRS.")
             gdf = gdf.set_crs(crs)
         elif gdf.crs != crs:
             gdf = gdf.to_crs(crs)
 
-        # Build integer ID raster for polygons
         ids = gdf[hru_id_field].values
         shapes = [(geom, int(i)) for geom, i in zip(gdf.geometry, ids)]
 
@@ -648,15 +870,12 @@ def derive_global_uncertainty(
             transform=transform,
             fill=0,
             dtype="int32",
-            all_touched=False
+            all_touched=False,
         )
         unique_ids = np.unique(hru_id_raster)
-        unique_ids = unique_ids[unique_ids != 0]  # zero is background
+        unique_ids = unique_ids[unique_ids != 0]
 
-        # Pixel area (assumes square-ish pixels; from affine)
-        pixel_area = abs(transform.a) * abs(transform.e)  # meters^2
-
-        se2 = se_r**2
+        se2 = se_r ** 2
         per_hru = []
 
         for hid in unique_ids:
@@ -665,60 +884,48 @@ def derive_global_uncertainty(
             if n_pix == 0:
                 continue
 
-            # Mean pixel variance inside HRU
-            mean_var = float(np.nanmean(se2[mask]))  # (units^2)
-
-            # HRU area (geometry area)
+            mean_var = float(np.nanmean(se2[mask]))
             area_m2 = float(gdf.loc[gdf[hru_id_field] == hid, "geometry"].area.values[0])
 
-            # Effective sample size using correlation range r
             r = float(correlation_range_m)
-            n_eff = max(1.0, min(n_pix, area_m2 / (np.pi * r**2)))
-
-            # HRU SD (areal mean)
+            n_eff = max(1.0, min(n_pix, area_m2 / (np.pi * r ** 2)))
             sd_hru = np.sqrt(mean_var / n_eff)
 
-            # HRU center (mean prediction or median) for relative half-width
             center_mean = float(np.nanmean(center[mask]))
-            # Guard against near-zero center (choose absolute half-width fallback)
             if abs(center_mean) < 1e-12:
-                half_rel = np.nan  # will handle later
-                half_abs = sd_hru * 1.96  # 95% approx if desired; or use sd_hru as half-width
+                half_rel = np.nan
+                half_abs = sd_hru * 1.96
             else:
-                # Pick a simple, defensible 95% relative half-width using z=1.96
                 half_rel = (1.96 * sd_hru) / abs(center_mean)
                 half_abs = 1.96 * sd_hru
 
-            per_hru.append({
-                "HRU_ID": hid,
-                "n_pixels": n_pix,
-                "area_m2": area_m2,
-                "mean_pixel_var": mean_var,
-                "n_eff": n_eff,
-                "sd_hru": sd_hru,
-                "center_mean": center_mean,
-                "half_width_rel": half_rel,
-                "half_width_abs": half_abs
-            })
+            per_hru.append(
+                {
+                    "HRU_ID": hid,
+                    "n_pixels": n_pix,
+                    "area_m2": area_m2,
+                    "mean_pixel_var": mean_var,
+                    "n_eff": n_eff,
+                    "sd_hru": sd_hru,
+                    "center_mean": center_mean,
+                    "half_width_rel": half_rel,
+                    "half_width_abs": half_abs,
+                }
+            )
 
-        import pandas as pd
         df = pd.DataFrame(per_hru)
         if df.empty:
             raise ValueError("No HRU had valid overlap with the raster.")
 
-        # For any HRU with undefined relative (center~0), fallback:
         if df["half_width_rel"].isna().any():
-            # Use absolute half-width divided by global |center| median as a crude fallback
             global_center_med = float(np.nanmedian(np.abs(center[m])))
-            df.loc[df["half_width_rel"].isna(), "half_width_rel"] = df.loc[
-                df["half_width_rel"].isna(), "half_width_abs"
-            ] / max(global_center_med, 1e-12)
+            df.loc[df["half_width_rel"].isna(), "half_width_rel"] = (
+                df.loc[df["half_width_rel"].isna(), "half_width_abs"] / max(global_center_med, 1e-12)
+            )
 
-        # Clamp and ensure non-negative
         df["half_width_rel"] = df["half_width_rel"].clip(clip_rel_range[0], clip_rel_range[1])
 
         if collapse is None:
-            # No collapse: we still must return a single number per your design—use median
             summary_val = float(df["half_width_rel"].median())
         elif collapse == "median":
             summary_val = float(df["half_width_rel"].median())
@@ -729,14 +936,27 @@ def derive_global_uncertainty(
         else:
             raise ValueError("collapse must be one of None, 'median', 'p90', 'max'.")
 
-        summary_val = float(np.clip(summary_val, *clip_rel_range))
-        out = {
-            "half_width_rel": summary_val,
-            "lower_factor": max(0.0, 1.0 - summary_val),
-            "upper_factor": 1.0 + summary_val,
-            "per_hru": df
-        }
-        return out
+        source_paths = [
+            _describe_data_source(prediction, "prediction"),
+            _describe_data_source(se, "standard error"),
+            _describe_data_source(hru_path, "hru polygons"),
+        ]
+        if q50 is not None and center_mode == "median":
+            source_paths.append(_describe_data_source(q50, "q50"))
+        log.info("derive_global_uncertainty | method=%s | sources=%s", method, source_paths)
+        return _finalize_uncertainty_result(
+            half_width_rel=summary_val,
+            per_hru=df,
+            method_used=method,
+            calculation_details=(
+                "HRU-aware uncertainty: rasterized HRUs, estimated per-HRU support-adjusted SD using the correlation range, "
+                f"converted to relative half-widths, then collapsed with '{collapse or 'median'}'."
+            ),
+            source_dataset="prediction raster + standard error raster + HRU polygons",
+            source_paths=source_paths,
+            clip_rel_range=clip_rel_range,
+            print_summary=print_summary,
+        )
 
     raise ValueError(f"Unknown method: {method}")
 
