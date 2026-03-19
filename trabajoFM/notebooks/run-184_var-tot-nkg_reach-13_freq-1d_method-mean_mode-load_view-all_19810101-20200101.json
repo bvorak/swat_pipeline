@@ -1,0 +1,448 @@
+{
+  "metadata": {
+    "generated_at": "2026-03-18T16:39:47.240432Z",
+    "dashboard_version": "2025-09-11-chem-ui-3",
+    "export_version": "stats-export-v1",
+    "run_label": "run 184",
+    "source_function": "fan_compare_simulations_dashboard",
+    "filename_stem": "run-184_var-tot-nkg_reach-13_freq-1d_method-mean_mode-load_view-all_19810101-20200101",
+    "stats_function": {
+      "name": "compute_stats_for_view",
+      "arguments": {
+        "window": [
+          "1981-01-01T00:00:00",
+          "2020-01-01T00:00:00"
+        ],
+        "compute_log": false,
+        "max_global_lag": 2,
+        "local_window_ks": [
+          1,
+          2
+        ],
+        "local_strategy": "nearest",
+        "choose_best_lag_by": "NSE",
+        "has_band_data": true,
+        "has_event_context": true
+      },
+      "internal_functions_used": [
+        "compute_stats_for_view",
+        "format_stats_text"
+      ]
+    }
+  },
+  "view_window": {
+    "x0": "1981-01-01T00:00:00",
+    "x1": "2020-01-01T00:00:00"
+  },
+  "dashboard_state": {
+    "variable": "TOT_Nkg",
+    "reach": 13,
+    "frequency": "D",
+    "frequency_string": "1D",
+    "bin": 1,
+    "method": "mean",
+    "compare_mode": "load",
+    "flow_source": "swat_avg",
+    "event_source": "swat_avg",
+    "event_threshold": "p75",
+    "event_abs_value": null,
+    "event_min_days": 2.0,
+    "event_buffer_days": 3,
+    "event_view": "all",
+    "autoscale_y_live": true,
+    "range_slider": true,
+    "show_names_in_tooltip": false,
+    "show_diagnostics": true,
+    "show_measured": true,
+    "show_water_flow": false,
+    "show_swat_flow": false,
+    "show_erosion": false,
+    "show_flow_strat": false,
+    "flow_regimes": [
+      "event",
+      "non-event"
+    ],
+    "flow_total_band": false,
+    "flow_total_only": false,
+    "flow_overlay": true,
+    "flow_total_mode": "extents",
+    "lag_metric": "NSE",
+    "max_lag": 2,
+    "local_window_ks": [
+      1,
+      2
+    ],
+    "log_metrics": false,
+    "measured_nonnum_policy": "drop",
+    "measured_negative_policy": "drop",
+    "flag_deviations": false,
+    "deviation_factor": 10.0,
+    "start": "1981-01-01",
+    "end": "2020-01-01",
+    "season_months": null,
+    "measured_selection": {
+      "1": {
+        "enabled": true,
+        "chemical": "NITROGENO KJELDAHL",
+        "stations": [
+          "30304"
+        ]
+      },
+      "2": {
+        "enabled": false,
+        "chemical": "NITRATOS",
+        "stations": [
+          "30303",
+          "30303-B",
+          "30304",
+          "30309"
+        ]
+      },
+      "3": {
+        "enabled": false,
+        "chemical": "NITROGENO TOTAL",
+        "stations": [
+          "30303",
+          "30303-B",
+          "30304",
+          "30309"
+        ]
+      }
+    },
+    "extra_overlays": {
+      "rch_run000183_real000570_1": true,
+      "rch_run000183_real000571_2": true
+    },
+    "view_window": {
+      "x0": "1981-01-01T00:00:00",
+      "x1": "2020-01-01T00:00:00"
+    },
+    "source_arguments": {
+      "reach_col": "RCH",
+      "date_col": "date",
+      "flow_col": "FLOW_OUTcms",
+      "template": "plotly_white",
+      "figure_width": 1200,
+      "figure_height": 650,
+      "stats_export_dir": "."
+    }
+  },
+  "stats": {
+    "n": 10,
+    "data_usage": {
+      "sim_days_total": 14245,
+      "sim_days_finite": 14245,
+      "sim_days_windowed": 14245,
+      "sim_days_windowed_finite": 14245,
+      "sim_usage_percent": 100.0,
+      "measured_days_total": 10,
+      "measured_days_finite": 10,
+      "measured_days_windowed": 10,
+      "measured_days_windowed_finite": 10,
+      "measured_usage_percent": 100.0,
+      "paired_days_used": 10,
+      "paired_usage_percent": 0.0702000702000702
+    },
+    "same_day": {
+      "r": 0.8123765779058381,
+      "R2": 0.6599557043300002,
+      "MAE": 3079.6277383999995,
+      "RMSE": 4812.409933769405,
+      "Bias(obs-pred)": -3079.6277383999995,
+      "PBIAS%": -1063.3384803479526,
+      "NSE": -161.24218232934552,
+      "NSE_rel": -161.24218232934552,
+      "KGE": -13.315525502463515,
+      "MedAE": 1865.7426799999998,
+      "d": 0.20403357459403848,
+      "d_rel": 0.2040335745940387,
+      "RSR": 12.7374323287445,
+      "coverage50": 0.0,
+      "coverage90": 0.3,
+      "coverage100": 0.3
+    },
+    "distribution_summary": {
+      "paired": {
+        "observed": {
+          "mean": 289.6187616,
+          "median": 102.75768,
+          "p05": 22.972464,
+          "p25": 43.552080000000004,
+          "p50": 102.75768,
+          "p75": 337.47624,
+          "p95": 970.7385599999993,
+          "sd": 377.8163298194146,
+          "var": 142745.17907821265,
+          "n": 10.0
+        },
+        "predicted": {
+          "mean": 3369.2464999999997,
+          "median": 1920.125,
+          "p05": 466.16525,
+          "p25": 849.225,
+          "p50": 1920.125,
+          "p75": 4129.862499999999,
+          "p95": 10118.147499999988,
+          "sd": 3998.3574080552444,
+          "var": 15986861.962550253,
+          "n": 10.0
+        }
+      },
+      "observed_full": {
+        "mean": 289.6187616,
+        "median": 102.75768,
+        "p05": 22.972464,
+        "p25": 43.552080000000004,
+        "p50": 102.75768,
+        "p75": 337.47624,
+        "p95": 970.7385599999993,
+        "sd": 377.8163298194146,
+        "var": 142745.17907821265,
+        "n": 10.0
+      },
+      "predicted_full": {
+        "mean": 1809.6568162695683,
+        "median": 771.7,
+        "p05": 168.36100000000002,
+        "p25": 425.24,
+        "p50": 771.7,
+        "p75": 1590.3,
+        "p95": 5693.8899999999985,
+        "sd": 6629.465578497534,
+        "var": 43949813.856483646,
+        "n": 14245.0
+      }
+    },
+    "global_lag": {
+      "best_lag_days": -2.0,
+      "metric": "NSE",
+      "r": 0.6658247969458132,
+      "R2": 0.4433226602279334,
+      "RMSE": 3365.308814263162,
+      "MAE": 2504.7302384,
+      "NSE": -78.33930580697225
+    },
+    "local_window_K1": {
+      "K": 1.0,
+      "strategy": "nearest",
+      "RMSE": 3844.929423193109,
+      "MAE": 2675.5372383999998,
+      "Bias(obs-pred)": -2675.5372383999998,
+      "median_lag_days": 1.0,
+      "IQR_lag_days": 0.0,
+      "fraction_zero_lag": 0.1,
+      "n": 10.0,
+      "NSE": -102.5655450138597
+    },
+    "local_window_K2": {
+      "K": 2.0,
+      "strategy": "nearest",
+      "RMSE": 3226.665388632328,
+      "MAE": 2393.1102383999996,
+      "Bias(obs-pred)": -2393.1102383999996,
+      "median_lag_days": 2.0,
+      "IQR_lag_days": 0.75,
+      "fraction_zero_lag": 0.1,
+      "n": 10.0,
+      "NSE": -71.93675063094939
+    },
+    "extras": {
+      "rch_run000183_real000570_1": {
+        "r": 0.877015196831736,
+        "n": 10.0
+      },
+      "rch_run000183_real000571_2": {
+        "r": 0.7993243966404688,
+        "n": 10.0
+      }
+    },
+    "band_deviation": {
+      "band_width_mean": 3039.4745261832218,
+      "band_width_rel%": 172.00944899576066,
+      "band_asymmetry": 1.5108205695510246e-17,
+      "band_rmse_vs_mean": 5233.505387553748,
+      "p50_band_width_mean": 1519.7372630916109,
+      "p50_band_width_rel%": 86.00472449788033,
+      "p50_band_asymmetry": 8.470578928923142e-18,
+      "p50_band_rmse_vs_mean": 2616.752693776874,
+      "p90_band_width_mean": 2735.5270735649,
+      "p90_band_width_rel%": 154.80850409618458,
+      "p90_band_asymmetry": 7.214031723168521e-17,
+      "p90_band_rmse_vs_mean": 4710.154848798373
+    },
+    "event_context": {
+      "view": "all",
+      "event_days": 3548,
+      "buffered_days": 4078,
+      "non_event_days": 10170,
+      "selected_days": 14245,
+      "all_days": 14245
+    },
+    "baseline_summary": {
+      "median": 771.7,
+      "mean": 1809.6568162695683,
+      "sd": 6629.465578497534
+    },
+    "overlay_comparison": {
+      "rch_run000183_real000570_1": {
+        "median_delta": 675.8499999999999,
+        "median_delta_pct": 87.87493663635738,
+        "relative_width": 0.8787493663635737,
+        "rmse": 5233.474312798759,
+        "r": 0.9860831464802499,
+        "median_W": 1351.7,
+        "p90_W": 6199.8600000000015,
+        "coverage_fraction": 0.995998595998596,
+        "relative_width_low": 0.8110900854161875,
+        "relative_width_high": 0.9011996001332889,
+        "relative_width_event_contrast": 1.1110968021152228,
+        "relative_width_event": 0.8532490160958194,
+        "relative_width_nonevent": 0.8857051384664638,
+        "event_ratio": 0.9633556124255529,
+        "event_pairs": 4075,
+        "non_event_pairs": 10159,
+        "baseline_min": 0.0,
+        "baseline_max": 461400.0,
+        "baseline_mean": 1809.6568162695683,
+        "baseline_p50": 771.7,
+        "baseline_p90": 3542.96,
+        "overlay_min": 0.0,
+        "overlay_max": 114400.0,
+        "overlay_mean": 289.93142906423304,
+        "overlay_p50": 96.77,
+        "overlay_p90": 408.34000000000015,
+        "delta_min": 0.0,
+        "delta_max": 347000.0,
+        "delta_mean": 1519.7253872053352,
+        "delta_p50": 674.9300000000001,
+        "delta_p90": 3134.62,
+        "delta_event_pairs": 1050.6499999999999,
+        "delta_non_event_pairs": 581.445,
+        "normalized_median_delta": 0.8757937022158868,
+        "mean_delta": 1519.7253872053352,
+        "mean_delta_pct": 86.004143892337,
+        "delta_event_pairs_mean": 2796.2796331288346,
+        "delta_non_event_pairs_mean": 1008.2250379292036,
+        "normalized_mean_delta": 0.8397865128583338
+      },
+      "rch_run000183_real000571_2": {
+        "median_delta": -675.85,
+        "median_delta_pct": -87.87571502032168,
+        "relative_width": 0.8787571502032167,
+        "rmse": 5233.757336871689,
+        "r": 0.9997214146512101,
+        "median_W": 1351.7,
+        "p90_W": 6199.8600000000015,
+        "coverage_fraction": 0.9811863811863812,
+        "relative_width_low": 0.8110900854161873,
+        "relative_width_high": 0.9012181124810248,
+        "relative_width_event_contrast": 1.111119626149284,
+        "relative_width_event": 0.8532586213380468,
+        "relative_width_nonevent": 0.8857051384664638,
+        "event_ratio": 0.9633664571658735,
+        "event_pairs": 4075,
+        "non_event_pairs": 10159,
+        "baseline_min": 0.0,
+        "baseline_max": 461400.0,
+        "baseline_mean": 1809.6568162695683,
+        "baseline_p50": 771.7,
+        "baseline_p90": 3542.96,
+        "overlay_min": 0.0,
+        "overlay_max": 808400.0,
+        "overlay_mean": 3329.418337627238,
+        "overlay_p50": 1448.0,
+        "overlay_p90": 6644.200000000003,
+        "delta_min": 0.0,
+        "delta_max": -347000.0,
+        "delta_mean": -1519.7615213576698,
+        "delta_p50": -676.3,
+        "delta_p90": -3101.2400000000025,
+        "delta_event_pairs": -1050.65,
+        "delta_non_event_pairs": -581.4449999999999,
+        "normalized_median_delta": -0.8757937022158869,
+        "mean_delta": -1519.7615213576692,
+        "mean_delta_pct": -86.00492038436161,
+        "delta_event_pairs_mean": -2796.3953950920245,
+        "delta_non_event_pairs_mean": -1008.2292661494592,
+        "normalized_mean_delta": -0.8398064802643133
+      },
+      "__baseline__": {
+        "relative_width": 1.5817628703657898,
+        "relative_width_mean": 1.5480850409618458,
+        "relative_width_norm_median": 1.5817628703657898,
+        "relative_width_norm_mean": 1.5480850409618458,
+        "median_W": 1351.7,
+        "mean_W": 3039.4745261832218,
+        "p90_W": 6199.8600000000015,
+        "coverage_fraction": 1.0,
+        "median": 771.7,
+        "mean": 1809.6568162695683,
+        "sd": 6629.465578497534
+      }
+    },
+    "overlay_full_series": {
+      "rch_run000183_real000570_1": {
+        "RMSE": 5233.474312798759,
+        "Bias(obs-pred)": -1519.7253872053352,
+        "R2": 0.9723599717723896,
+        "MedAE": 675.8499999999999,
+        "MAE": 1519.7253872053352,
+        "r": 0.9860831464802498,
+        "n_pairs": 14245
+      },
+      "rch_run000183_real000571_2": {
+        "RMSE": 5233.757336871689,
+        "Bias(obs-pred)": 1519.7615213576692,
+        "R2": 0.9994429069122168,
+        "MedAE": 675.85,
+        "MAE": 1519.7615213576692,
+        "r": 0.9997214146512101,
+        "n_pairs": 14245
+      }
+    },
+    "measured_vs_series": {
+      "vs_mean_coverage50": 0.0,
+      "vs_mean_coverage90": 0.3,
+      "vs_mean_coverage100": 0.3,
+      "vs_mean_coverage_minmax": 0.3,
+      "vs_ensemble_raw_mean_coverage50": 0.0,
+      "vs_ensemble_raw_mean_coverage90": 0.3,
+      "vs_ensemble_raw_mean_coverage100": 0.3,
+      "vs_ensemble_raw_mean_coverage_minmax": 0.3,
+      "vs_extra_rch_run000183_real000570_1_mean_coverage50": 1.0,
+      "vs_extra_rch_run000183_real000570_1_mean_coverage90": 1.0,
+      "vs_extra_rch_run000183_real000570_1_mean_coverage100": 1.0,
+      "vs_extra_rch_run000183_real000570_1_mean_coverage_minmax": 1.0,
+      "vs_extra_rch_run000183_real000571_2_mean_coverage50": 0.0,
+      "vs_extra_rch_run000183_real000571_2_mean_coverage90": 0.0,
+      "vs_extra_rch_run000183_real000571_2_mean_coverage100": 0.0,
+      "vs_extra_rch_run000183_real000571_2_mean_coverage_minmax": 0.0
+    },
+    "coverage_debug": {
+      "mean": [
+        "coverage50: coverage=0.000 over 10 points",
+        "coverage90: coverage=0.300 over 10 points",
+        "coverage100: coverage=0.300 over 10 points",
+        "coverage_minmax: coverage=0.300 over 10 points"
+      ],
+      "ensemble_raw_mean": [
+        "coverage50: coverage=0.000 over 10 points",
+        "coverage90: coverage=0.300 over 10 points",
+        "coverage100: coverage=0.300 over 10 points",
+        "coverage_minmax: coverage=0.300 over 10 points"
+      ],
+      "extra_rch_run000183_real000570_1_mean": [
+        "coverage50: coverage=1.000 over 10 points",
+        "coverage90: coverage=1.000 over 10 points",
+        "coverage100: coverage=1.000 over 10 points",
+        "coverage_minmax: coverage=1.000 over 10 points"
+      ],
+      "extra_rch_run000183_real000571_2_mean": [
+        "coverage50: coverage=0.000 over 10 points",
+        "coverage90: coverage=0.000 over 10 points",
+        "coverage100: coverage=0.000 over 10 points",
+        "coverage_minmax: coverage=0.000 over 10 points"
+      ]
+    }
+  }
+}

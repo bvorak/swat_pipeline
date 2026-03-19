@@ -2,6 +2,7 @@
 
 from typing import Dict, Iterable, List, Optional, Union, Sequence, Tuple, Any
 from datetime import datetime, date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,7 +12,12 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 import plotly.graph_objects as go
 
-from .stats import compute_stats_for_view, format_stats_text, build_fit_diagnostics
+from .stats import (
+    build_fit_diagnostics,
+    compute_stats_for_view,
+    export_stats_to_json,
+    format_stats_text,
+)
 from .dashboard_helper import (
     _ensure_dt_index,
     _make_freq_string,
@@ -68,6 +74,8 @@ def fan_compare_simulations_dashboard(
     ui_defaults: Optional[Dict[str, Any]] = None,
     # Optional erosion overlay toggle default
     erosion_on_default: Optional[bool] = None,
+    # Optional export directory for JSON stats bundles
+    stats_export_dir: Optional[Union[str, Path]] = None,
     # Debug: print pipeline info for filtering/resampling
     debug: bool = False,
 ):
@@ -163,6 +171,11 @@ def fan_compare_simulations_dashboard(
             end = ui_defaults.get("end")
         if ui_defaults.get("season_months") is not None:
             season_months = ui_defaults.get("season_months")
+
+    if stats_export_dir is None:
+        stats_export_dir = Path(__file__).resolve().parent.parent / "config" / "outputs" / "dashboard_stats"
+    else:
+        stats_export_dir = Path(stats_export_dir)
 
     # Widgets for simulations
     num_sim = widgets.HTML(value=(
@@ -448,12 +461,24 @@ def fan_compare_simulations_dashboard(
         pass
     # Stats view (HTML) and diagnostics panel; shown side-by-side
     stats_html = widgets.HTML(value="")
+    btn_save_stats = widgets.Button(
+        description="Save stats",
+        icon="save",
+        tooltip=f"Export current stats and dashboard state to JSON\nDirectory: {stats_export_dir}",
+        layout=widgets.Layout(width="120px"),
+        disabled=True,
+    )
+    lbl_save_stats = widgets.HTML("")
+    stats_panel = widgets.VBox([
+        widgets.HBox([btn_save_stats, lbl_save_stats]),
+        stats_html,
+    ])
     duration_box = widgets.HBox([], layout=widgets.Layout(width="100%", flex_wrap="wrap", justify_content="flex-start"))
     diag_box = widgets.VBox([])
     # Styling and initial layout
     try:
-        stats_html.layout.width = "40%"
-        stats_html.layout.min_width = "300px"
+        stats_panel.layout.width = "40%"
+        stats_panel.layout.min_width = "300px"
         stats_html.layout.padding = "8px"
         stats_html.layout.overflow = "auto"
         stats_html.layout.border = "1px solid #ddd"
@@ -526,6 +551,8 @@ def fan_compare_simulations_dashboard(
         "flow_total_only": False,
         "flow_overlay": True,
         "flow_total_mode": "median",  # 'median' | 'extents'
+        "latest_stats_export_payload": None,
+        "latest_stats_export_path": None,
     }
     _state = {"updating": False, "duration_refresher": None}
 
@@ -814,6 +841,123 @@ def fan_compare_simulations_dashboard(
 
     def _hovertemplate(show_name: bool) -> str:
         return ("%{fullData.name}: %{y:.4g}<extra></extra>" if show_name else "%{y:.4g}<extra></extra>")
+
+    def _sanitize_filename_part(value: object, *, max_len: int = 32) -> str:
+        text = "unknown" if value is None else str(value).strip().lower()
+        text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+        if not text:
+            text = "unknown"
+        return text[:max_len]
+
+    def _selected_measured_state() -> Dict[str, Dict[str, Any]]:
+        selected: Dict[str, Dict[str, Any]] = {}
+        if not measured_present:
+            return selected
+        for cat in (1, 2, 3):
+            selected[str(cat)] = {
+                "enabled": bool(cb_cat[cat].value),
+                "chemical": dd_cat_name[cat].value,
+                "stations": list(ms_cat_stations[cat].value or ()),
+            }
+        return selected
+
+    def _collect_dashboard_state(view_window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None) -> Dict[str, Any]:
+        x0 = None
+        x1 = None
+        if view_window is not None:
+            x0, x1 = view_window
+        return {
+            "variable": dd_var.value,
+            "reach": dd_reach.value,
+            "frequency": dd_freq.value,
+            "frequency_string": _make_freq_string(dd_freq.value, sl_bin.value),
+            "bin": sl_bin.value,
+            "method": dd_method.value,
+            "compare_mode": tg_units.value,
+            "flow_source": dd_flow_source.value,
+            "event_source": dd_event_source.value,
+            "event_threshold": dd_event_threshold.value,
+            "event_abs_value": tb_event_abs.value,
+            "event_min_days": fl_event_min_days.value,
+            "event_buffer_days": sl_event_buffer_days.value,
+            "event_view": tg_event_view.value,
+            "autoscale_y_live": cb_autoscale_y_live.value,
+            "range_slider": cb_range_slider.value,
+            "show_names_in_tooltip": cb_show_names_in_tooltip.value,
+            "show_diagnostics": cb_show_diags.value,
+            "show_measured": cb_meas_on.value,
+            "show_water_flow": cb_flow_on.value,
+            "show_swat_flow": cb_swat_flow_on.value,
+            "show_erosion": cb_erosion_on.value,
+            "show_flow_strat": cb_flow_strat.value,
+            "flow_regimes": list(ms_flow_regimes.value),
+            "flow_total_band": cb_flow_total_band.value,
+            "flow_total_only": cb_flow_total_only.value,
+            "flow_overlay": cb_flow_overlay.value,
+            "flow_total_mode": dd_flow_total_mode.value,
+            "lag_metric": dd_lag_metric.value,
+            "max_lag": sl_max_lag.value,
+            "local_window_ks": list(sel_local_K.value),
+            "log_metrics": cb_log_metrics.value,
+            "measured_nonnum_policy": dd_meas_nonnum.value,
+            "measured_negative_policy": dd_meas_negative.value,
+            "flag_deviations": cb_flag_dev.value,
+            "deviation_factor": sl_dev_factor.value,
+            "start": start,
+            "end": end,
+            "season_months": list(season_months) if season_months is not None else None,
+            "measured_selection": _selected_measured_state(),
+            "extra_overlays": {name: bool(chk.value) for name, chk in cb_extra.items()},
+            "view_window": {"x0": x0, "x1": x1},
+            "source_arguments": {
+                "reach_col": reach_col,
+                "date_col": date_col,
+                "flow_col": flow_col,
+                "template": template,
+                "figure_width": figure_width,
+                "figure_height": figure_height,
+                "stats_export_dir": str(stats_export_dir),
+            },
+        }
+
+    def _build_stats_filename_stem(view_window: Tuple[pd.Timestamp, pd.Timestamp]) -> str:
+        x0, x1 = view_window
+        window_token = "all"
+        if x0 is not None and x1 is not None:
+            window_token = f"{pd.Timestamp(x0).strftime('%Y%m%d')}-{pd.Timestamp(x1).strftime('%Y%m%d')}"
+        parts = [
+            _sanitize_filename_part(_run_label or "run-unknown", max_len=24),
+            f"var-{_sanitize_filename_part(dd_var.value, max_len=20)}",
+            f"reach-{_sanitize_filename_part(dd_reach.value, max_len=8)}",
+            f"freq-{_sanitize_filename_part(_make_freq_string(dd_freq.value, sl_bin.value), max_len=12)}",
+            f"method-{_sanitize_filename_part(dd_method.value, max_len=16)}",
+            f"mode-{_sanitize_filename_part(tg_units.value, max_len=8)}",
+            f"view-{_sanitize_filename_part(tg_event_view.value, max_len=12)}",
+            window_token,
+        ]
+        return "_".join(parts)
+
+    def _update_save_stats_tooltip(file_path: Optional[Union[str, Path]] = None) -> None:
+        target = None
+        if file_path is not None:
+            target = Path(file_path)
+        else:
+            payload = _last.get("latest_stats_export_payload")
+            metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+            filename_stem = metadata.get("filename_stem")
+            if filename_stem:
+                safe_stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(filename_stem)).strip("_") or "stats-export"
+                target = stats_export_dir / f"{safe_stem}.json"
+        if target is None:
+            btn_save_stats.tooltip = (
+                "Export current stats and dashboard state to JSON"
+                f"\nDirectory: {stats_export_dir}"
+            )
+            return
+        btn_save_stats.tooltip = (
+            "Export current stats and dashboard state to JSON"
+            f"\nPath: {target}"
+        )
 
     def _median_hovertemplate(show_name: bool, run_label: Optional[str]) -> str:
         head = "%{fullData.name}:<br>" if show_name else ""
@@ -3154,9 +3298,55 @@ def fan_compare_simulations_dashboard(
                         print(f"Stats computation failed: {e}")
                         import traceback
                         traceback.print_exc()
+                    _last["latest_stats_export_payload"] = None
+                    btn_save_stats.disabled = True
+                    lbl_save_stats.value = "<span style='color:#b94a48;'>Stats export unavailable</span>"
                     stats_html.value = f"Stats computation error: {e}"
                     return
                 html_text = format_stats_text(stats)
+                try:
+                    view_window = (pd.Timestamp(x0), pd.Timestamp(x1))
+                    dashboard_state = _collect_dashboard_state(view_window)
+                    _last["latest_stats_export_payload"] = {
+                        "metadata": {
+                            "generated_at": datetime.utcnow().isoformat() + "Z",
+                            "dashboard_version": DASHBOARD_VERSION,
+                            "export_version": "stats-export-v1",
+                            "run_label": _run_label or "run-unknown",
+                            "source_function": "fan_compare_simulations_dashboard",
+                            "filename_stem": _build_stats_filename_stem(view_window),
+                            "view_window": {"x0": view_window[0], "x1": view_window[1]},
+                            "dashboard_state": dashboard_state,
+                            "stats_function": {
+                                "name": "compute_stats_for_view",
+                                "arguments": {
+                                    "window": view_window,
+                                    "compute_log": bool(cb_log_metrics.value),
+                                    "max_global_lag": int(sl_max_lag.value),
+                                    "local_window_ks": tuple(sorted(list(sel_local_K.value))) if sel_local_K.value else (),
+                                    "local_strategy": "nearest",
+                                    "choose_best_lag_by": str(dd_lag_metric.value),
+                                    "has_band_data": bool(_last.get("band_data")),
+                                    "has_event_context": bool(_last.get("event_context")),
+                                },
+                                "internal_functions_used": [
+                                    "compute_stats_for_view",
+                                    "format_stats_text",
+                                ],
+                            },
+                        },
+                        "stats": stats,
+                    }
+                    _last["latest_stats_export_path"] = None
+                    btn_save_stats.disabled = False
+                    lbl_save_stats.value = ""
+                    _update_save_stats_tooltip()
+                except Exception as export_payload_error:
+                    _last["latest_stats_export_payload"] = None
+                    _last["latest_stats_export_path"] = None
+                    btn_save_stats.disabled = True
+                    lbl_save_stats.value = f"<span style='color:#b94a48;'>Export payload error: {export_payload_error}</span>"
+                    _update_save_stats_tooltip()
                 try:
                     stats_html.value = html_text
                 except Exception:
@@ -3855,7 +4045,7 @@ def fan_compare_simulations_dashboard(
         dd_flow_total_mode,
     ])
     controls = widgets.HBox([controls_left, widgets.HBox([widgets.Label(""), controls_right])])
-    stats_row = widgets.HBox([stats_html, diag_box], layout=widgets.Layout(width="100%"))
+    stats_row = widgets.HBox([stats_panel, diag_box], layout=widgets.Layout(width="100%"))
     # Wire reload button
     def _on_reload(_):
         btn_reload.disabled = True
@@ -3870,7 +4060,27 @@ def fan_compare_simulations_dashboard(
                 btn_reload.disabled = False
             except Exception:
                 pass
+
+    def _on_save_stats(_):
+        payload = _last.get("latest_stats_export_payload")
+        if not payload:
+            lbl_save_stats.value = "<span style='color:#8a6d3b;'>No computed stats to export</span>"
+            _update_save_stats_tooltip()
+            return
+        btn_save_stats.disabled = True
+        try:
+            file_path = export_stats_to_json(payload, stats_export_dir)
+            _last["latest_stats_export_path"] = file_path
+            lbl_save_stats.value = f"<span style='color:#3c763d;'>Saved: {Path(file_path).name}</span>"
+            _update_save_stats_tooltip(file_path)
+        except Exception as exc:
+            lbl_save_stats.value = f"<span style='color:#b94a48;'>Save failed: {exc}</span>"
+            _update_save_stats_tooltip()
+        finally:
+            btn_save_stats.disabled = False
+
     btn_reload.on_click(_on_reload)
+    btn_save_stats.on_click(_on_save_stats)
     display(controls, reload_bar, out, stats_controls, duration_box, stats_row)
 
     # Initial sync in case ui_defaults not provided or partial
