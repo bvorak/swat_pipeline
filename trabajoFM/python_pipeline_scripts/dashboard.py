@@ -4248,6 +4248,67 @@ def _build_dashboard_stats_export_payload(
     }
 
 
+def _infer_headless_measured_selection_defaults(
+    *,
+    variable: str,
+    measured_var_map: Optional[Dict[str, object]],
+    measured_df: Optional[pd.DataFrame],
+    measured_name_col: str,
+    measured_station_col: str,
+) -> Dict[str, Dict[str, Any]]:
+    defaults: Dict[str, Dict[str, Any]] = {
+        str(cat): {"enabled": False, "chemical": None, "stations": []}
+        for cat in (1, 2, 3)
+    }
+    if not isinstance(measured_df, pd.DataFrame) or measured_df.empty:
+        return defaults
+    if measured_name_col not in measured_df.columns or measured_station_col not in measured_df.columns:
+        return defaults
+
+    syn_var = "KJELDAHL_OUTkg"
+    meas_map_local = dict(measured_var_map or {})
+    if variable == syn_var and variable not in meas_map_local:
+        meas_map_local[variable] = {
+            1: ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
+            2: ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
+        }
+
+    norm_map = _normalize_meas_map_for_var(meas_map_local, variable)
+    chem_to_stations: Dict[str, List[str]] = {}
+    try:
+        for chem_name, group in measured_df.groupby(measured_name_col, dropna=True):
+            stations = (
+                group[measured_station_col]
+                .dropna()
+                .astype(str)
+                .drop_duplicates()
+                .tolist()
+            )
+            chem_to_stations[str(chem_name)] = sorted(stations)
+    except Exception:
+        chem_to_stations = {}
+
+    for cat in (1, 2, 3):
+        allowed = norm_map.get(cat, [])
+        options = _measured_options_for_category(measured_df, measured_name_col, allowed)
+        if not options:
+            continue
+        chemical = options[0]
+        stations = list(chem_to_stations.get(str(chemical), []))
+        if not stations:
+            continue
+        if ((cat == 1) or (variable == syn_var and cat in (1, 2))) and ("30304" in stations):
+            selected_stations = ["30304"]
+        else:
+            selected_stations = stations
+        defaults[str(cat)] = {
+            "enabled": bool(cat == 1),
+            "chemical": chemical,
+            "stations": selected_stations,
+        }
+    return defaults
+
+
 def _normalize_headless_dashboard_config(
     dashboard_config: Optional[Dict[str, Any]],
     *,
@@ -4256,6 +4317,10 @@ def _normalize_headless_dashboard_config(
     how_map_defaults: Optional[Dict[str, str]],
     water_flow_df: Optional[pd.DataFrame],
     measured_present: bool,
+    measured_var_map: Optional[Dict[str, object]],
+    measured_df: Optional[pd.DataFrame],
+    measured_name_col: str,
+    measured_station_col: str,
     extra_dfs: Optional[Dict[str, pd.DataFrame]],
     reach_override: Optional[int],
 ) -> Dict[str, Any]:
@@ -4289,6 +4354,17 @@ def _normalize_headless_dashboard_config(
 
     default_reach = 13 if 13 in reach_choices else (reach_choices[0] if reach_choices else None)
     default_var = str(raw.get("variable") or (variables[0] if variables else ""))
+    should_infer_measured_selection = measured_present and ("measured_selection" not in raw) and ("cats" not in raw)
+    inferred_measured_selection = (
+        _infer_headless_measured_selection_defaults(
+            variable=default_var,
+            measured_var_map=measured_var_map,
+            measured_df=measured_df,
+            measured_name_col=measured_name_col,
+            measured_station_col=measured_station_col,
+        )
+        if should_infer_measured_selection else {}
+    )
     flow_source_default = "swat_avg" if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty else "external"
     event_source_default = "external" if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty else "swat_avg"
     extra_defaults = {str(name): True for name in (extra_dfs or {}).keys()}
@@ -4323,7 +4399,7 @@ def _normalize_headless_dashboard_config(
         "end": raw.get("end"),
         "season_months": raw.get("season_months"),
         "view_window": raw.get("view_window") or {"x0": None, "x1": None},
-        "measured_selection": raw.get("measured_selection") or {},
+        "measured_selection": raw.get("measured_selection") or inferred_measured_selection,
         "extra_overlays": raw.get("extra_overlays") or extra_defaults,
         "autoscale_y_live": bool(raw.get("autoscale_y_live", True)),
         "range_slider": bool(raw.get("range_slider", True)),
@@ -4427,6 +4503,10 @@ def export_dashboard_stats_from_config(
         how_map_defaults=how_map_defaults,
         water_flow_df=water_flow_df,
         measured_present=measured_present,
+        measured_var_map=measured_var_map,
+        measured_df=measured_df,
+        measured_name_col=measured_name_col,
+        measured_station_col=measured_station_col,
         extra_dfs=extra_dfs,
         reach_override=dashboard_config.get("reach") if isinstance(dashboard_config, dict) and "reach" in dashboard_config else None,
     )
@@ -5106,6 +5186,238 @@ def export_dashboard_stats_from_config(
     )
     file_path = export_stats_to_json(payload, stats_export_dir)
     return payload, file_path
+
+
+def batch_export_dashboard_stats(
+    run_numbers: List[int],
+    variables: List[str],
+    *,
+    dashboard_config: Dict[str, Any],
+    measured_df: Optional[pd.DataFrame] = None,
+    measured_var_map: Optional[Dict[str, object]] = None,
+    water_flow_df: Optional[pd.DataFrame] = None,
+    sim_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    extra_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    stats_export_dir: Optional[Union[str, Path]] = None,
+    how_map_defaults: Optional[Dict[str, str]] = None,
+    reach_col: str = "RCH",
+    date_col: str = "date",
+    flow_col: str = "FLOW_OUTcms",
+    measured_date_col: str = "F_MUESTREO",
+    measured_station_col: str = "est_estaci",
+    measured_name_col: str = "NOMBRE",
+    measured_value_col: Optional[str] = None,
+    measured_kg_col_name: str = "kg_per_day",
+    water_flow_date_col: str = "date",
+    water_flow_value_col: Optional[str] = None,
+    include_variables_in_folder_name: bool = False,
+    debug: bool = False,
+) -> Dict[int, Dict[str, Tuple[Dict[str, Any], str]]]:
+    """
+    Batch export dashboard stats for multiple runs.
+    
+    Loads simulation data for specified runs, exports stats for each run-variable combination to a
+    dedicated subfolder, and returns a mapping of run_number → variable →
+    (payload, exported_file_path).
+    
+    Parameters
+    ----------
+    run_numbers : List[int]
+        List of run numbers to export (e.g., [184, 185, 186])
+    variables : List[str]
+        List of SWAT output variables to export. For each run, one stats JSON is created for each
+        variable in this list, while all other dashboard config values remain unchanged.
+    dashboard_config : Dict[str, Any]
+        Dashboard configuration dict (reach, variable, frequency, etc.) applied to all runs
+    measured_df : Optional[pd.DataFrame]
+        Measured chemistry data (shared across all runs)
+    measured_var_map : Optional[Dict[str, object]]
+        Mapping of SWAT variables to measured chemistry options
+    water_flow_df : Optional[pd.DataFrame]
+        Water flow measurements (shared across all runs)
+    sim_dfs : Optional[Dict[str, pd.DataFrame]]
+        Pre-loaded simulation DataFrames {sim_name: df}. If None, you must call load_or_build_dfs_for_runs
+        and pass the result here. Otherwise raise error.
+    extra_dfs : Optional[Dict[str, pd.DataFrame]]
+        Extra overlay dataframes passed through to each per-run headless export.
+        The dict keys become the overlay_comparison entry names in the exported JSON.
+    stats_export_dir : Optional[Union[str, Path]]
+        Parent directory for the batch subfolder. Defaults to trabajoFM/config/outputs/dashboard_stats/
+    how_map_defaults : Optional[Dict[str, str]]
+        Aggregation method defaults for each variable
+    reach_col : str
+        Name of reach column in simulation DataFrames
+    date_col : str
+        Name of date column in simulation DataFrames
+    flow_col : str
+        Name of flow column in simulation DataFrames
+    measured_date_col : str
+        Name of date column in measured data
+    measured_station_col : str
+        Name of station column in measured data
+    measured_name_col : str
+        Name of chemistry name column in measured data
+    measured_value_col : Optional[str]
+        Explicit value column in measured data (auto-detected if None)
+    measured_kg_col_name : str
+        Name of kg/day column in measured data
+    water_flow_date_col : str
+        Name of date column in water flow data
+    water_flow_value_col : Optional[str]
+        Explicit value column in water flow data (auto-detected if None)
+    include_variables_in_folder_name : bool
+        If True, append a sanitized variable list to the batch folder name, for example:
+        runs_184_185__vars_kjeldahl_outkg_tot_nkg
+    debug : bool
+        Enable debug output
+    
+    Returns
+    -------
+    Dict[int, Dict[str, Tuple[Dict[str, Any], str]]]
+        Mapping of run_number → variable → (payload_dict, exported_json_path)
+    
+    Examples
+    --------
+    >>> from python_pipeline_scripts.dashboard import batch_export_dashboard_stats
+    >>> results = batch_export_dashboard_stats(
+    ...     [184, 185, 186],
+    ...     ["TOT_Nkg", "TOT_Pkg"],
+    ...     dashboard_config={"reach": 13, "variable": "TOT_Nkg", "frequency": "D", ...},
+    ...     measured_df=measured_df,
+    ...     water_flow_df=flow_df,
+    ...     sim_dfs=load_or_build_dfs_for_runs([184, 185, 186], force_rebuild=False),
+    ...     measured_var_map=swat_to_measured,
+    ... )
+    >>> # Results saved to: trabajoFM/config/outputs/dashboard_stats/runs_184_185_186/
+    >>> for run_id, per_var in results.items():
+    ...     for variable, (payload, path) in per_var.items():
+    ...         print(f"Run {run_id} / {variable}: {path}")
+    """
+    if not run_numbers:
+        raise ValueError("run_numbers must not be empty")
+    if not variables:
+        raise ValueError("variables must not be empty")
+    if sim_dfs is None or not sim_dfs:
+        raise ValueError("sim_dfs must be provided and non-empty. Call load_or_build_dfs_for_runs and pass the result.")
+    
+    run_numbers_list = list(run_numbers) if not isinstance(run_numbers, list) else run_numbers
+    run_numbers_list = sorted(set(int(r) for r in run_numbers_list))
+    variables_list = []
+    for variable_name in variables:
+        variable_text = str(variable_name).strip()
+        if variable_text and variable_text not in variables_list:
+            variables_list.append(variable_text)
+    if not variables_list:
+        raise ValueError("variables must contain at least one non-empty variable name")
+    
+    # Create batch subfolder name: runs_184_185_186
+    run_list_str = "_".join(str(r) for r in run_numbers_list)
+    if include_variables_in_folder_name:
+        def _sanitize_folder_token(value: str) -> str:
+            cleaned = re.sub(r"[^0-9A-Za-z]+", "_", value).strip("_").lower()
+            return cleaned or "var"
+
+        variable_list_str = "_".join(_sanitize_folder_token(value) for value in variables_list)
+        batch_folder_name = f"runs_{run_list_str}__vars_{variable_list_str}"
+    else:
+        batch_folder_name = f"runs_{run_list_str}"
+    
+    # Resolve parent stats directory
+    if stats_export_dir is None:
+        stats_export_dir = Path(__file__).resolve().parent.parent / "config" / "outputs" / "dashboard_stats"
+    else:
+        stats_export_dir = Path(stats_export_dir)
+    
+    # Create batch subfolder
+    batch_export_dir = stats_export_dir / batch_folder_name
+    batch_export_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _dbg(*args: Any) -> None:
+        if debug:
+            try:
+                print("[batch-export]", *args)
+            except Exception:
+                pass
+    
+    _dbg(f"Batch export initialized: {batch_folder_name}")
+    _dbg(f"Parent dir: {stats_export_dir}")
+    _dbg(f"Runs: {run_numbers_list}")
+    _dbg(f"Variables: {variables_list}")
+    _dbg(f"Loaded sim_dfs keys: {list(sim_dfs.keys())[:5]}... ({len(sim_dfs)} total)")
+    
+    results: Dict[int, Dict[str, Tuple[Dict[str, Any], str]]] = {}
+    errors: Dict[Tuple[int, str], str] = {}
+    
+    for run_id in run_numbers_list:
+        try:
+            # Filter sim_dfs to only include sims from this run
+            # Keys are like: "rch_run000184_real000396_1"
+            run_pattern = f"run{run_id:06d}"  # e.g., "run000184"
+            filtered_sims = {
+                k: v for k, v in sim_dfs.items()
+                if run_pattern in str(k).lower()
+            }
+            
+            if not filtered_sims:
+                msg = f"No simulations found for run {run_id} (pattern: {run_pattern})"
+                _dbg(f"WARNING: {msg}")
+                for variable in variables_list:
+                    errors[(run_id, variable)] = msg
+                continue
+            
+            _dbg(f"Run {run_id}: Found {len(filtered_sims)} simulations")
+            results.setdefault(run_id, {})
+            for variable in variables_list:
+                try:
+                    dashboard_config_for_variable = dict(dashboard_config)
+                    dashboard_config_for_variable["variable"] = variable
+                    payload, export_path = export_dashboard_stats_from_config(
+                        sim_dfs=filtered_sims,
+                        variables=variables_list,
+                        dashboard_config=dashboard_config_for_variable,
+                        extra_dfs=extra_dfs,
+                        measured_df=measured_df,
+                        measured_var_map=measured_var_map,
+                        water_flow_df=water_flow_df,
+                        stats_export_dir=str(batch_export_dir),
+                        reach_col=reach_col,
+                        date_col=date_col,
+                        flow_col=flow_col,
+                        measured_date_col=measured_date_col,
+                        measured_station_col=measured_station_col,
+                        measured_name_col=measured_name_col,
+                        measured_value_col=measured_value_col,
+                        measured_kg_col_name=measured_kg_col_name,
+                        water_flow_date_col=water_flow_date_col,
+                        water_flow_value_col=water_flow_value_col,
+                        how_map_defaults=how_map_defaults,
+                        debug=debug,
+                    )
+                    results[run_id][variable] = (payload, export_path)
+                    _dbg(f"Run {run_id} / {variable}: Exported to {Path(export_path).name}")
+                except Exception as exc:
+                    msg = f"Export failed for run {run_id}, variable {variable}: {exc}"
+                    _dbg(f"ERROR: {msg}")
+                    errors[(run_id, variable)] = msg
+            
+        except Exception as exc:
+            msg = f"Run setup failed for run {run_id}: {exc}"
+            _dbg(f"ERROR: {msg}")
+            for variable in variables_list:
+                errors[(run_id, variable)] = msg
+    
+    # Summary
+    successful = sum(len(per_var) for per_var in results.values())
+    total = len(run_numbers_list) * len(variables_list)
+    _dbg(f"\nBatch export complete: {successful}/{total} run-variable exports succeeded")
+    if errors:
+        _dbg(f"Failed run-variable exports: {list(errors.keys())}")
+        for (run_id, variable), err in errors.items():
+            _dbg(f"  - Run {run_id} / {variable}: {err}")
+    
+    _dbg(f"Exports saved to: {batch_export_dir}/")
+    
+    return results
 
 
 
