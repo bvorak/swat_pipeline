@@ -4096,5 +4096,1017 @@ def fan_compare_simulations_dashboard(
     _compute_and_plot()
 
 
+def _dashboard_sanitize_filename_part(value: object, *, max_len: int = 32) -> str:
+    text = "unknown" if value is None else str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    if not text:
+        text = "unknown"
+    return text[:max_len]
+
+
+def _dashboard_extract_run_label(sim_dfs: Dict[str, pd.DataFrame]) -> Optional[str]:
+    first_key = next(iter(sim_dfs.keys()), None)
+    if first_key is None:
+        return None
+    try:
+        match = re.search(r"run(\d+)", str(first_key), flags=re.IGNORECASE)
+        if match:
+            return f"run {int(match.group(1))}"
+    except Exception:
+        return None
+    return None
+
+
+def _dashboard_default_method_for_var(variable: str, how_map_defaults: Optional[Dict[str, str]] = None) -> str:
+    if isinstance(how_map_defaults, dict) and variable in how_map_defaults:
+        return str(how_map_defaults[variable])
+    if "Conc" in variable or "mg/L" in variable:
+        return "mean"
+    if any(unit in str(variable).lower() for unit in ["kg", "tons", "mg"]):
+        return "sum"
+    return "mean"
+
+
+def _dashboard_pick_best_flow_col(df: pd.DataFrame, explicit: Optional[str] = None) -> Optional[str]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    if explicit and explicit in df.columns:
+        return explicit
+    patterns = [
+        "water_flow_m3_d", "flow_m3_d", "flow", "caudal", "q_m3", "q", "m3_d", "m3/day", "cms", "m3s",
+    ]
+    cols = list(df.columns)
+    num_cols = [col for col in cols if pd.api.types.is_numeric_dtype(df[col]) and df[col].dtype != bool]
+    candidates = num_cols + [col for col in cols if col not in num_cols and col != "outliers"]
+    if not candidates:
+        return None
+
+    def _score(col: str) -> tuple[int, int]:
+        name = str(col).lower()
+        name_score = 0
+        for idx, pattern in enumerate(patterns[::-1]):
+            if pattern in name:
+                name_score = idx + 1
+                break
+        nonnull = int(df[col].notna().sum())
+        return (name_score, nonnull)
+
+    return max(candidates, key=_score)
+
+
+def _dashboard_pick_best_swat_flow_col(df: pd.DataFrame) -> Optional[str]:
+    try:
+        cols = list(map(str, getattr(df, "columns", [])))
+    except Exception:
+        return None
+    if not cols:
+        return None
+    preferred = ["FLOW_OUTcms", "FLOW_OUTcmscms", "FLOW_OUT"]
+    for name in preferred:
+        if name in cols:
+            return name
+    low = {col.lower(): col for col in cols}
+    for key, original in low.items():
+        if key.startswith("flow_out"):
+            return original
+    return None
+
+
+def _dashboard_build_stats_filename_stem(
+    *,
+    run_label: Optional[str],
+    variable: str,
+    reach: object,
+    frequency: str,
+    bin_size: int,
+    method: str,
+    compare_mode: str,
+    event_view: str,
+    view_window: Tuple[pd.Timestamp, pd.Timestamp],
+) -> str:
+    x0, x1 = view_window
+    window_token = "all"
+    if x0 is not None and x1 is not None:
+        window_token = f"{pd.Timestamp(x0).strftime('%Y%m%d')}-{pd.Timestamp(x1).strftime('%Y%m%d')}"
+    parts = [
+        _dashboard_sanitize_filename_part(run_label or "run-unknown", max_len=24),
+        f"var-{_dashboard_sanitize_filename_part(variable, max_len=20)}",
+        f"reach-{_dashboard_sanitize_filename_part(reach, max_len=8)}",
+        f"freq-{_dashboard_sanitize_filename_part(_make_freq_string(frequency, bin_size), max_len=12)}",
+        f"method-{_dashboard_sanitize_filename_part(method, max_len=16)}",
+        f"mode-{_dashboard_sanitize_filename_part(compare_mode, max_len=8)}",
+        f"view-{_dashboard_sanitize_filename_part(event_view, max_len=12)}",
+        window_token,
+    ]
+    return "_".join(parts)
+
+
+def _build_dashboard_stats_export_payload(
+    *,
+    stats: Dict[str, Any],
+    view_window: Tuple[pd.Timestamp, pd.Timestamp],
+    dashboard_state: Dict[str, Any],
+    run_label: Optional[str],
+    filename_stem: str,
+    source_function: str,
+    compute_log: bool,
+    max_global_lag: int,
+    local_window_ks: Sequence[int],
+    choose_best_lag_by: str,
+    has_band_data: bool,
+    has_event_context: bool,
+) -> Dict[str, Any]:
+    return {
+        "metadata": {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "dashboard_version": DASHBOARD_VERSION,
+            "export_version": "stats-export-v1",
+            "run_label": run_label or "run-unknown",
+            "source_function": source_function,
+            "filename_stem": filename_stem,
+            "view_window": {"x0": view_window[0], "x1": view_window[1]},
+            "dashboard_state": dashboard_state,
+            "stats_function": {
+                "name": "compute_stats_for_view",
+                "arguments": {
+                    "window": view_window,
+                    "compute_log": bool(compute_log),
+                    "max_global_lag": int(max_global_lag),
+                    "local_window_ks": tuple(sorted(int(value) for value in local_window_ks)) if local_window_ks else (),
+                    "local_strategy": "nearest",
+                    "choose_best_lag_by": str(choose_best_lag_by),
+                    "has_band_data": bool(has_band_data),
+                    "has_event_context": bool(has_event_context),
+                },
+                "internal_functions_used": [
+                    "compute_stats_for_view",
+                    "format_stats_text",
+                ],
+            },
+        },
+        "stats": stats,
+    }
+
+
+def _normalize_headless_dashboard_config(
+    dashboard_config: Optional[Dict[str, Any]],
+    *,
+    variables: List[str],
+    reach_choices: List[int],
+    how_map_defaults: Optional[Dict[str, str]],
+    water_flow_df: Optional[pd.DataFrame],
+    measured_present: bool,
+    extra_dfs: Optional[Dict[str, pd.DataFrame]],
+    reach_override: Optional[int],
+) -> Dict[str, Any]:
+    raw = dict(dashboard_config or {})
+    aliases = {
+        "freq": "frequency",
+        "measured_on": "show_measured",
+        "flow_on": "show_water_flow",
+        "swat_flow_on": "show_swat_flow",
+        "erosion_on": "show_erosion",
+        "show_diags": "show_diagnostics",
+        "local_Ks": "local_window_ks",
+        "meas_negative_policy": "measured_negative_policy",
+        "meas_nonnum_policy": "measured_nonnum_policy",
+        "extra_visible": "extra_overlays",
+    }
+    for old_key, new_key in aliases.items():
+        if old_key in raw and new_key not in raw:
+            raw[new_key] = raw[old_key]
+
+    if "cats" in raw and "measured_selection" not in raw and isinstance(raw["cats"], dict):
+        measured_selection: Dict[str, Dict[str, Any]] = {}
+        for cat in (1, 2, 3):
+            cat_raw = raw["cats"].get(cat) or raw["cats"].get(str(cat)) or {}
+            measured_selection[str(cat)] = {
+                "enabled": bool(cat_raw.get("enabled", cat == 1)),
+                "chemical": cat_raw.get("chem"),
+                "stations": list(cat_raw.get("stations") or []),
+            }
+        raw["measured_selection"] = measured_selection
+
+    default_reach = 13 if 13 in reach_choices else (reach_choices[0] if reach_choices else None)
+    default_var = str(raw.get("variable") or (variables[0] if variables else ""))
+    flow_source_default = "swat_avg" if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty else "external"
+    event_source_default = "external" if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty else "swat_avg"
+    extra_defaults = {str(name): True for name in (extra_dfs or {}).keys()}
+    normalized: Dict[str, Any] = {
+        "variable": default_var,
+        "reach": reach_override if reach_override is not None else raw.get("reach", default_reach),
+        "frequency": raw.get("frequency", "D"),
+        "bin": int(raw.get("bin", 1)),
+        "method": raw.get("method") or _dashboard_default_method_for_var(default_var, how_map_defaults),
+        "compare_mode": raw.get("compare_mode", "load"),
+        "flow_source": raw.get("flow_source", flow_source_default),
+        "event_source": raw.get("event_source", event_source_default),
+        "event_threshold": raw.get("event_threshold", "p95"),
+        "event_abs_value": raw.get("event_abs_value", np.nan),
+        "event_min_days": float(raw.get("event_min_days", 1.0)),
+        "event_buffer_days": int(raw.get("event_buffer_days", 1)),
+        "event_view": raw.get("event_view", "all"),
+        "show_measured": bool(raw.get("show_measured", measured_present)),
+        "show_water_flow": bool(raw.get("show_water_flow", isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty)),
+        "show_swat_flow": bool(raw.get("show_swat_flow", False)),
+        "show_erosion": bool(raw.get("show_erosion", False)),
+        "show_diagnostics": bool(raw.get("show_diagnostics", True)),
+        "lag_metric": raw.get("lag_metric", "r"),
+        "max_lag": int(raw.get("max_lag", 2)),
+        "local_window_ks": list(raw.get("local_window_ks", [1, 2])),
+        "log_metrics": bool(raw.get("log_metrics", True)),
+        "measured_nonnum_policy": raw.get("measured_nonnum_policy", "as_na"),
+        "measured_negative_policy": raw.get("measured_negative_policy", "zero"),
+        "flag_deviations": bool(raw.get("flag_deviations", True)),
+        "deviation_factor": float(raw.get("deviation_factor", 10.0)),
+        "start": raw.get("start"),
+        "end": raw.get("end"),
+        "season_months": raw.get("season_months"),
+        "view_window": raw.get("view_window") or {"x0": None, "x1": None},
+        "measured_selection": raw.get("measured_selection") or {},
+        "extra_overlays": raw.get("extra_overlays") or extra_defaults,
+        "autoscale_y_live": bool(raw.get("autoscale_y_live", True)),
+        "range_slider": bool(raw.get("range_slider", True)),
+        "show_names_in_tooltip": bool(raw.get("show_names_in_tooltip", False)),
+        "flow_regimes": list(raw.get("flow_regimes", ["event", "non-event"])),
+        "flow_total_band": bool(raw.get("flow_total_band", False)),
+        "flow_total_only": bool(raw.get("flow_total_only", False)),
+        "flow_overlay": bool(raw.get("flow_overlay", True)),
+        "flow_total_mode": raw.get("flow_total_mode", "median"),
+    }
+
+    try:
+        normalized["reach"] = int(normalized["reach"]) if normalized["reach"] is not None else default_reach
+    except Exception:
+        normalized["reach"] = default_reach
+    if normalized["reach"] not in reach_choices:
+        normalized["reach"] = default_reach
+
+    normalized["frequency"] = str(normalized["frequency"] or "D").upper()
+    if normalized["frequency"] not in {"D", "W", "M", "A"}:
+        normalized["frequency"] = "D"
+    normalized["compare_mode"] = "conc" if str(normalized["compare_mode"]).lower() == "conc" else "load"
+    method = str(normalized["method"] or "mean")
+    if normalized["compare_mode"] == "conc":
+        if method not in {"flow_weighted_mean", "mean"}:
+            method = "mean"
+    elif method not in {"sum", "mean", "flow_weighted_mean"}:
+        method = _dashboard_default_method_for_var(normalized["variable"], how_map_defaults)
+    normalized["method"] = method
+    normalized["event_view"] = str(normalized["event_view"] or "all")
+    if normalized["event_view"] == "non_events":
+        normalized["event_view"] = "non_events"
+    elif normalized["event_view"] not in {"all", "events"}:
+        normalized["event_view"] = "all"
+    normalized["event_source"] = str(normalized["event_source"] or event_source_default)
+    if normalized["event_source"] not in {"external", "swat_avg"}:
+        normalized["event_source"] = event_source_default
+    normalized["flow_source"] = str(normalized["flow_source"] or flow_source_default)
+    measured_selection = normalized.get("measured_selection") or {}
+    normalized_selection: Dict[str, Dict[str, Any]] = {}
+    for cat in (1, 2, 3):
+        meta = measured_selection.get(str(cat)) or measured_selection.get(cat) or {}
+        normalized_selection[str(cat)] = {
+            "enabled": bool(meta.get("enabled", False)),
+            "chemical": meta.get("chemical"),
+            "stations": list(meta.get("stations") or []),
+        }
+    normalized["measured_selection"] = normalized_selection
+    extra_map = dict(extra_defaults)
+    extra_map.update({str(name): bool(value) for name, value in (normalized.get("extra_overlays") or {}).items()})
+    normalized["extra_overlays"] = extra_map
+    if normalized.get("season_months") is not None:
+        try:
+            normalized["season_months"] = [int(value) for value in normalized["season_months"]]
+        except Exception:
+            normalized["season_months"] = None
+    return normalized
+
+
+def export_dashboard_stats_from_config(
+    sim_dfs: Dict[str, pd.DataFrame],
+    variables: List[str],
+    *,
+    dashboard_config: Dict[str, Any],
+    extra_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    measured_df: Optional[pd.DataFrame] = None,
+    measured_var_map: Optional[Dict[str, object]] = None,
+    water_flow_df: Optional[pd.DataFrame] = None,
+    stats_export_dir: Optional[Union[str, Path]] = None,
+    reach_col: str = "RCH",
+    date_col: str = "date",
+    flow_col: str = "FLOW_OUTcms",
+    measured_date_col: str = "F_MUESTREO",
+    measured_station_col: str = "est_estaci",
+    measured_name_col: str = "NOMBRE",
+    measured_value_col: Optional[str] = None,
+    measured_kg_col_name: str = "kg_per_day",
+    water_flow_date_col: str = "date",
+    water_flow_value_col: Optional[str] = None,
+    how_map_defaults: Optional[Dict[str, str]] = None,
+    debug: bool = False,
+) -> Tuple[Dict[str, Any], str]:
+    if not sim_dfs:
+        raise ValueError("sim_dfs must not be empty")
+    if not variables:
+        raise ValueError("variables must not be empty")
+
+    measured_present = measured_df is not None and isinstance(measured_df, pd.DataFrame) and not measured_df.empty
+    all_reaches = set()
+    for df in sim_dfs.values():
+        if isinstance(df, pd.DataFrame) and reach_col in df.columns:
+            all_reaches.update(df[reach_col].dropna().unique().tolist())
+    reach_choices = sorted(int(value) for value in all_reaches if pd.notna(value))
+    if not reach_choices:
+        raise ValueError("No reaches found in sim_dfs")
+
+    cfg = _normalize_headless_dashboard_config(
+        dashboard_config,
+        variables=variables,
+        reach_choices=reach_choices,
+        how_map_defaults=how_map_defaults,
+        water_flow_df=water_flow_df,
+        measured_present=measured_present,
+        extra_dfs=extra_dfs,
+        reach_override=dashboard_config.get("reach") if isinstance(dashboard_config, dict) and "reach" in dashboard_config else None,
+    )
+    reach = int(cfg["reach"])
+    variable = str(cfg["variable"])
+    freq_str = _make_freq_string(cfg["frequency"], int(cfg["bin"]))
+    method = str(cfg["method"])
+    is_conc_mode = str(cfg["compare_mode"]) == "conc"
+    season_months = cfg.get("season_months")
+    run_label = _dashboard_extract_run_label(sim_dfs)
+
+    def _dbg(*args: Any) -> None:
+        if debug:
+            try:
+                print("[dash-headless]", *args)
+            except Exception:
+                pass
+
+    if stats_export_dir is None:
+        stats_export_dir = Path(__file__).resolve().parent.parent / "config" / "outputs" / "dashboard_stats"
+    else:
+        stats_export_dir = Path(stats_export_dir)
+
+    measured_load_col: Optional[str] = None
+    measured_conc_col: Optional[str] = None
+    if measured_present:
+        if measured_value_col and measured_value_col in measured_df.columns:
+            if str(measured_value_col).strip().lower() in {"resultado", "result", "concentracion", "concentración", "concentration", "mg/l", "mg_l"}:
+                measured_conc_col = measured_value_col
+            else:
+                measured_load_col = measured_value_col
+        if measured_load_col is None and "kg_per_day" in measured_df.columns:
+            measured_load_col = "kg_per_day"
+        for candidate in ["RESULTADO", "Resultado", "CONCENTRACION", "concentracion", "CONCENTRACIÓN", "concentración"]:
+            if measured_conc_col is None and candidate in measured_df.columns:
+                measured_conc_col = candidate
+                break
+        if measured_load_col is None and measured_conc_col is None:
+            detected = _detect_value_col(measured_df)
+            measured_load_col = detected
+        if measured_load_col is None and measured_conc_col is None:
+            raise ValueError("Unable to detect measured value column. Please pass measured_value_col.")
+
+    flow_meas_col: Optional[str] = None
+    if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty:
+        if water_flow_value_col and water_flow_value_col in water_flow_df.columns:
+            flow_meas_col = water_flow_value_col
+        else:
+            for candidate in water_flow_df.columns:
+                if "water_flow_m3_d" in str(candidate).lower():
+                    flow_meas_col = str(candidate)
+                    break
+            if flow_meas_col is None:
+                for candidate in water_flow_df.columns:
+                    if pd.api.types.is_numeric_dtype(water_flow_df[candidate]):
+                        flow_meas_col = str(candidate)
+                        break
+
+    s_external_flow_daily: Optional[pd.Series] = None
+    if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty:
+        try:
+            use_flow_col = None
+            if water_flow_value_col and water_flow_value_col in water_flow_df.columns:
+                use_flow_col = water_flow_value_col
+            elif flow_meas_col and flow_meas_col in water_flow_df.columns:
+                use_flow_col = flow_meas_col
+            else:
+                use_flow_col = _dashboard_pick_best_flow_col(water_flow_df, explicit=None)
+            if use_flow_col:
+                fdf = water_flow_df[[water_flow_date_col, use_flow_col]].copy()
+                fdf[water_flow_date_col] = pd.to_datetime(fdf[water_flow_date_col], errors="coerce").dt.floor("D")
+                fdf[use_flow_col] = pd.to_numeric(fdf[use_flow_col], errors="coerce").astype(float)
+                fdf = fdf.dropna(subset=[water_flow_date_col, use_flow_col])
+                s_external_flow_daily = fdf.groupby(water_flow_date_col)[use_flow_col].sum(min_count=1)
+                if cfg.get("start") is not None:
+                    s_external_flow_daily = s_external_flow_daily.loc[s_external_flow_daily.index >= pd.to_datetime(cfg["start"]).floor("D")]
+                if cfg.get("end") is not None:
+                    s_external_flow_daily = s_external_flow_daily.loc[s_external_flow_daily.index <= pd.to_datetime(cfg["end"]).floor("D")]
+                if season_months:
+                    months = set(int(month) for month in season_months)
+                    s_external_flow_daily = s_external_flow_daily.loc[s_external_flow_daily.index.month.isin(months)]
+                s_external_flow_daily.index.name = None
+        except Exception as exc:
+            _dbg("external flow prep failed", exc)
+            s_external_flow_daily = None
+
+    s_swat_avg_daily: Optional[pd.Series] = None
+    try:
+        per_sim_daily: Dict[str, pd.Series] = {}
+        for sim_name, df in sim_dfs.items():
+            fcol = _dashboard_pick_best_swat_flow_col(df)
+            if not fcol or reach_col not in df.columns or date_col not in df.columns or fcol not in df.columns:
+                continue
+            subf = df[df[reach_col] == reach][[date_col, fcol]].copy()
+            if subf.empty:
+                continue
+            subf = _ensure_dt_index(subf, date_col)
+            if cfg.get("start") or cfg.get("end"):
+                subf = _slice_time(subf, cfg.get("start"), cfg.get("end"))
+            if season_months:
+                subf = _filter_season(subf, season_months)
+            if subf.empty:
+                continue
+            subf[fcol] = pd.to_numeric(subf[fcol], errors="coerce").astype(float)
+            with np.errstate(invalid="ignore"):
+                subf["__m3day__"] = subf[fcol].astype(float) * 86400.0
+            s_day = subf["__m3day__"].groupby(subf.index.floor("D")).sum(min_count=1).dropna()
+            if not s_day.empty:
+                per_sim_daily[str(sim_name)] = s_day
+        if per_sim_daily:
+            aligned = pd.concat(per_sim_daily.values(), axis=1).sort_index()
+            s_swat_avg_daily = aligned.mean(axis=1, skipna=True).dropna()
+            s_swat_avg_daily.index.name = None
+    except Exception as exc:
+        _dbg("swat flow prep failed", exc)
+        s_swat_avg_daily = None
+
+    event_mode = str(cfg.get("event_view") or "all")
+    selected_days_set = None
+    event_day_set = None
+    buffered_event_days = None
+    full_days_set = None
+    try:
+        if event_mode in {"events", "non_events", "all"}:
+            ev_source = str(cfg.get("event_source"))
+            if ev_source == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
+                s_events_flow = s_external_flow_daily.copy()
+            elif ev_source == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
+                s_events_flow = s_swat_avg_daily.copy()
+            else:
+                s_events_flow = None
+            if s_events_flow is not None and not s_events_flow.empty:
+                df_ev = pd.DataFrame({"date": pd.to_datetime(s_events_flow.index).floor("D"), "Q": s_events_flow.values})
+                token = str(cfg.get("event_threshold") or "p95")
+                if token == "abs":
+                    abs_value = cfg.get("event_abs_value")
+                    thr_def = float(abs_value) if isinstance(abs_value, (int, float)) and not np.isnan(abs_value) else None
+                else:
+                    thr_def = token
+                if thr_def is not None:
+                    from .dashboard_helper import add_event_flags
+
+                    df_flags = add_event_flags(
+                        df_ev,
+                        thresholds={"main": thr_def},
+                        intervals={"main": float(cfg.get("event_min_days", 1.0))},
+                        time_col="date",
+                        flow_col="Q",
+                    )
+                    if "main_event" in df_flags.columns:
+                        event_days = pd.to_datetime(df_flags.loc[df_flags["main_event"], :].index).floor("D").unique()
+                        event_day_set = set(pd.to_datetime(event_days).tolist())
+                        full_days_set = set(pd.to_datetime(df_ev["date"]).unique().tolist())
+                        buf = int(cfg.get("event_buffer_days", 1))
+                        buffered_event_days = set()
+                        for day in event_day_set:
+                            d0 = pd.Timestamp(day).normalize()
+                            for offset in range(-buf, buf + 1):
+                                buffered_event_days.add(d0 + pd.Timedelta(days=int(offset)))
+                        if event_mode == "events":
+                            selected_days_set = set(buffered_event_days)
+                        elif event_mode == "non_events" and full_days_set is not None:
+                            selected_days_set = set(full_days_set) - set(buffered_event_days)
+                        elif event_mode == "all":
+                            selected_days_set = set(full_days_set)
+    except Exception as exc:
+        _dbg("event detection failed", exc)
+        selected_days_set = None
+
+    def _event_index(values: Optional[Sequence[pd.Timestamp]]) -> Optional[pd.DatetimeIndex]:
+        if values is None:
+            return None
+        try:
+            idx = pd.DatetimeIndex(pd.to_datetime(list(values))).floor("D").unique().sort_values()
+            return idx
+        except Exception:
+            return None
+
+    idx_events = _event_index(event_day_set)
+    idx_buffered = _event_index(buffered_event_days)
+    if idx_buffered is None:
+        idx_buffered = idx_events
+    idx_all_days = _event_index(full_days_set)
+    idx_selected = _event_index(selected_days_set)
+    if idx_all_days is not None and idx_buffered is not None:
+        idx_non_events = idx_all_days.difference(idx_buffered)
+        if idx_non_events.empty:
+            idx_non_events = None
+    else:
+        idx_non_events = None
+    event_context = {
+        "mode": event_mode,
+        "events": idx_events,
+        "buffered_events": idx_buffered,
+        "non_events": idx_non_events,
+        "selected": idx_selected,
+        "all_days": idx_all_days,
+    }
+
+    syn_var = "KJELDAHL_OUTkg"
+    derived_components = ("ORGN_OUTkg", "NH4_OUTkg")
+    per_sim: Dict[str, pd.Series] = {}
+    for sim_name, df in sim_dfs.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        if variable == syn_var:
+            if not all(component in df.columns for component in derived_components):
+                continue
+            sub_cols = [date_col] + list(derived_components)
+        else:
+            if variable not in df.columns:
+                continue
+            sub_cols = [date_col, variable]
+        per_run_flow_col = _dashboard_pick_best_swat_flow_col(df)
+        if (is_conc_mode or method == "flow_weighted_mean") and per_run_flow_col in df.columns:
+            sub_cols.append(per_run_flow_col)
+        sub = df[df[reach_col] == reach][sub_cols].copy()
+        if sub.empty:
+            continue
+        if variable == syn_var:
+            with np.errstate(invalid="ignore"):
+                sub[syn_var] = sub[derived_components[0]].astype(float) + sub[derived_components[1]].astype(float)
+        sub = _ensure_dt_index(sub, date_col)
+        if cfg.get("start") or cfg.get("end"):
+            sub = _slice_time(sub, cfg.get("start"), cfg.get("end"))
+        if season_months:
+            sub = _filter_season(sub, season_months)
+        if selected_days_set is not None:
+            mask = sub.index.floor("D").isin(list(selected_days_set))
+            sub = sub.loc[mask]
+        if sub.empty:
+            continue
+        if is_conc_mode:
+            base_col = syn_var if variable == syn_var else variable
+            flow_source = str(cfg.get("flow_source") or "external")
+            if flow_source == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
+                days = sub.index.floor("D")
+                f_series = s_external_flow_daily.reindex(days)
+                fvals = f_series.to_numpy(dtype=float)
+                kgd = sub[base_col].to_numpy(dtype=float)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sub["__conc_mgL__"] = (kgd / fvals) * 1000.0
+                sub["__flow_m3d__"] = fvals
+            elif flow_source == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
+                days = sub.index.floor("D")
+                f_series = s_swat_avg_daily.reindex(days)
+                fvals = f_series.to_numpy(dtype=float)
+                kgd = sub[base_col].to_numpy(dtype=float)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sub["__conc_mgL__"] = (kgd / fvals) * 1000.0
+                sub["__flow_m3d__"] = fvals
+            else:
+                if per_run_flow_col not in sub.columns:
+                    continue
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sub["__conc_mgL__"] = (sub[base_col] / (sub[per_run_flow_col] * 86400.0)) * 1000.0
+                    sub["__flow_m3d__"] = sub[per_run_flow_col].astype(float) * 86400.0
+            how_here = method if method in {"flow_weighted_mean", "mean"} else "mean"
+            s = _resample_series(sub, "__conc_mgL__", freq=freq_str, how=how_here, flow_col="__flow_m3d__")
+        else:
+            base_col = syn_var if variable == syn_var else variable
+            s = _resample_series(sub, base_col, freq=freq_str, how=method, flow_col=per_run_flow_col if per_run_flow_col in sub.columns else None)
+        if s.empty:
+            continue
+        s.name = str(sim_name)
+        per_sim[str(sim_name)] = s
+
+    if not per_sim:
+        raise ValueError(f"No data for reach {reach} and variable '{variable}'")
+
+    aligned_df = pd.concat(per_sim.values(), axis=1).sort_index()
+    aligned_df.index = pd.to_datetime(aligned_df.index, utc=False)
+    arr = aligned_df.to_numpy(dtype=float)
+    if arr.shape[1] == 0:
+        raise ValueError("No aligned data after resampling")
+    percs = [5, 10, 25, 50, 60, 75, 90, 95]
+    qs = np.nanpercentile(arr, percs, axis=1)
+    q = {pct: qs[idx, :] for idx, pct in enumerate(percs)}
+    q_df = pd.DataFrame(
+        {
+            "min": np.nanmin(arr, axis=1),
+            "p05": q[5],
+            "p10": q[10],
+            "p25": q[25],
+            "p50": q[50],
+            "p60": q[60],
+            "p75": q[75],
+            "p90": q[90],
+            "p95": q[95],
+            "max": np.nanmax(arr, axis=1),
+        },
+        index=aligned_df.index,
+    )
+
+    band_groups: Dict[str, Dict[str, pd.Series]] = {}
+    ensemble_band_raw: Dict[str, pd.Series] = {}
+    with np.errstate(invalid="ignore"):
+        ensemble_band_raw["min"] = pd.Series(np.nanmin(arr, axis=1), index=aligned_df.index, name="min")
+        ensemble_band_raw["max"] = pd.Series(np.nanmax(arr, axis=1), index=aligned_df.index, name="max")
+        ensemble_band_raw["mean"] = pd.Series(np.nanmean(arr, axis=1), index=aligned_df.index, name="mean")
+    for pct in (5, 10, 25, 50, 60, 75, 90, 95):
+        ensemble_band_raw[f"p{pct:02d}"] = pd.Series(q[pct], index=aligned_df.index, name=f"p{pct:02d}")
+    band_groups["ensemble_raw"] = ensemble_band_raw
+
+    n_runs_here = int(arr.shape[1])
+    min_runs_for_bands = 5
+    event_filter_active = selected_days_set is not None
+    min_data_threshold = 1 if event_filter_active else max(1, n_runs_here // 2)
+    data_count = np.sum(np.isfinite(arr), axis=1)
+    sufficient_data = data_count >= min_data_threshold
+    ensemble_band: Dict[str, pd.Series] = {}
+    valid_indices = aligned_df.index[sufficient_data]
+    if len(valid_indices) > 0:
+        with np.errstate(invalid="ignore"):
+            min_vals = np.nanmin(arr[sufficient_data, :], axis=1)
+            max_vals = np.nanmax(arr[sufficient_data, :], axis=1)
+            mean_vals = np.nanmean(arr[sufficient_data, :], axis=1)
+        ensemble_band["min"] = pd.Series(min_vals, index=valid_indices, name="min")
+        ensemble_band["max"] = pd.Series(max_vals, index=valid_indices, name="max")
+        ensemble_band["mean"] = pd.Series(mean_vals, index=valid_indices, name="mean")
+        for pct in (5, 25, 50, 75, 95):
+            ensemble_band[f"p{pct:02d}"] = pd.Series(q[pct][sufficient_data], index=valid_indices, name=f"p{pct:02d}")
+    if ensemble_band:
+        band_groups["ensemble"] = ensemble_band
+
+    def _sanitize_series_key(name: object) -> str:
+        txt = str(name) if name is not None else "series"
+        cleaned = re.sub(r"[^0-9A-Za-z]+", "_", txt).strip("_")
+        return cleaned.lower() or "series"
+
+    def _extend_relative_bands(target_groups: Dict[str, Dict[str, pd.Series]], new_series: Dict[str, pd.Series], *, prefix: str = "") -> None:
+        base = target_groups.get("ensemble")
+        if not isinstance(base, dict) or "mean" not in base:
+            return
+        base_mean = base.get("mean")
+        if not isinstance(base_mean, pd.Series) or base_mean.empty:
+            return
+        offsets: Dict[str, pd.Series] = {}
+        for key, series in base.items():
+            if key == "mean" or not isinstance(series, pd.Series):
+                continue
+            offsets[key] = series - base_mean.reindex(series.index)
+        for raw_name, center_series in new_series.items():
+            if not isinstance(center_series, pd.Series) or center_series.empty:
+                continue
+            safe_name = _sanitize_series_key(raw_name)
+            label = f"{prefix}_{safe_name}" if prefix else safe_name
+            if label == "ensemble":
+                label = f"{label}_series"
+            derived: Dict[str, pd.Series] = {"mean": center_series.copy()}
+            for key, offset in offsets.items():
+                derived[key] = (center_series + offset.reindex(center_series.index)).rename(key)
+            target_groups[label] = derived
+
+    extra_series: Dict[str, pd.Series] = {}
+    if isinstance(extra_dfs, dict) and extra_dfs:
+        for name, df_ex in extra_dfs.items():
+            try:
+                if not isinstance(df_ex, pd.DataFrame) or df_ex.empty:
+                    continue
+                if reach_col not in df_ex.columns or date_col not in df_ex.columns:
+                    continue
+                if not bool(cfg.get("extra_overlays", {}).get(str(name), True)):
+                    continue
+                if variable == syn_var:
+                    if not all(component in df_ex.columns for component in derived_components):
+                        continue
+                    cols = [date_col] + list(derived_components)
+                else:
+                    if variable not in df_ex.columns:
+                        continue
+                    cols = [date_col, variable]
+                if (is_conc_mode or method == "flow_weighted_mean") and flow_col in df_ex.columns:
+                    cols.append(flow_col)
+                sub = df_ex[df_ex[reach_col] == reach][cols].copy()
+                if sub.empty:
+                    continue
+                sub = _ensure_dt_index(sub, date_col)
+                if variable == syn_var:
+                    with np.errstate(invalid="ignore"):
+                        sub[syn_var] = sub[derived_components[0]].astype(float) + sub[derived_components[1]].astype(float)
+                if cfg.get("start") or cfg.get("end"):
+                    sub = _slice_time(sub, cfg.get("start"), cfg.get("end"))
+                if season_months:
+                    sub = _filter_season(sub, season_months)
+                if selected_days_set is not None:
+                    sub = sub.loc[sub.index.floor("D").isin(list(selected_days_set))]
+                if sub.empty:
+                    continue
+                if is_conc_mode:
+                    if flow_col not in sub.columns:
+                        continue
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        base_col = syn_var if variable == syn_var else variable
+                        sub["__conc_mgL__"] = (sub[base_col] / (sub[flow_col] * 86400.0)) * 1000.0
+                    how_here = method if method in {"flow_weighted_mean", "mean"} else "flow_weighted_mean"
+                    s_ex = _resample_series(sub, "__conc_mgL__", freq=freq_str, how=how_here, flow_col=flow_col)
+                else:
+                    base_col = syn_var if variable == syn_var else variable
+                    s_ex = _resample_series(sub, base_col, freq=freq_str, how=method, flow_col=flow_col if flow_col in sub.columns else None)
+                s_ex = s_ex.dropna()
+                if not s_ex.empty:
+                    extra_series[str(name)] = s_ex
+            except Exception as exc:
+                _dbg("extra overlay failed", name, exc)
+                continue
+    _extend_relative_bands(band_groups, extra_series, prefix="extra")
+
+    measured_use_df = measured_df.copy() if measured_present else None
+    use_measured_load_col = measured_load_col
+    use_measured_conc_col = measured_conc_col
+    if measured_present and isinstance(measured_use_df, pd.DataFrame):
+        conc_col = use_measured_conc_col
+        policy_nonnum = str(cfg.get("measured_nonnum_policy", "as_na"))
+        policy_neg = str(cfg.get("measured_negative_policy", "zero"))
+
+        def _apply_policies_local(df_loc: pd.DataFrame, value_col_name: str, *, is_conc: bool) -> pd.DataFrame:
+            if value_col_name not in df_loc.columns:
+                return df_loc
+            raw_numeric = pd.to_numeric(df_loc[value_col_name], errors="coerce")
+            nonnum_mask = ~raw_numeric.notna()
+            df_loc[value_col_name] = raw_numeric.astype(float)
+            if policy_nonnum == "drop":
+                df_loc = df_loc.loc[~nonnum_mask].copy()
+            elif policy_nonnum == "zero":
+                df_loc.loc[nonnum_mask, value_col_name] = 0.0
+            elif policy_nonnum == "half_MDL" and is_conc:
+                df_loc.loc[nonnum_mask, value_col_name] = 0.05
+            if is_conc:
+                if policy_neg == "drop":
+                    df_loc = df_loc.loc[(df_loc[value_col_name].isna()) | (df_loc[value_col_name] >= 0)].copy()
+                elif policy_neg == "zero":
+                    df_loc.loc[df_loc[value_col_name] < 0, value_col_name] = 0.0
+            return df_loc
+
+        if conc_col is not None:
+            measured_use_df = _apply_policies_local(measured_use_df, conc_col, is_conc=True)
+        elif use_measured_load_col is not None:
+            measured_use_df = _apply_policies_local(measured_use_df, use_measured_load_col, is_conc=False)
+
+        if conc_col is not None:
+            try:
+                if str(cfg.get("flow_source")) == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty and isinstance(water_flow_df, pd.DataFrame):
+                    flow_val_col = water_flow_value_col if water_flow_value_col and water_flow_value_col in water_flow_df.columns else (flow_meas_col if flow_meas_col in water_flow_df.columns else None)
+                    if flow_val_col is None:
+                        for candidate in water_flow_df.columns:
+                            if pd.api.types.is_numeric_dtype(water_flow_df[candidate]):
+                                flow_val_col = str(candidate)
+                                break
+                    measured_use_df = convert_measured_mgL_to_kg_per_day(
+                        measured_use_df,
+                        water_flow_df,
+                        sample_date_col=measured_date_col,
+                        sample_value_col=conc_col,
+                        flow_date_col=water_flow_date_col,
+                        flow_value_col=str(flow_val_col),
+                        kg_col=measured_kg_col_name,
+                        nonnum_policy=policy_nonnum,
+                        negative_policy=policy_neg,
+                    )
+                    if measured_kg_col_name in measured_use_df.columns:
+                        use_measured_load_col = measured_kg_col_name
+                elif str(cfg.get("flow_source")) == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
+                    df_flow_swat = pd.DataFrame({
+                        "date": pd.to_datetime(s_swat_avg_daily.index).floor("D"),
+                        "__swat_avg_m3d__": s_swat_avg_daily.values,
+                    })
+                    measured_use_df = convert_measured_mgL_to_kg_per_day(
+                        measured_use_df,
+                        df_flow_swat,
+                        sample_date_col=measured_date_col,
+                        sample_value_col=conc_col,
+                        flow_date_col="date",
+                        flow_value_col="__swat_avg_m3d__",
+                        kg_col=measured_kg_col_name,
+                        nonnum_policy=policy_nonnum,
+                        negative_policy=policy_neg,
+                    )
+                    if measured_kg_col_name in measured_use_df.columns:
+                        use_measured_load_col = measured_kg_col_name
+            except Exception as exc:
+                _dbg("measured conversion failed", exc)
+        if isinstance(measured_use_df, pd.DataFrame):
+            if conc_col in measured_use_df.columns:
+                use_measured_conc_col = conc_col
+
+    meas_for_stats: List[pd.Series] = []
+    if measured_present and bool(cfg.get("show_measured")) and isinstance(measured_use_df, pd.DataFrame) and not measured_use_df.empty:
+        measured_included_df = measured_use_df
+        if selected_days_set is not None:
+            md = pd.to_datetime(measured_use_df[measured_date_col], errors="coerce").dt.floor("D")
+            measured_included_df = measured_use_df.loc[md.isin(list(selected_days_set))].copy()
+        df_dates = measured_included_df[[measured_date_col]].copy()
+        df_dates[measured_date_col] = pd.to_datetime(df_dates[measured_date_col])
+        if cfg.get("start") is not None:
+            df_dates = df_dates[df_dates[measured_date_col] >= pd.to_datetime(cfg["start"])]
+        if cfg.get("end") is not None:
+            df_dates = df_dates[df_dates[measured_date_col] <= pd.to_datetime(cfg["end"])]
+        if season_months:
+            months = set(int(month) for month in season_months)
+            df_dates = df_dates[df_dates[measured_date_col].dt.month.isin(months)]
+        if not df_dates.empty:
+            days_start = df_dates[measured_date_col].min().normalize()
+            days_end = df_dates[measured_date_col].max().normalize()
+            period_day_counts = _period_day_counts(days_start, days_end, freq=freq_str, season_months=season_months)
+        else:
+            period_day_counts = pd.Series(dtype=float)
+
+        cat_resampled: Dict[int, Dict[str, pd.Series]] = {}
+        measured_selection = cfg.get("measured_selection") or {}
+        for cat in (1, 2, 3):
+            selected = measured_selection.get(str(cat), {})
+            if not selected.get("enabled"):
+                continue
+            chem_name = selected.get("chemical")
+            stations = list(selected.get("stations") or [])
+            if not chem_name or not stations:
+                continue
+            mvcol = None
+            if is_conc_mode and use_measured_conc_col is not None:
+                mvcol = str(use_measured_conc_col)
+            elif (not is_conc_mode) and use_measured_load_col is not None:
+                mvcol = str(use_measured_load_col)
+            elif use_measured_load_col is not None:
+                mvcol = str(use_measured_load_col)
+            elif use_measured_conc_col is not None:
+                mvcol = str(use_measured_conc_col)
+            if mvcol is None:
+                continue
+            per_station_daily = _aggregate_measured(
+                measured_included_df,
+                date_col=measured_date_col,
+                station_col=measured_station_col,
+                name_col=measured_name_col,
+                value_col=mvcol,
+                selected_name=chem_name,
+                selected_stations=stations,
+                start=cfg.get("start"),
+                end=cfg.get("end"),
+                season_months=season_months,
+            )
+            for station, daily_series in per_station_daily.items():
+                if (not is_conc_mode) and method == "sum":
+                    per_mean = daily_series.resample(freq_str).mean()
+                    s_aggr = per_mean * period_day_counts if not period_day_counts.empty else per_mean
+                elif method == "flow_weighted_mean":
+                    s_aggr = daily_series.resample(freq_str).mean()
+                else:
+                    s_aggr = daily_series.resample(freq_str).mean()
+                s_plot = s_aggr.dropna()
+                if not s_plot.empty:
+                    cat_resampled.setdefault(cat, {})[station] = s_plot
+        active_maps = [cat for cat in (1, 2, 3) if measured_selection.get(str(cat), {}).get("enabled") and cat in cat_resampled]
+        if active_maps:
+            station_sets = [set(cat_resampled[cat].keys()) for cat in active_maps if cat_resampled.get(cat)]
+            common_stations = set.intersection(*station_sets) if station_sets else set()
+            for station in sorted(common_stations):
+                series_for_station = [cat_resampled[cat][station] for cat in active_maps if station in cat_resampled.get(cat, {})]
+                if len(series_for_station) != len(active_maps):
+                    continue
+                intersection_idx: Optional[pd.Index] = None
+                for series in series_for_station:
+                    intersection_idx = series.index if intersection_idx is None else intersection_idx.intersection(series.index)
+                if intersection_idx is None or len(intersection_idx) == 0:
+                    continue
+                combined = pd.concat([series.reindex(intersection_idx) for series in series_for_station], axis=1)
+                combined_series = combined.sum(axis=1, min_count=len(series_for_station)).dropna().sort_index()
+                if not combined_series.empty:
+                    meas_for_stats.append(combined_series)
+
+    view_window_raw = cfg.get("view_window") or {}
+    x0 = view_window_raw.get("x0") if isinstance(view_window_raw, dict) else None
+    x1 = view_window_raw.get("x1") if isinstance(view_window_raw, dict) else None
+    if x0 is None:
+        x0 = q_df.index.min()
+    else:
+        x0 = pd.to_datetime(x0)
+    if x1 is None:
+        x1 = q_df.index.max()
+    else:
+        x1 = pd.to_datetime(x1)
+    if x0 is None or x1 is None:
+        raise ValueError("Unable to determine stats view window")
+    view_window = (pd.Timestamp(x0), pd.Timestamp(x1))
+
+    stats = compute_stats_for_view(
+        q_df,
+        meas_for_stats,
+        window=view_window,
+        extras=extra_series,
+        compute_log=bool(cfg.get("log_metrics", True)),
+        max_global_lag=int(cfg.get("max_lag", 2)),
+        local_window_ks=tuple(sorted(int(value) for value in cfg.get("local_window_ks", []))) if cfg.get("local_window_ks") else (),
+        local_strategy="nearest",
+        choose_best_lag_by=str(cfg.get("lag_metric", "r")),
+        band_data=band_groups,
+        event_context=event_context,
+    )
+
+    dashboard_state = {
+        "variable": variable,
+        "reach": reach,
+        "frequency": cfg["frequency"],
+        "frequency_string": freq_str,
+        "bin": int(cfg["bin"]),
+        "method": method,
+        "compare_mode": cfg["compare_mode"],
+        "flow_source": cfg.get("flow_source"),
+        "event_source": cfg.get("event_source"),
+        "event_threshold": cfg.get("event_threshold"),
+        "event_abs_value": cfg.get("event_abs_value"),
+        "event_min_days": cfg.get("event_min_days"),
+        "event_buffer_days": cfg.get("event_buffer_days"),
+        "event_view": cfg.get("event_view"),
+        "autoscale_y_live": cfg.get("autoscale_y_live"),
+        "range_slider": cfg.get("range_slider"),
+        "show_names_in_tooltip": cfg.get("show_names_in_tooltip"),
+        "show_diagnostics": cfg.get("show_diagnostics"),
+        "show_measured": cfg.get("show_measured"),
+        "show_water_flow": cfg.get("show_water_flow"),
+        "show_swat_flow": cfg.get("show_swat_flow"),
+        "show_erosion": cfg.get("show_erosion"),
+        "show_flow_strat": False,
+        "flow_regimes": list(cfg.get("flow_regimes") or []),
+        "flow_total_band": cfg.get("flow_total_band"),
+        "flow_total_only": cfg.get("flow_total_only"),
+        "flow_overlay": cfg.get("flow_overlay"),
+        "flow_total_mode": cfg.get("flow_total_mode"),
+        "lag_metric": cfg.get("lag_metric"),
+        "max_lag": cfg.get("max_lag"),
+        "local_window_ks": list(cfg.get("local_window_ks") or []),
+        "log_metrics": cfg.get("log_metrics"),
+        "measured_nonnum_policy": cfg.get("measured_nonnum_policy"),
+        "measured_negative_policy": cfg.get("measured_negative_policy"),
+        "flag_deviations": cfg.get("flag_deviations"),
+        "deviation_factor": cfg.get("deviation_factor"),
+        "start": cfg.get("start"),
+        "end": cfg.get("end"),
+        "season_months": cfg.get("season_months"),
+        "measured_selection": cfg.get("measured_selection"),
+        "extra_overlays": cfg.get("extra_overlays"),
+        "view_window": {"x0": view_window[0], "x1": view_window[1]},
+        "source_arguments": {
+            "reach_col": reach_col,
+            "date_col": date_col,
+            "flow_col": flow_col,
+            "template": "plotly_white",
+            "figure_width": None,
+            "figure_height": None,
+            "stats_export_dir": str(stats_export_dir),
+        },
+    }
+    filename_stem = _dashboard_build_stats_filename_stem(
+        run_label=run_label,
+        variable=variable,
+        reach=reach,
+        frequency=cfg["frequency"],
+        bin_size=int(cfg["bin"]),
+        method=method,
+        compare_mode=cfg["compare_mode"],
+        event_view=str(cfg.get("event_view") or "all"),
+        view_window=view_window,
+    )
+    payload = _build_dashboard_stats_export_payload(
+        stats=stats,
+        view_window=view_window,
+        dashboard_state=dashboard_state,
+        run_label=run_label,
+        filename_stem=filename_stem,
+        source_function="export_dashboard_stats_from_config",
+        compute_log=bool(cfg.get("log_metrics", True)),
+        max_global_lag=int(cfg.get("max_lag", 2)),
+        local_window_ks=cfg.get("local_window_ks", []),
+        choose_best_lag_by=str(cfg.get("lag_metric", "r")),
+        has_band_data=bool(band_groups),
+        has_event_context=bool(event_context),
+    )
+    file_path = export_stats_to_json(payload, stats_export_dir)
+    return payload, file_path
+
+
 
 
