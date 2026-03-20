@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Lightweight raster utilities extracted from TEMP_change_chm_insparation.py
+Lightweight raster utilities adapted from TEMP_change_chm_insparation.py
 
 Optional dependencies (install as needed):
 - rasterio, rasterstats, geopandas, shapely, matplotlib

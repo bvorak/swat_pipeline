@@ -28,8 +28,8 @@ def read_n_p_means_from_csv_to_df(
     csv_path: Path | str,
     *,
     id_col: str = "HRU_GIS",
-    n_col: str = "mean_Nitrogeno_total_porcent_resample_Rediam",
-    p_col: str = "mean_Fosforo_mg_100g_P205_rediam",
+    n_col: str, #= "mean_Nitrogeno_total_porcent_resample_Rediam",
+    p_col: str, #= "mean_Fosforo_mg_100g_P205_rediam",
     sep: str = ";",
     decimal_comma_for_last_n: int = 3,
     rp: RealizationProvenance | None = None,
@@ -75,8 +75,8 @@ def transform_compute_base_soil_vars(
       (no bounds) so the provenance clearly records these conversions.
     """
     log = get_logger(__name__)
-    n_col = params.get("n_col", "mean_Nitrogeno_total_porcent_resample_Rediam")
-    p_col = params.get("p_col", "mean_Fosforo_mg_100g_P205_rediam")
+    n_col = params.get("n_col", "mean_N_prediction_best_according_weight_bias_accuracy_wc_error_resample")#"mean_Nitrogeno_total_porcent_resample_Rediam")
+    p_col = params.get("p_col", "mean_P_prediction_best_according_weight_bias_accuracy_wc_error_resample")#"mean_Fosforo_mg_100g_P205_rediam")
     input_source = params.get("input_source")
 
     df = data.copy()
