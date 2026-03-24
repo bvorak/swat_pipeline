@@ -5193,6 +5193,7 @@ def batch_export_dashboard_stats(
     variables: List[str],
     *,
     dashboard_config: Dict[str, Any],
+    per_variable_dashboard_config: Optional[Dict[str, Dict[str, Any]]] = None,
     measured_df: Optional[pd.DataFrame] = None,
     measured_var_map: Optional[Dict[str, object]] = None,
     water_flow_df: Optional[pd.DataFrame] = None,
@@ -5229,6 +5230,10 @@ def batch_export_dashboard_stats(
         variable in this list, while all other dashboard config values remain unchanged.
     dashboard_config : Dict[str, Any]
         Dashboard configuration dict (reach, variable, frequency, etc.) applied to all runs
+    per_variable_dashboard_config : Optional[Dict[str, Dict[str, Any]]]
+        Optional variable-specific overrides merged on top of dashboard_config for the matching
+        exported variable. Use this when one variable needs an explicit cats/measured_selection
+        block but other variables in the same batch should keep their default mapping.
     measured_df : Optional[pd.DataFrame]
         Measured chemistry data (shared across all runs)
     measured_var_map : Optional[Dict[str, object]]
@@ -5283,6 +5288,15 @@ def batch_export_dashboard_stats(
     ...     [184, 185, 186],
     ...     ["TOT_Nkg", "TOT_Pkg"],
     ...     dashboard_config={"reach": 13, "variable": "TOT_Nkg", "frequency": "D", ...},
+    ...     per_variable_dashboard_config={
+    ...         "TOT_Nkg": {
+    ...             "cats": {
+    ...                 1: {"enabled": True, "chem": "NITROGENO KJELDAHL", "stations": ["30304"]},
+    ...                 2: {"enabled": True, "chem": "NITRATOS", "stations": ["30304"]},
+    ...                 3: {"enabled": False},
+    ...             }
+    ...         }
+    ...     },
     ...     measured_df=measured_df,
     ...     water_flow_df=flow_df,
     ...     sim_dfs=load_or_build_dfs_for_runs([184, 185, 186], force_rebuild=False),
@@ -5302,6 +5316,11 @@ def batch_export_dashboard_stats(
     
     run_numbers_list = list(run_numbers) if not isinstance(run_numbers, list) else run_numbers
     run_numbers_list = sorted(set(int(r) for r in run_numbers_list))
+    base_dashboard_config = dict(dashboard_config or {})
+    per_variable_dashboard_config = {
+        str(variable_name): dict(variable_config or {})
+        for variable_name, variable_config in (per_variable_dashboard_config or {}).items()
+    }
     variables_list = []
     for variable_name in variables:
         variable_text = str(variable_name).strip()
@@ -5369,7 +5388,10 @@ def batch_export_dashboard_stats(
             results.setdefault(run_id, {})
             for variable in variables_list:
                 try:
-                    dashboard_config_for_variable = dict(dashboard_config)
+                    dashboard_config_for_variable = dict(base_dashboard_config)
+                    dashboard_config_for_variable.update(
+                        per_variable_dashboard_config.get(variable, {})
+                    )
                     dashboard_config_for_variable["variable"] = variable
                     payload, export_path = export_dashboard_stats_from_config(
                         sim_dfs=filtered_sims,
