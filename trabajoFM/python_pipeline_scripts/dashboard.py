@@ -34,6 +34,64 @@ from .dashboard_helper import (
 )
 DASHBOARD_VERSION = "2025-09-11-chem-ui-3"
 
+_AUTO_MEASURED_DEFAULTS: Dict[str, Dict[int, Dict[str, Any]]] = {
+    "KJELDAHL_OUTkg": {
+        1: {
+            "preferred_chemicals": ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
+            "enabled": True,
+            "preferred_station": "30304",
+        },
+        2: {
+            "preferred_chemicals": ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
+            "enabled": False,
+            "preferred_station": "30304",
+        },
+    },
+    "TOT_Nkg": {
+        1: {
+            "preferred_chemicals": ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
+            "enabled": True,
+            "preferred_station": "30304",
+        },
+        2: {
+            "preferred_chemicals": ["NITRATOS", "Nitratos", "NITRATO", "Nitrato"],
+            "enabled": True,
+            "preferred_station": "30304",
+        },
+        3: {
+            "preferred_chemicals": ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
+            "enabled": False,
+            "preferred_station": None,
+        },
+    },
+}
+
+
+def _get_auto_measured_defaults_for_variable(variable: Optional[str]) -> Dict[int, Dict[str, Any]]:
+    specs = _AUTO_MEASURED_DEFAULTS.get(str(variable), {})
+    return {
+        int(cat): {
+            **spec,
+            "preferred_chemicals": list(spec.get("preferred_chemicals", [])),
+        }
+        for cat, spec in specs.items()
+    }
+
+
+def _pick_preferred_measured_option(
+    options: Sequence[str],
+    preferred_candidates: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    if not options:
+        return None
+    if preferred_candidates:
+        normalized = {str(option).strip().casefold(): option for option in options}
+        for candidate in preferred_candidates:
+            match = normalized.get(str(candidate).strip().casefold())
+            if match is not None:
+                return match
+    return options[0]
+
 # moved helpers to dashboard_helper.py
 
 # -----------------------------
@@ -554,7 +612,7 @@ def fan_compare_simulations_dashboard(
         "latest_stats_export_payload": None,
         "latest_stats_export_path": None,
     }
-    _state = {"updating": False, "duration_refresher": None}
+    _state = {"updating": False, "duration_refresher": None, "measured_defaults_var": None}
 
     TICK_STOPS = [
         dict(dtickrange=[None, 1000 * 60 * 60 * 24], value="%Y-%m-%d\n%H:%M"),
@@ -622,24 +680,24 @@ def fan_compare_simulations_dashboard(
             return
         _state["updating"] = True
         var = dd_var.value
-        # Inject default measured mapping for the derived variable if not provided
-        meas_map_local = dict(measured_var_map or {})
-        if var == SYN_VAR and var not in meas_map_local:
-            meas_map_local[var] = {
-                1: ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
-                2: ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
-            }
-        norm_map = _normalize_meas_map_for_var(meas_map_local, var)
+        auto_defaults = _get_auto_measured_defaults_for_variable(var)
+        norm_map = _normalize_meas_map_for_var(measured_var_map or {}, var)
+        for cat, spec in auto_defaults.items():
+            if not norm_map.get(cat) and spec.get("preferred_chemicals"):
+                norm_map[cat] = list(spec["preferred_chemicals"])
+        variable_changed = (_state.get("measured_defaults_var") != var)
         for i in (1, 2, 3):
             allowed = norm_map.get(i, [])
+            default_spec = auto_defaults.get(i, {})
             opts = _measured_options_for_category(measured_df, measured_name_col, allowed)
+            target_chem = _pick_preferred_measured_option(opts, default_spec.get("preferred_chemicals"))
             # Update chem dropdown robustly avoiding invalid intermediate states
             old_val = dd_cat_name[i].value
             if old_val is not None and old_val not in opts:
                 if opts:
                     # transitional include old value, then finalize
                     dd_cat_name[i].options = _chem_options_with_placeholder(opts, extra=old_val)
-                    dd_cat_name[i].value = opts[0]
+                    dd_cat_name[i].value = target_chem
                     dd_cat_name[i].options = _chem_options_with_placeholder(opts)
                 else:
                     # no options -> placeholder only
@@ -647,8 +705,8 @@ def fan_compare_simulations_dashboard(
                     dd_cat_name[i].value = None
             else:
                 dd_cat_name[i].options = _chem_options_with_placeholder(opts)
-                if dd_cat_name[i].value is None and opts:
-                    dd_cat_name[i].value = opts[0]
+                if target_chem is not None and (variable_changed or dd_cat_name[i].value is None):
+                    dd_cat_name[i].value = target_chem
             # Populate station options for this category (based on selected chem)
             if dd_cat_name[i].value is not None:
                 sts = _meas_chem2stations.get(str(dd_cat_name[i].value), [])
@@ -665,9 +723,17 @@ def fan_compare_simulations_dashboard(
             else:
                 ms_cat_stations[i].options = sts
             # auto-select default station by map if none selected
-            if not ms_cat_stations[i].value:
-                if ((i == 1) or (var == SYN_VAR and i in (1, 2))) and ("30304" in sts):
-                    ms_cat_stations[i].value = ("30304",)
+            preferred_station = default_spec.get("preferred_station")
+            if variable_changed and opts:
+                if preferred_station and (preferred_station in sts):
+                    ms_cat_stations[i].value = (preferred_station,)
+                elif ("enabled" in default_spec) and not bool(default_spec.get("enabled")):
+                    ms_cat_stations[i].value = ()
+                elif not ms_cat_stations[i].value:
+                    ms_cat_stations[i].value = tuple(sts)
+            elif not ms_cat_stations[i].value:
+                if preferred_station and (preferred_station in sts):
+                    ms_cat_stations[i].value = (preferred_station,)
                 else:
                     ms_cat_stations[i].value = tuple(sts)
             # Hide category box if no options
@@ -677,6 +743,9 @@ def fan_compare_simulations_dashboard(
             cb_cat[i].disabled = not bool(opts)
             if not opts:
                 cb_cat[i].value = False
+            elif variable_changed and ("enabled" in default_spec):
+                cb_cat[i].value = bool(default_spec.get("enabled"))
+        _state["measured_defaults_var"] = var
         _state["updating"] = False
 
     # Apply UI defaults before wiring observers for a snappier initial render
@@ -834,7 +903,11 @@ def fan_compare_simulations_dashboard(
         else:
             ms_cat_stations[cat].options = sts
         if not ms_cat_stations[cat].value:
-            if cat == 1 and ("30304" in sts):
+            default_spec = _get_auto_measured_defaults_for_variable(dd_var.value).get(cat, {})
+            preferred_station = default_spec.get("preferred_station")
+            if preferred_station and (preferred_station in sts):
+                ms_cat_stations[cat].value = (preferred_station,)
+            elif cat == 1 and ("30304" in sts):
                 ms_cat_stations[cat].value = ("30304",)
             else:
                 ms_cat_stations[cat].value = tuple(sts)
@@ -3818,8 +3891,7 @@ def fan_compare_simulations_dashboard(
             dd_method.value = default
         _dbg("on_var_change", new_var)
         _dbg("on_var_change", change.get("new"))
-        # Reset measured selections on variable change: auto-pick first chem for each map,
-        # and activate only Map 1 by default.
+        # Reset measured selections on variable change so per-variable defaults are re-applied.
         if measured_present:
             _state["updating"] = True
             for i in (1, 2, 3):
@@ -3827,6 +3899,7 @@ def fan_compare_simulations_dashboard(
             cb_cat[1].value = True
             cb_cat[2].value = False
             cb_cat[3].value = False
+            _state["measured_defaults_var"] = None
             _state["updating"] = False
             _refresh_measured_controls()
         _mark_stale()
@@ -4265,15 +4338,11 @@ def _infer_headless_measured_selection_defaults(
     if measured_name_col not in measured_df.columns or measured_station_col not in measured_df.columns:
         return defaults
 
-    syn_var = "KJELDAHL_OUTkg"
-    meas_map_local = dict(measured_var_map or {})
-    if variable == syn_var and variable not in meas_map_local:
-        meas_map_local[variable] = {
-            1: ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
-            2: ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
-        }
-
-    norm_map = _normalize_meas_map_for_var(meas_map_local, variable)
+    auto_defaults = _get_auto_measured_defaults_for_variable(variable)
+    norm_map = _normalize_meas_map_for_var(measured_var_map or {}, variable)
+    for cat, spec in auto_defaults.items():
+        if not norm_map.get(cat) and spec.get("preferred_chemicals"):
+            norm_map[cat] = list(spec["preferred_chemicals"])
     chem_to_stations: Dict[str, List[str]] = {}
     try:
         for chem_name, group in measured_df.groupby(measured_name_col, dropna=True):
@@ -4290,19 +4359,26 @@ def _infer_headless_measured_selection_defaults(
 
     for cat in (1, 2, 3):
         allowed = norm_map.get(cat, [])
+        default_spec = auto_defaults.get(cat, {})
         options = _measured_options_for_category(measured_df, measured_name_col, allowed)
         if not options:
             continue
-        chemical = options[0]
+        chemical = _pick_preferred_measured_option(options, default_spec.get("preferred_chemicals"))
+        if chemical is None:
+            continue
         stations = list(chem_to_stations.get(str(chemical), []))
         if not stations:
             continue
-        if ((cat == 1) or (variable == syn_var and cat in (1, 2))) and ("30304" in stations):
-            selected_stations = ["30304"]
+        preferred_station = default_spec.get("preferred_station")
+        enabled = bool(default_spec.get("enabled")) if ("enabled" in default_spec) else bool(cat == 1)
+        if not enabled:
+            selected_stations = []
+        elif preferred_station and (preferred_station in stations):
+            selected_stations = [preferred_station]
         else:
             selected_stations = stations
         defaults[str(cat)] = {
-            "enabled": bool(cat == 1),
+            "enabled": enabled,
             "chemical": chemical,
             "stations": selected_stations,
         }
