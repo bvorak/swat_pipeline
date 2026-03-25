@@ -289,8 +289,9 @@ def convert_measured_mgL_to_kg_per_day(
     flow_date_col: str = "date",
     flow_value_col: str = "water_flow_m3_d_cubillas",
     kg_col: str = "kg_per_day",
-    nonnum_policy: str = "as_na",   # "as_na" | "drop" | "zero"
+    nonnum_policy: str = "as_na",   # "as_na" | "drop" | "zero" | "half_MDL"
     negative_policy: str = "zero",   # "keep" | "drop" | "zero"
+    mdl_mg_L: float = 0.2,
 ) -> pd.DataFrame:
     """
     Create/overwrite a kg/day load column on measured samples from mg/L concentrations
@@ -304,7 +305,7 @@ def convert_measured_mgL_to_kg_per_day(
         * "as_na": keep the row; the numeric column becomes NaN
         * "drop":  drop rows where coercion produced NaN (for sample or flow)
         * "zero": set non-numeric values to 0
-        * "half_MDL": set non-numeric sample values to half the the typical Method Detection Limit
+        * "half_MDL": set non-numeric sample values to half the Method Detection Limit (mdl_mg_L / 2)
     - negative_policy: how to handle negative mg/L sample values
         * "keep": keep negatives as-is
         * "drop": drop rows with negative sample values
@@ -361,8 +362,7 @@ def convert_measured_mgL_to_kg_per_day(
         merged.loc[nonnum_mask, sample_value_col] = 0.0
         print(f"[INFO] Set {nonnum_count} non-numeric sample values to 0.")
     elif nonnum_policy == "half_MDL":
-        typical_mdl = 0.2  # mg/L
-        half_mdl = typical_mdl * 0.5
+        half_mdl = mdl_mg_L * 0.5
         merged.loc[nonnum_mask, sample_value_col] = half_mdl
         print(f"[INFO] Set {nonnum_count} non-numeric sample values to half MDL ({half_mdl}).")
     # else keep as NaN
