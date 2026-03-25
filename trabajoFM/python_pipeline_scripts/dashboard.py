@@ -128,6 +128,8 @@ def fan_compare_simulations_dashboard(
     # Measured cleaning policies (defaults; also controllable via UI dropdowns)
     measured_nonnum_policy_default: str = "as_na",  # "as_na" | "drop"
     measured_negative_policy_default: str = "zero",  # "keep" | "drop" | "zero"
+    # Method Detection Limit (mg/L) – halved when "half_MDL" policy is selected
+    mdl_mg_L: float = 0.2,
     # Optional UI default selections/toggles
     ui_defaults: Optional[Dict[str, Any]] = None,
     # Optional erosion overlay toggle default
@@ -417,7 +419,7 @@ def fan_compare_simulations_dashboard(
             ("Non-numeric handling: keep as NA (recommended)", "as_na"),
             ("Non-numeric handling: set to 0", "zero"),
             ("Non-numeric handling: drop rows", "drop"),
-            ("Non-numeric handling: set to half MDL (0.1)", "half_MDL"),
+            (f"Non-numeric handling: set to half MDL ({mdl_mg_L * 0.5:g})", "half_MDL"),
         ],
         value=(measured_nonnum_policy_default if measured_nonnum_policy_default in {"as_na", "drop", "zero"} else "as_na"),
         description="Non-numeric:",
@@ -974,6 +976,7 @@ def fan_compare_simulations_dashboard(
             "log_metrics": cb_log_metrics.value,
             "measured_nonnum_policy": dd_meas_nonnum.value,
             "measured_negative_policy": dd_meas_negative.value,
+            "mdl_mg_L": mdl_mg_L,
             "flag_deviations": cb_flag_dev.value,
             "deviation_factor": sl_dev_factor.value,
             "start": start,
@@ -2621,8 +2624,7 @@ def fan_compare_simulations_dashboard(
                 elif policy_nonnum == "zero":
                     df_loc.loc[nonnum_mask, value_col] = 0.0
                 elif policy_nonnum == "half_MDL" and is_conc:
-                    half_mdl = 0.1 * 0.5  # match helper logic (typical MDL 0.1 mg/L)
-                    df_loc.loc[nonnum_mask, value_col] = half_mdl
+                    df_loc.loc[nonnum_mask, value_col] = mdl_mg_L * 0.5
                 # else: as_na -> leave NaN
                 if is_conc:
                     # Negative policy only meaningful for concentration
@@ -2661,6 +2663,7 @@ def fan_compare_simulations_dashboard(
                             kg_col=measured_kg_col_name,
                             nonnum_policy=str(dd_meas_nonnum.value),
                             negative_policy=str(dd_meas_negative.value),
+                            mdl_mg_L=mdl_mg_L,
                         )
                         use_measured_load_col = measured_kg_col_name if measured_kg_col_name in measured_use_df.columns else use_measured_load_col
                     elif str(dd_flow_source.value) == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
@@ -2679,6 +2682,7 @@ def fan_compare_simulations_dashboard(
                             kg_col=measured_kg_col_name,
                             nonnum_policy=str(dd_meas_nonnum.value),
                             negative_policy=str(dd_meas_negative.value),
+                            mdl_mg_L=mdl_mg_L,
                         )
                         use_measured_load_col = measured_kg_col_name if measured_kg_col_name in measured_use_df.columns else use_measured_load_col
                     else:
@@ -4469,6 +4473,7 @@ def _normalize_headless_dashboard_config(
         "log_metrics": bool(raw.get("log_metrics", True)),
         "measured_nonnum_policy": raw.get("measured_nonnum_policy", "as_na"),
         "measured_negative_policy": raw.get("measured_negative_policy", "zero"),
+        "mdl_mg_L": float(raw.get("mdl_mg_L", 0.2)),
         "flag_deviations": bool(raw.get("flag_deviations", True)),
         "deviation_factor": float(raw.get("deviation_factor", 10.0)),
         "start": raw.get("start"),
@@ -4556,6 +4561,7 @@ def export_dashboard_stats_from_config(
     water_flow_date_col: str = "date",
     water_flow_value_col: Optional[str] = None,
     how_map_defaults: Optional[Dict[str, str]] = None,
+    mdl_mg_L: float = 0.2,
     debug: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     if not sim_dfs:
@@ -4998,6 +5004,7 @@ def export_dashboard_stats_from_config(
         conc_col = use_measured_conc_col
         policy_nonnum = str(cfg.get("measured_nonnum_policy", "as_na"))
         policy_neg = str(cfg.get("measured_negative_policy", "zero"))
+        headless_mdl = float(cfg.get("mdl_mg_L", mdl_mg_L))
 
         def _apply_policies_local(df_loc: pd.DataFrame, value_col_name: str, *, is_conc: bool) -> pd.DataFrame:
             if value_col_name not in df_loc.columns:
@@ -5010,7 +5017,7 @@ def export_dashboard_stats_from_config(
             elif policy_nonnum == "zero":
                 df_loc.loc[nonnum_mask, value_col_name] = 0.0
             elif policy_nonnum == "half_MDL" and is_conc:
-                df_loc.loc[nonnum_mask, value_col_name] = 0.05
+                df_loc.loc[nonnum_mask, value_col_name] = headless_mdl * 0.5
             if is_conc:
                 if policy_neg == "drop":
                     df_loc = df_loc.loc[(df_loc[value_col_name].isna()) | (df_loc[value_col_name] >= 0)].copy()
@@ -5042,6 +5049,7 @@ def export_dashboard_stats_from_config(
                         kg_col=measured_kg_col_name,
                         nonnum_policy=policy_nonnum,
                         negative_policy=policy_neg,
+                        mdl_mg_L=headless_mdl,
                     )
                     if measured_kg_col_name in measured_use_df.columns:
                         use_measured_load_col = measured_kg_col_name
@@ -5060,6 +5068,7 @@ def export_dashboard_stats_from_config(
                         kg_col=measured_kg_col_name,
                         nonnum_policy=policy_nonnum,
                         negative_policy=policy_neg,
+                        mdl_mg_L=headless_mdl,
                     )
                     if measured_kg_col_name in measured_use_df.columns:
                         use_measured_load_col = measured_kg_col_name
