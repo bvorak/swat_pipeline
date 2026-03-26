@@ -315,8 +315,11 @@ def convert_measured_mgL_to_kg_per_day(
     f = df_flow.copy()
 
     # Normalize dates to daily
-    s[sample_date_col] = pd.to_datetime(s[sample_date_col], errors="coerce").dt.floor("D")
-    f[flow_date_col] = pd.to_datetime(f[flow_date_col], errors="coerce").dt.floor("D")
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        s[sample_date_col] = pd.to_datetime(s[sample_date_col], errors="coerce").dt.floor("D")
+        f[flow_date_col] = pd.to_datetime(f[flow_date_col], errors="coerce").dt.floor("D")
 
     # Coerce numeric
     s[sample_value_col] = pd.to_numeric(s[sample_value_col], errors="coerce").astype(float)
