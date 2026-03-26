@@ -34,29 +34,33 @@ from .dashboard_helper import (
 )
 DASHBOARD_VERSION = "2025-09-11-chem-ui-3"
 
+_DEFAULT_MEASURED_STATION_BY_REACH: Dict[int, str] = {
+    13: "30304",
+}
+
 _AUTO_MEASURED_DEFAULTS: Dict[str, Dict[int, Dict[str, Any]]] = {
     "KJELDAHL_OUTkg": {
         1: {
             "preferred_chemicals": ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
             "enabled": True,
-            "preferred_station": "30304",
+            "preferred_station_by_reach": {13: "30304"},
         },
         2: {
             "preferred_chemicals": ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
             "enabled": False,
-            "preferred_station": "30304",
+            "preferred_station_by_reach": {13: "30304"},
         },
     },
     "TOT_Nkg": {
         1: {
             "preferred_chemicals": ["NITROGENO KJELDAHL", "Nitrógeno Kjeldahl", "Nitrógeno KJELDAHL"],
             "enabled": True,
-            "preferred_station": "30304",
+            "preferred_station_by_reach": {13: "30304"},
         },
         2: {
             "preferred_chemicals": ["NITRATOS", "Nitratos", "NITRATO", "Nitrato"],
             "enabled": True,
-            "preferred_station": "30304",
+            "preferred_station_by_reach": {13: "30304"},
         },
         3: {
             "preferred_chemicals": ["NITORGENO TOTAL", "NITROGENO TOTAL", "Nitrógeno total", "Nitrógeno Total"],
@@ -64,15 +68,65 @@ _AUTO_MEASURED_DEFAULTS: Dict[str, Dict[int, Dict[str, Any]]] = {
             "preferred_station": None,
         },
     },
+    "TOT_Pkg": {
+        1: {
+            "preferred_chemicals": ["FOSFORO TOTAL", "Fósforo total", "FOSFORO total"],
+            "enabled": True,
+            "preferred_station_by_reach": {13: "30304"},
+        },
+        2: {
+            "preferred_chemicals": ["FOSFATOS", "Fosfatos", "FOSFATO", "Fosfato"],
+            "enabled": False,
+            "preferred_station": None,
+        },
+        3: {
+            "preferred_chemicals": ["SOLIDOS EN SUSPENSION", "Sólidos en suspensión"],
+            "enabled": False,
+            "preferred_station": None,
+        },
+    },
 }
 
 
-def _get_auto_measured_defaults_for_variable(variable: Optional[str]) -> Dict[int, Dict[str, Any]]:
+def _resolve_auto_measured_preferred_station(spec: Dict[str, Any], reach: Optional[int]) -> Optional[str]:
+    station_by_reach = spec.get("preferred_station_by_reach")
+    if isinstance(station_by_reach, dict):
+        try:
+            normalized_station_by_reach = {
+                int(raw_reach): str(station)
+                for raw_reach, station in station_by_reach.items()
+                if station is not None
+            }
+        except Exception:
+            normalized_station_by_reach = {}
+        if reach is not None and int(reach) in normalized_station_by_reach:
+            return normalized_station_by_reach[int(reach)]
+        return None
+
+    preferred_station = spec.get("preferred_station")
+    if preferred_station is None:
+        return None
+
+    if reach is None:
+        return str(preferred_station)
+
+    default_station = _DEFAULT_MEASURED_STATION_BY_REACH.get(int(reach))
+    if default_station is None:
+        return None
+    return str(preferred_station) if str(preferred_station) == str(default_station) else None
+
+
+def _get_auto_measured_defaults_for_variable(
+    variable: Optional[str],
+    *,
+    reach: Optional[int] = None,
+) -> Dict[int, Dict[str, Any]]:
     specs = _AUTO_MEASURED_DEFAULTS.get(str(variable), {})
     return {
         int(cat): {
             **spec,
             "preferred_chemicals": list(spec.get("preferred_chemicals", [])),
+            "preferred_station": _resolve_auto_measured_preferred_station(spec, reach),
         }
         for cat, spec in specs.items()
     }
@@ -682,7 +736,7 @@ def fan_compare_simulations_dashboard(
             return
         _state["updating"] = True
         var = dd_var.value
-        auto_defaults = _get_auto_measured_defaults_for_variable(var)
+        auto_defaults = _get_auto_measured_defaults_for_variable(var, reach=dd_reach.value)
         norm_map = _normalize_meas_map_for_var(measured_var_map or {}, var)
         for cat, spec in auto_defaults.items():
             if not norm_map.get(cat) and spec.get("preferred_chemicals"):
@@ -905,12 +959,10 @@ def fan_compare_simulations_dashboard(
         else:
             ms_cat_stations[cat].options = sts
         if not ms_cat_stations[cat].value:
-            default_spec = _get_auto_measured_defaults_for_variable(dd_var.value).get(cat, {})
+            default_spec = _get_auto_measured_defaults_for_variable(dd_var.value, reach=dd_reach.value).get(cat, {})
             preferred_station = default_spec.get("preferred_station")
             if preferred_station and (preferred_station in sts):
                 ms_cat_stations[cat].value = (preferred_station,)
-            elif cat == 1 and ("30304" in sts):
-                ms_cat_stations[cat].value = ("30304",)
             else:
                 ms_cat_stations[cat].value = tuple(sts)
 
@@ -4348,6 +4400,7 @@ def _build_dashboard_stats_export_payload(
 def _infer_headless_measured_selection_defaults(
     *,
     variable: str,
+    reach: Optional[int],
     measured_var_map: Optional[Dict[str, object]],
     measured_df: Optional[pd.DataFrame],
     measured_name_col: str,
@@ -4362,7 +4415,7 @@ def _infer_headless_measured_selection_defaults(
     if measured_name_col not in measured_df.columns or measured_station_col not in measured_df.columns:
         return defaults
 
-    auto_defaults = _get_auto_measured_defaults_for_variable(variable)
+    auto_defaults = _get_auto_measured_defaults_for_variable(variable, reach=reach)
     norm_map = _normalize_meas_map_for_var(measured_var_map or {}, variable)
     for cat, spec in auto_defaults.items():
         if not norm_map.get(cat) and spec.get("preferred_chemicals"):
@@ -4453,11 +4506,19 @@ def _normalize_headless_dashboard_config(
         raw["measured_selection"] = measured_selection
 
     default_reach = 13 if 13 in reach_choices else (reach_choices[0] if reach_choices else None)
+    effective_reach = reach_override if reach_override is not None else raw.get("reach", default_reach)
+    try:
+        effective_reach = int(effective_reach) if effective_reach is not None else default_reach
+    except Exception:
+        effective_reach = default_reach
+    if effective_reach not in reach_choices:
+        effective_reach = default_reach
     default_var = str(raw.get("variable") or (variables[0] if variables else ""))
     should_infer_measured_selection = measured_present and ("measured_selection" not in raw) and ("cats" not in raw)
     inferred_measured_selection = (
         _infer_headless_measured_selection_defaults(
             variable=default_var,
+            reach=effective_reach,
             measured_var_map=measured_var_map,
             measured_df=measured_df,
             measured_name_col=measured_name_col,
@@ -4470,7 +4531,7 @@ def _normalize_headless_dashboard_config(
     extra_defaults = {str(name): True for name in (extra_dfs or {}).keys()}
     normalized: Dict[str, Any] = {
         "variable": default_var,
-        "reach": reach_override if reach_override is not None else raw.get("reach", default_reach),
+        "reach": effective_reach,
         "frequency": raw.get("frequency", "D"),
         "bin": int(raw.get("bin", 1)),
         "method": raw.get("method") or _dashboard_default_method_for_var(default_var, how_map_defaults),
