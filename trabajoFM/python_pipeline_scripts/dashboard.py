@@ -2511,6 +2511,7 @@ def fan_compare_simulations_dashboard(
                         continue
                     if isinstance(cb_extra, dict) and name in cb_extra and not cb_extra[name].value:
                         continue
+                    extra_flow_col = flow_col if flow_col in df_ex.columns else _dashboard_pick_best_swat_flow_col(df_ex)
                     # Prepare sub DataFrame depending on variable (derived vs direct)
                     if var == SYN_VAR:
                         # Need components present to build derived; skip if missing
@@ -2522,8 +2523,8 @@ def fan_compare_simulations_dashboard(
                             continue
                         cols = [date_col, var]
                     # Need flow for concentration
-                    if (is_conc_mode or dd_method.value == "flow_weighted_mean") and flow_col in df_ex.columns:
-                        cols.append(flow_col)
+                    if (is_conc_mode or dd_method.value == "flow_weighted_mean") and extra_flow_col in df_ex.columns:
+                        cols.append(extra_flow_col)
                     sub = df_ex[df_ex[reach_col] == dd_reach.value][cols].copy()
                     if sub.empty:
                         continue
@@ -2545,17 +2546,17 @@ def fan_compare_simulations_dashboard(
                     if sub.empty:
                         continue
                     if is_conc_mode:
-                        if flow_col not in sub.columns:
+                        if extra_flow_col not in sub.columns:
                             continue
                         with np.errstate(invalid='ignore', divide='ignore'):
                             base_col = (SYN_VAR if var == SYN_VAR else var)
-                            sub["__conc_mgL__"] = (sub[base_col] / (sub[flow_col] * 86400.0)) * 1000.0
+                            sub["__conc_mgL__"] = (sub[base_col] / (sub[extra_flow_col] * 86400.0)) * 1000.0
                         how_here = dd_method.value if dd_method.value in ("flow_weighted_mean", "mean") else "flow_weighted_mean"
-                        s_ex = _resample_series(sub, "__conc_mgL__", freq=_make_freq_string(dd_freq.value, sl_bin.value), how=how_here, flow_col=flow_col)
+                        s_ex = _resample_series(sub, "__conc_mgL__", freq=_make_freq_string(dd_freq.value, sl_bin.value), how=how_here, flow_col=extra_flow_col)
                     else:
                         base_col = (SYN_VAR if var == SYN_VAR else var)
                         s_ex = _resample_series(sub, base_col, freq=_make_freq_string(dd_freq.value, sl_bin.value), how=dd_method.value,
-                                                flow_col=flow_col if flow_col in sub.columns else None)
+                                                flow_col=extra_flow_col if extra_flow_col in sub.columns else None)
                     s_ex = s_ex.dropna()
                     if s_ex.empty:
                         continue
@@ -3370,11 +3371,7 @@ def fan_compare_simulations_dashboard(
                         event_context=_last.get("event_context"),
                     )
                 except Exception as e:
-                    # If stats computation fails, provide error details
-                    with out:
-                        print(f"Stats computation failed: {e}")
-                        import traceback
-                        traceback.print_exc()
+                    # If stats computation fails, show error in stats panel (not in the figure output)
                     _last["latest_stats_export_payload"] = None
                     btn_save_stats.disabled = True
                     lbl_save_stats.value = "<span style='color:#b94a48;'>Stats export unavailable</span>"
@@ -3427,9 +3424,7 @@ def fan_compare_simulations_dashboard(
                 try:
                     stats_html.value = html_text
                 except Exception:
-                    # Fallback to printing into the output area if HTML update fails
-                    with out:
-                        print(html_text)
+                    pass  # avoid printing into the figure output widget from a background thread
                 # Optionally build and render diagnostics figures below
                 if cb_show_diags.value:
                     # Show loading indicator in the diagnostics box
@@ -3647,6 +3642,31 @@ def fan_compare_simulations_dashboard(
             threading.Thread(target=_compute_stats_and_update, args=((x0, x1),), daemon=True).start()
 
         fig.layout.xaxis.on_change(_on_xrange_change, 'range')
+
+        # Sanitize all trace data: replace NaN/Inf with None so Jupyter's JSON
+        # serializer never encounters "out of range float values".  This avoids
+        # the jupyter_client UserWarning that can split output streams and cause
+        # intermittent duplicate/empty chart rendering artifacts.
+        for _tr in fig.data:
+            for _attr in ("y", "x"):
+                _vals = getattr(_tr, _attr, None)
+                if _vals is not None:
+                    try:
+                        _a = np.asarray(_vals, dtype=float)
+                        if not np.all(np.isfinite(_a)):
+                            setattr(_tr, _attr, np.where(np.isfinite(_a), _a, None).tolist())
+                    except (TypeError, ValueError):
+                        pass  # non-numeric axis (e.g. date strings) – skip
+            _cd = getattr(_tr, "customdata", None)
+            if _cd is not None:
+                try:
+                    _ca = np.asarray(_cd, dtype=float)
+                    if not np.all(np.isfinite(_ca)):
+                        _ca_obj = _ca.astype(object)
+                        _ca_obj[~np.isfinite(_ca)] = None
+                        _tr.customdata = _ca_obj.tolist()
+                except (TypeError, ValueError):
+                    pass  # mixed-type customdata – leave as-is
 
         with out:
             clear_output(wait=True)
@@ -4953,6 +4973,7 @@ def export_dashboard_stats_from_config(
                     continue
                 if not bool(cfg.get("extra_overlays", {}).get(str(name), True)):
                     continue
+                extra_flow_col = flow_col if flow_col in df_ex.columns else _dashboard_pick_best_swat_flow_col(df_ex)
                 if variable == syn_var:
                     if not all(component in df_ex.columns for component in derived_components):
                         continue
@@ -4961,8 +4982,8 @@ def export_dashboard_stats_from_config(
                     if variable not in df_ex.columns:
                         continue
                     cols = [date_col, variable]
-                if (is_conc_mode or method == "flow_weighted_mean") and flow_col in df_ex.columns:
-                    cols.append(flow_col)
+                if (is_conc_mode or method == "flow_weighted_mean") and extra_flow_col in df_ex.columns:
+                    cols.append(extra_flow_col)
                 sub = df_ex[df_ex[reach_col] == reach][cols].copy()
                 if sub.empty:
                     continue
@@ -4979,16 +5000,16 @@ def export_dashboard_stats_from_config(
                 if sub.empty:
                     continue
                 if is_conc_mode:
-                    if flow_col not in sub.columns:
+                    if extra_flow_col not in sub.columns:
                         continue
                     with np.errstate(invalid="ignore", divide="ignore"):
                         base_col = syn_var if variable == syn_var else variable
-                        sub["__conc_mgL__"] = (sub[base_col] / (sub[flow_col] * 86400.0)) * 1000.0
+                        sub["__conc_mgL__"] = (sub[base_col] / (sub[extra_flow_col] * 86400.0)) * 1000.0
                     how_here = method if method in {"flow_weighted_mean", "mean"} else "flow_weighted_mean"
-                    s_ex = _resample_series(sub, "__conc_mgL__", freq=freq_str, how=how_here, flow_col=flow_col)
+                    s_ex = _resample_series(sub, "__conc_mgL__", freq=freq_str, how=how_here, flow_col=extra_flow_col)
                 else:
                     base_col = syn_var if variable == syn_var else variable
-                    s_ex = _resample_series(sub, base_col, freq=freq_str, how=method, flow_col=flow_col if flow_col in sub.columns else None)
+                    s_ex = _resample_series(sub, base_col, freq=freq_str, how=method, flow_col=extra_flow_col if extra_flow_col in sub.columns else None)
                 s_ex = s_ex.dropna()
                 if not s_ex.empty:
                     extra_series[str(name)] = s_ex
