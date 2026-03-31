@@ -1608,13 +1608,15 @@ def fan_compare_simulations_dashboard(
                             else:
                                 tickvals = [10 ** e for e in range(emin, emax + 1)]
                                 fig_ldc.update_yaxes(type="log", tickvals=tickvals, ticktext=[f"1e{e}" if abs(e) > 2 else f"{10**e:g}" for e in range(emin, emax + 1)])
-                            y_axis_final = f"load (log10): {y_axis_title}"
+                            pass  # log scale already applied above
                         else:
-                            y_axis_final = "load: " + y_axis_title
+                            pass
                     except Exception:
-                        y_axis_final = "load: " + y_axis_title
-                else:
-                    y_axis_final = "load: " + y_axis_title
+                        pass
+                # Extract unit from y_axis_title (e.g. "Concentration (mg/L)" -> "mg/L")
+                import re as _re_ldc
+                _unit_match = _re_ldc.search(r'\(([^)]+)\)', y_axis_title)
+                y_axis_final = _unit_match.group(1) if _unit_match else y_axis_title
 
                 # Ensure x-axis shows 0 (high flows) to 100 (low flows) from left to right (standard orientation)
                 # Decide x-axis range: optionally clip to measured overlay extent if requested in ui_defaults
@@ -1633,13 +1635,13 @@ def fan_compare_simulations_dashboard(
                                 need = 2.0 - (xmax_clip - xmin_clip)
                                 xmin_clip = max(0.0, xmin_clip - need/2)
                                 xmax_clip = min(100.0, xmax_clip + need/2)
-                            xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[xmin_clip, xmax_clip])
+                            xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[xmin_clip, xmax_clip])
                         else:
-                            xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+                            xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
                     except Exception:
-                        xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+                        xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
                 else:
-                    xaxis_obj = dict(title=r"% of time where predicted mean load exceeded (%)", range=[0,100])
+                    xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
 
                 # Optional y-axis clipping when x clipping is enabled to focus on visible measurement-driven subset
                 if clip_meas:
@@ -1689,10 +1691,12 @@ def fan_compare_simulations_dashboard(
                         title_x = 0.35
                 except Exception:
                     title_x = 0.35
+                _ldc_var_name = dd_var.value if 'dd_var' in dir() else ""
+                _ldc_title_text = f"{_ldc_var_name} \u2013 Simulation Load Duration Curve" if _ldc_var_name else "Simulation Load Duration Curve"
                 fig_ldc.update_layout(
-                    title=dict(text="Simulation Load Duration Curve", x=title_x, xanchor="center"),
+                    title=dict(text=_ldc_title_text, x=title_x, xanchor="center", font=dict(size=22)),
                     xaxis=xaxis_obj,
-                    yaxis_title=y_axis_final,
+                    yaxis=dict(title=dict(text=y_axis_final, font=dict(size=21))),
                 )
                 widgets_out.append(go.FigureWidget(fig_ldc))
         sim_flow_series = None
