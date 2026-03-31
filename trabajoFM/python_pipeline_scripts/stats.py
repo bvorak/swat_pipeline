@@ -2219,6 +2219,21 @@ def compute_stats_for_view(
 
     baseline_relative_width = float("nan")  # median-based relative width (min-max/median)
     baseline_mean_relative_width = float("nan")  # mean-based relative width (min-max/mean)
+    # Event/nonevent splits of genuine ensemble spread
+    baseline_relative_width_event = float("nan")
+    baseline_relative_width_nonevent = float("nan")
+    baseline_event_ratio = float("nan")
+    baseline_mean_relative_width_event = float("nan")
+    baseline_mean_relative_width_nonevent = float("nan")
+    baseline_abs_width_event_ratio = float("nan")
+    baseline_median_W_event = float("nan")
+    baseline_median_W_nonevent = float("nan")
+    baseline_mean_W_event = float("nan")
+    baseline_mean_W_nonevent = float("nan")
+    baseline_p90_W_event = float("nan")
+    baseline_p90_W_nonevent = float("nan")
+    baseline_event_pairs = 0
+    baseline_nonevent_pairs = 0
     p05_series_full = _window_series(raw_ensemble.get("p05")) if isinstance(raw_ensemble, dict) else None
     p95_series_full = _window_series(raw_ensemble.get("p95")) if isinstance(raw_ensemble, dict) else None
     if p05_series_full is None and q_df is not None and "p05" in q_df.columns:
@@ -2240,8 +2255,8 @@ def compute_stats_for_view(
             )
             # Median-based relative width
             denom_median = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
-            rel_vals_median = width_vals / denom_median
-            rel_vals_median = rel_vals_median[np.isfinite(rel_vals_median)]
+            rel_vals_all = width_vals / denom_median
+            rel_vals_median = rel_vals_all[np.isfinite(rel_vals_all)]
             if rel_vals_median.size:
                 baseline_relative_width = float(np.nanmedian(rel_vals_median))
             # Mean-based relative width (uses mean of base_subset for each day equivalently -> width/base)
@@ -2250,6 +2265,69 @@ def compute_stats_for_view(
             rel_vals_mean = rel_vals_mean[np.isfinite(rel_vals_mean)]
             if rel_vals_mean.size:
                 baseline_mean_relative_width = float(np.nanmean(rel_vals_mean))
+
+            # ── Event / non-event splits of ensemble spread ──
+            _bl_idx_days = None
+            if isinstance(idx, pd.DatetimeIndex):
+                _bl_idx_days = idx.floor('D')
+            else:
+                try:
+                    _bl_idx_days = pd.DatetimeIndex(idx).floor('D')
+                except Exception:
+                    pass
+            if _bl_idx_days is not None:
+                _bl_ev_mask = None
+                _bl_nev_mask = None
+                if event_idx_buffered is not None:
+                    _bl_ev_mask = _bl_idx_days.isin(event_idx_buffered)
+                    if event_idx_non is not None:
+                        _bl_nev_mask = _bl_idx_days.isin(event_idx_non)
+                    else:
+                        _bl_nev_mask = ~_bl_ev_mask
+                elif event_idx_non is not None:
+                    _bl_nev_mask = _bl_idx_days.isin(event_idx_non)
+
+                def _bl_split(arr, mask):
+                    """Subset arr by boolean mask, return finite values."""
+                    sub = arr[mask]
+                    return sub[np.isfinite(sub)]
+
+                if _bl_ev_mask is not None and np.any(_bl_ev_mask):
+                    ev_rel = _bl_split(rel_vals_all, _bl_ev_mask)
+                    ev_w = _bl_split(width_vals, _bl_ev_mask)
+                    baseline_event_pairs = int(np.sum(_bl_ev_mask))
+                    if ev_rel.size:
+                        baseline_relative_width_event = float(np.nanmedian(ev_rel))
+                        baseline_mean_relative_width_event = float(np.nanmean(ev_rel))
+                    if ev_w.size:
+                        baseline_median_W_event = float(np.nanmedian(ev_w))
+                        baseline_mean_W_event = float(np.nanmean(ev_w))
+                        baseline_p90_W_event = float(np.nanpercentile(ev_w, 90))
+
+                if _bl_nev_mask is not None and np.any(_bl_nev_mask):
+                    nev_rel = _bl_split(rel_vals_all, _bl_nev_mask)
+                    nev_w = _bl_split(width_vals, _bl_nev_mask)
+                    baseline_nonevent_pairs = int(np.sum(_bl_nev_mask))
+                    if nev_rel.size:
+                        baseline_relative_width_nonevent = float(np.nanmedian(nev_rel))
+                        baseline_mean_relative_width_nonevent = float(np.nanmean(nev_rel))
+                    if nev_w.size:
+                        baseline_median_W_nonevent = float(np.nanmedian(nev_w))
+                        baseline_mean_W_nonevent = float(np.nanmean(nev_w))
+                        baseline_p90_W_nonevent = float(np.nanpercentile(nev_w, 90))
+
+                if (np.isfinite(baseline_relative_width_event)
+                        and np.isfinite(baseline_relative_width_nonevent)
+                        and baseline_relative_width_nonevent != 0):
+                    baseline_event_ratio = float(
+                        baseline_relative_width_event / baseline_relative_width_nonevent
+                    )
+                if (np.isfinite(baseline_median_W_event)
+                        and np.isfinite(baseline_median_W_nonevent)
+                        and baseline_median_W_nonevent != 0):
+                    baseline_abs_width_event_ratio = float(
+                        baseline_median_W_event / baseline_median_W_nonevent
+                    )
 
     allowed_overlay_metrics = {"r", "R2", "MAE", "RMSE", "Bias(obs-pred)", "MedAE"}
 
@@ -2529,12 +2607,40 @@ def compute_stats_for_view(
                 baseline_entry["relative_width_norm_mean"] = float(baseline_mean_relative_width)
     except Exception:
         pass
+    # Event/nonevent splits of genuine ensemble spread
+    if np.isfinite(baseline_relative_width_event):
+        baseline_entry["relative_width_event"] = baseline_relative_width_event
+    if np.isfinite(baseline_relative_width_nonevent):
+        baseline_entry["relative_width_nonevent"] = baseline_relative_width_nonevent
+    if np.isfinite(baseline_event_ratio):
+        baseline_entry["event_ratio"] = baseline_event_ratio
+    if np.isfinite(baseline_mean_relative_width_event):
+        baseline_entry["relative_width_mean_event"] = baseline_mean_relative_width_event
+    if np.isfinite(baseline_mean_relative_width_nonevent):
+        baseline_entry["relative_width_mean_nonevent"] = baseline_mean_relative_width_nonevent
+    if np.isfinite(baseline_abs_width_event_ratio):
+        baseline_entry["abs_width_event_ratio"] = baseline_abs_width_event_ratio
+    baseline_entry["event_pairs"] = baseline_event_pairs
+    baseline_entry["non_event_pairs"] = baseline_nonevent_pairs
+    # Absolute width splits
     if np.isfinite(baseline_median_width):
         baseline_entry["median_W"] = baseline_median_width
     if np.isfinite(baseline_mean_width):
         baseline_entry["mean_W"] = baseline_mean_width
     if np.isfinite(baseline_p90_width):
         baseline_entry["p90_W"] = baseline_p90_width
+    if np.isfinite(baseline_median_W_event):
+        baseline_entry["median_W_event"] = baseline_median_W_event
+    if np.isfinite(baseline_median_W_nonevent):
+        baseline_entry["median_W_nonevent"] = baseline_median_W_nonevent
+    if np.isfinite(baseline_mean_W_event):
+        baseline_entry["mean_W_event"] = baseline_mean_W_event
+    if np.isfinite(baseline_mean_W_nonevent):
+        baseline_entry["mean_W_nonevent"] = baseline_mean_W_nonevent
+    if np.isfinite(baseline_p90_W_event):
+        baseline_entry["p90_W_event"] = baseline_p90_W_event
+    if np.isfinite(baseline_p90_W_nonevent):
+        baseline_entry["p90_W_nonevent"] = baseline_p90_W_nonevent
     if np.isfinite(baseline_coverage_fraction):
         baseline_entry["coverage_fraction"] = baseline_coverage_fraction
     if baseline_summary:
