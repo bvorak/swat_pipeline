@@ -33,8 +33,11 @@ Your job is to understand and extend the existing pipeline without creating a pa
 ## Notebook Edit Safety (Persistence + UI Sync)
 - Treat notebooks as dual-state artifacts: on-disk JSON and in-editor in-memory model can diverge.
 - Before editing any notebook, always refresh the latest notebook structure with a notebook summary call and target current cells, not stale ids.
-- Prefer notebook-aware edits (`edit_notebook_file`) for normal changes so VS Code UI updates in place.
-- After every notebook edit batch, verify persistence by reading notebook content from disk (`read_file`) and checking for the expected markers/keys.
+- **Primary edit method**: Use `replace_string_in_file` (or `multi_replace_string_in_file` for independent edits) directly on the `.ipynb` file. VS Code's decoded notebook view lets these tools match cell source text verbatim, and edits land in both the editor model and the on-disk JSON in one step.
+- **Immediately after every edit batch**: Run `workbench.action.files.save` via `run_vscode_command` to guarantee the in-memory model is flushed to disk. Do not skip this step.
+- **Verify persistence**: After saving, run `Select-String -Path <notebook.ipynb> -Pattern "<unique_marker>"` in the terminal against the raw `.ipynb` file to confirm the edit is present on disk. Choose a short, unique substring from the new code as the marker.
+- Do **not** default to `edit_notebook_file` — it updates only the in-memory model and can silently fail to persist. Use it only when `replace_string_in_file` cannot match (e.g., entirely new cells).
+- If `replace_string_in_file` fails to match (cell IDs or content shifted), refresh the notebook summary, re-read the target region, and retry with updated context.
 - If notebook-aware edits appear successful but disk content does not reflect the change, fall back to a direct JSON patch script that updates the notebook file deterministically.
 - After fallback patching, re-read from disk and explicitly confirm expected markers are present.
 - Warn the user that reopening the notebook tab may be required when the UI model was stale.
