@@ -55,11 +55,15 @@ def run_monte_carlo(
     # New: ensure aggressive replacement of inputs prior to run
     preclean_input_globs: Optional[List[str]] = None,
     preclean_linked_inputs: bool = False,
+    max_retries: int = 0,
+    retry_delay: float = 1.0,
 ) -> List[MonteCarloResult]:
     """Run N Monte Carlo realizations using provided hooks and capture provenance.
 
     - aggregator: called once to produce base_data (e.g., aggregated HRU values)
     - transforms: sequence of callables; each writes files under a per-realization folder and returns paths written
+    - max_retries: number of additional model-run attempts per realization after an initial failure (0 = no retry)
+    - retry_delay: seconds to wait between retry attempts
     """
     log = get_logger(__name__, config)
     base_txtinout = Path(base_txtinout).resolve()
@@ -234,6 +238,8 @@ def run_monte_carlo(
             force_recreate_workspace=force_recreate_workspace,
             preclean_input_globs=preclean_input_globs,
             preclean_linked_inputs=preclean_linked_inputs,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
 
         for br in batch_results:

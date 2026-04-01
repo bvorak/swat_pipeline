@@ -180,6 +180,8 @@ def run_realizations_batch(
     # New: aggressively remove selected input files before linking to avoid stale usage
     preclean_input_globs: Optional[list[str]] = None,
     preclean_linked_inputs: bool = False,
+    max_retries: int = 0,
+    retry_delay: float = 1.0,
 ) -> list[RealizationRunResult]:
     """
     Run a base SWAT/SWAT+ model for several realizations by linking select files.
@@ -202,6 +204,8 @@ def run_realizations_batch(
     - prefer_link: 'symlink' (default) or 'hardlink'. Falls back automatically; last resort is copy
     - results_parent_name: name of the subfolder created inside each realization to store outputs
     - clean_outputs_before_run: delete any previous outputs matching outputs_to_copy in the workspace
+    - max_retries: number of additional model-run attempts per realization after an initial failure (0 = no retry)
+    - retry_delay: seconds to wait between retry attempts
     """
     import re
 
@@ -280,6 +284,8 @@ def run_realizations_batch(
             timeout=timeout,
             expect_plus=expect_plus,
             config=config,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
 
         base_outputs_dir = _resolve_outputs_dir(base.parent, base_run_name)
@@ -475,6 +481,8 @@ def run_realizations_batch(
             timeout=timeout,
             expect_plus=expect_plus,
             config=config,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
 
         # Prepare outputs destination

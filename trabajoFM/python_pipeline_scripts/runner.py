@@ -39,6 +39,8 @@ def run_swat(
     timeout: Optional[int] = None,
     expect_plus: bool = False,
     config: Optional[Dict[str, Any]] = None,
+    max_retries: int = 0,
+    retry_delay: float = 1.0,
 ) -> RunnerResult:
     """
     Run a SWAT/SWAT+ model by invoking the executable with cwd=TxtInOut.
@@ -48,6 +50,8 @@ def run_swat(
     - timeout: optional seconds to kill the run if it hangs
     - expect_plus: set True if you know it’s SWAT+ (changes default exe name)
     - config: optional repo config to enable file logging to config/logs per settings
+    - max_retries: number of additional attempts after an initial failure (0 = no retry)
+    - retry_delay: seconds to wait between retry attempts
 
     Returns RunnerResult with success flag, returncode, paths to captured stdio, and message.
     """
@@ -129,49 +133,63 @@ def run_swat(
     stdout_path = txtinout / "_swat_stdout.txt"
     stderr_path = txtinout / "_swat_stderr.txt"
 
-    t0 = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            [str(exe)],
-            cwd=str(txtinout),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
+    attempts = 1 + max(0, max_retries)
+    last_result = RunnerResult(False, 1, exe, txtinout, message="No run attempt completed")
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            log.info("Retrying SWAT run (attempt %s/%s) after %.1fs delay", attempt, attempts, retry_delay)
+            time.sleep(retry_delay)
+
+        t0 = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                [str(exe)],
+                cwd=str(txtinout),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            elapsed = time.perf_counter() - t0
+            stdout_path.write_text(e.stdout or "", encoding="utf-8", errors="ignore") if e.stdout else None
+            stderr_path.write_text(e.stderr or "", encoding="utf-8", errors="ignore") if e.stderr else None
+            msg = f"SWAT timed out after {timeout}s"
+            log.error(msg)
+            last_result = RunnerResult(False, 124, exe, txtinout, stdout_path, stderr_path, msg, elapsed)
+            continue
+        except FileNotFoundError as e:
+            elapsed = time.perf_counter() - t0
+            msg = f"Executable not found or not runnable: {exe} ({e})"
+            log.error(msg)
+            # No point retrying if the executable cannot be found
+            return RunnerResult(False, 127, exe, txtinout, None, None, msg, elapsed)
+        except Exception as e:
+            elapsed = time.perf_counter() - t0
+            msg = f"Unexpected error running SWAT: {e}"
+            log.exception(msg)
+            last_result = RunnerResult(False, 1, exe, txtinout, None, None, msg, elapsed)
+            continue
+
         elapsed = time.perf_counter() - t0
-        stdout_path.write_text(e.stdout or "", encoding="utf-8", errors="ignore") if e.stdout else None
-        stderr_path.write_text(e.stderr or "", encoding="utf-8", errors="ignore") if e.stderr else None
-        msg = f"SWAT timed out after {timeout}s"
-        log.error(msg)
-        return RunnerResult(False, 124, exe, txtinout, stdout_path, stderr_path, msg, elapsed)
-    except FileNotFoundError as e:
-        elapsed = time.perf_counter() - t0
-        msg = f"Executable not found or not runnable: {exe} ({e})"
-        log.error(msg)
-        return RunnerResult(False, 127, exe, txtinout, None, None, msg, elapsed)
-    except Exception as e:
-        elapsed = time.perf_counter() - t0
-        msg = f"Unexpected error running SWAT: {e}"
-        log.exception(msg)
-        return RunnerResult(False, 1, exe, txtinout, None, None, msg, elapsed)
 
-    elapsed = time.perf_counter() - t0
+        # Persist stdio for later inspection
+        stdout_path.write_text(completed.stdout or "", encoding="utf-8", errors="ignore")
+        stderr_path.write_text(completed.stderr or "", encoding="utf-8", errors="ignore")
 
-    # Persist stdio for later inspection
-    stdout_path.write_text(completed.stdout or "", encoding="utf-8", errors="ignore")
-    stderr_path.write_text(completed.stderr or "", encoding="utf-8", errors="ignore")
+        if completed.returncode != 0:
+            msg = (
+                "SWAT run failed. See _swat_stdout.txt/_swat_stderr.txt and .std/.out files for details."
+            )
+            log.error("%s | returncode=%s", msg, completed.returncode)
+            last_result = RunnerResult(False, completed.returncode, exe, txtinout, stdout_path, stderr_path, msg, elapsed)
+            continue
 
-    if completed.returncode != 0:
-        msg = (
-            "SWAT run failed. See _swat_stdout.txt/_swat_stderr.txt and .std/.out files for details."
-        )
-        log.error("%s | returncode=%s", msg, completed.returncode)
-        return RunnerResult(False, completed.returncode, exe, txtinout, stdout_path, stderr_path, msg, elapsed)
+        log.info("SWAT completed successfully in %.2fs", elapsed)
+        return RunnerResult(True, completed.returncode, exe, txtinout, stdout_path, stderr_path, "OK", elapsed)
 
-    log.info("SWAT completed successfully in %.2fs", elapsed)
-    return RunnerResult(True, completed.returncode, exe, txtinout, stdout_path, stderr_path, "OK", elapsed)
+    # All attempts exhausted
+    return last_result
 
 
 def run_swat_model(config: Dict[str, Any], group: str = "baseline", expect_plus: bool = False) -> RunnerResult:
