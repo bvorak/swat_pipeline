@@ -2280,8 +2280,8 @@ def compute_stats_for_view(
             max_vals = raw_max_series.reindex(idx).to_numpy(dtype=float)
             maxmin_width = max_vals - min_vals
             denom_median_maxmin = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
-            maxmin_over_median = maxmin_width / denom_median_maxmin
-            maxmin_over_median = maxmin_over_median[np.isfinite(maxmin_over_median)]
+            maxmin_over_median_all = maxmin_width / denom_median_maxmin
+            maxmin_over_median = maxmin_over_median_all[np.isfinite(maxmin_over_median_all)]
             if maxmin_over_median.size:
                 baseline_median_maxmin_over_median = float(np.nanmedian(maxmin_over_median))
                 baseline_mean_maxmin_over_median = float(np.nanmean(maxmin_over_median))
@@ -2312,12 +2312,12 @@ def compute_stats_for_view(
                     return sub[np.isfinite(sub)]
 
                 if _bl_ev_mask is not None and np.any(_bl_ev_mask):
-                    ev_maxmin = _bl_split(maxmin_over_median, _bl_ev_mask)
+                    ev_maxmin = _bl_split(maxmin_over_median_all, _bl_ev_mask)
                     if ev_maxmin.size:
                         baseline_median_maxmin_over_median_event = float(np.nanmedian(ev_maxmin))
                         baseline_mean_maxmin_over_median_event = float(np.nanmean(ev_maxmin))
                 if _bl_nev_mask is not None and np.any(_bl_nev_mask):
-                    nev_maxmin = _bl_split(maxmin_over_median, _bl_nev_mask)
+                    nev_maxmin = _bl_split(maxmin_over_median_all, _bl_nev_mask)
                     if nev_maxmin.size:
                         baseline_median_maxmin_over_median_nonevent = float(np.nanmedian(nev_maxmin))
                         baseline_mean_maxmin_over_median_nonevent = float(np.nanmean(nev_maxmin))
