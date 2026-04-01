@@ -2217,8 +2217,15 @@ def compute_stats_for_view(
         "all_days": int(event_idx_all.size) if event_idx_all is not None else 0,
     }
 
-    baseline_relative_width = float("nan")  # median-based relative width (min-max/median)
-    baseline_mean_relative_width = float("nan")  # mean-based relative width (min-max/mean)
+    baseline_relative_width = float("nan")  # median-based relative width (p95-p05/median)
+    baseline_mean_relative_width = float("nan")  # mean-based relative width (p95-p05/mean)
+    # New: median/mean of (max-min)/median
+    baseline_median_maxmin_over_median = float("nan")
+    baseline_mean_maxmin_over_median = float("nan")
+    baseline_median_maxmin_over_median_event = float("nan")
+    baseline_mean_maxmin_over_median_event = float("nan")
+    baseline_median_maxmin_over_median_nonevent = float("nan")
+    baseline_mean_maxmin_over_median_nonevent = float("nan")
     # Event/nonevent splits of genuine ensemble spread
     baseline_relative_width_event = float("nan")
     baseline_relative_width_nonevent = float("nan")
@@ -2245,8 +2252,10 @@ def compute_stats_for_view(
         and not baseline_summary_series.empty
         and isinstance(p05_series_full, pd.Series)
         and isinstance(p95_series_full, pd.Series)
+        and isinstance(raw_min_series, pd.Series)
+        and isinstance(raw_max_series, pd.Series)
     ):
-        idx = baseline_summary_series.index.intersection(p05_series_full.index).intersection(p95_series_full.index)
+        idx = baseline_summary_series.index.intersection(p05_series_full.index).intersection(p95_series_full.index).intersection(raw_min_series.index).intersection(raw_max_series.index)
         if len(idx) > 0:
             base_subset = baseline_summary_series.reindex(idx).to_numpy(dtype=float)
             width_vals = (
@@ -2265,6 +2274,53 @@ def compute_stats_for_view(
             rel_vals_mean = rel_vals_mean[np.isfinite(rel_vals_mean)]
             if rel_vals_mean.size:
                 baseline_mean_relative_width = float(np.nanmean(rel_vals_mean))
+
+            # New: (max-min)/median, all days
+            min_vals = raw_min_series.reindex(idx).to_numpy(dtype=float)
+            max_vals = raw_max_series.reindex(idx).to_numpy(dtype=float)
+            maxmin_width = max_vals - min_vals
+            denom_median_maxmin = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
+            maxmin_over_median = maxmin_width / denom_median_maxmin
+            maxmin_over_median = maxmin_over_median[np.isfinite(maxmin_over_median)]
+            if maxmin_over_median.size:
+                baseline_median_maxmin_over_median = float(np.nanmedian(maxmin_over_median))
+                baseline_mean_maxmin_over_median = float(np.nanmean(maxmin_over_median))
+
+            # Event/non-event splits for (max-min)/median
+            _bl_idx_days = None
+            if isinstance(idx, pd.DatetimeIndex):
+                _bl_idx_days = idx.floor('D')
+            else:
+                try:
+                    _bl_idx_days = pd.DatetimeIndex(idx).floor('D')
+                except Exception:
+                    pass
+            if _bl_idx_days is not None:
+                _bl_ev_mask = None
+                _bl_nev_mask = None
+                if event_idx_buffered is not None:
+                    _bl_ev_mask = _bl_idx_days.isin(event_idx_buffered)
+                    if event_idx_non is not None:
+                        _bl_nev_mask = _bl_idx_days.isin(event_idx_non)
+                    else:
+                        _bl_nev_mask = ~_bl_ev_mask
+                elif event_idx_non is not None:
+                    _bl_nev_mask = _bl_idx_days.isin(event_idx_non)
+
+                def _bl_split(arr, mask):
+                    sub = arr[mask]
+                    return sub[np.isfinite(sub)]
+
+                if _bl_ev_mask is not None and np.any(_bl_ev_mask):
+                    ev_maxmin = _bl_split(maxmin_over_median, _bl_ev_mask)
+                    if ev_maxmin.size:
+                        baseline_median_maxmin_over_median_event = float(np.nanmedian(ev_maxmin))
+                        baseline_mean_maxmin_over_median_event = float(np.nanmean(ev_maxmin))
+                if _bl_nev_mask is not None and np.any(_bl_nev_mask):
+                    nev_maxmin = _bl_split(maxmin_over_median, _bl_nev_mask)
+                    if nev_maxmin.size:
+                        baseline_median_maxmin_over_median_nonevent = float(np.nanmedian(nev_maxmin))
+                        baseline_mean_maxmin_over_median_nonevent = float(np.nanmean(nev_maxmin))
 
             # ── Event / non-event splits of ensemble spread ──
             _bl_idx_days = None
@@ -2588,6 +2644,19 @@ def compute_stats_for_view(
     stats["event_context"] = event_stats_summary
 
     baseline_entry = overlay_comparison.setdefault("__baseline__", {})
+    # New: (max-min)/median metrics
+    if np.isfinite(baseline_median_maxmin_over_median):
+        baseline_entry["median_maxmin_over_median"] = baseline_median_maxmin_over_median
+    if np.isfinite(baseline_mean_maxmin_over_median):
+        baseline_entry["mean_maxmin_over_median"] = baseline_mean_maxmin_over_median
+    if np.isfinite(baseline_median_maxmin_over_median_event):
+        baseline_entry["median_maxmin_over_median_event"] = baseline_median_maxmin_over_median_event
+    if np.isfinite(baseline_mean_maxmin_over_median_event):
+        baseline_entry["mean_maxmin_over_median_event"] = baseline_mean_maxmin_over_median_event
+    if np.isfinite(baseline_median_maxmin_over_median_nonevent):
+        baseline_entry["median_maxmin_over_median_nonevent"] = baseline_median_maxmin_over_median_nonevent
+    if np.isfinite(baseline_mean_maxmin_over_median_nonevent):
+        baseline_entry["mean_maxmin_over_median_nonevent"] = baseline_mean_maxmin_over_median_nonevent
     if np.isfinite(baseline_relative_width):
         baseline_entry["relative_width"] = baseline_relative_width
     # Mean-based relative width (if computed)
