@@ -5275,6 +5275,7 @@ def export_dashboard_stats_from_config(
         choose_best_lag_by=str(cfg.get("lag_metric", "r")),
         band_data=band_groups,
         event_context=event_context,
+        extended_stats=bool(cfg.get("extended_stats", True)),
     )
 
     dashboard_state = {
