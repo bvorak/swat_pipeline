@@ -1251,6 +1251,7 @@ def fan_compare_simulations_dashboard(
         flow_series: Optional[pd.Series],
         template_name: str,
         y_axis_title: str,
+        measured_flow_series: Optional[pd.Series] = None,
     ) -> List[widgets.Widget]:
         """
         Build and return a list of Plotly FigureWidget objects representing simulation load and flow duration curves.
@@ -1720,12 +1721,34 @@ def fan_compare_simulations_dashboard(
                         x=x_flow,
                         y=y_flow_ordered,
                         mode="lines",
-                        name="Simulation flow",
+                        name="Simulated flow",
                         line=dict(color="#17becf", width=2),
                     )
                 )
+                # Overlay measured water flow duration curve when available
+                if isinstance(measured_flow_series, pd.Series) and not measured_flow_series.empty:
+                    try:
+                        mf = measured_flow_series.dropna()
+                        if not mf.empty:
+                            x_mf, y_mf = _dcfs(mf, levels)
+                            if np.any(np.isfinite(y_mf)):
+                                try:
+                                    y_mf_ordered = np.sort(y_mf)
+                                except Exception:
+                                    y_mf_ordered = y_mf
+                                fig_fdc.add_trace(
+                                    go.Scatter(
+                                        x=x_mf,
+                                        y=y_mf_ordered,
+                                        mode="lines",
+                                        name="Measured flow",
+                                        line=dict(color="#1f77b4", width=2, dash="dash"),
+                                    )
+                                )
+                    except Exception:
+                        pass
                 fig_fdc.update_layout(
-                    title="Simulation Flow Duration Curve",
+                    title="Flow Duration Curve",
                     xaxis_title=r"% of Time where flow is Exceeded",
                     yaxis_title="Flow (m3/day)",
                 )
@@ -1936,6 +1959,7 @@ def fan_compare_simulations_dashboard(
         # Maintain filtered (stats) and unfiltered (plot) collections
         per_sim: Dict[str, pd.Series] = {}
         per_sim_plot: Dict[str, pd.Series] = {}
+        _raw_daily_end: Optional[pd.Timestamp] = None  # track pre-resample daily range
         for sim_name, df in sim_dfs.items():
             # Build subset depending on variable (derived vs direct)
             if var == SYN_VAR:
@@ -1970,6 +1994,13 @@ def fan_compare_simulations_dashboard(
                 _dbg_df_info(sub, f"{sim_name} after season filter")
             # Keep a copy BEFORE event-day filtering for plotting
             sub_plot = sub.copy()
+            # Track the raw daily date range (pre-resample) for incomplete-period detection
+            try:
+                _sp_max = pd.Timestamp(sub_plot.index.max()).normalize()
+                if _raw_daily_end is None or _sp_max > _raw_daily_end:
+                    _raw_daily_end = _sp_max
+            except Exception:
+                pass
             if selected_days_set is not None:
                 try:
                     day_mask = sub.index.floor('D').isin(list(selected_days_set))
@@ -2076,6 +2107,22 @@ def fan_compare_simulations_dashboard(
         # Align series to a common time index (union) and build 2D matrix (T x N)
         aligned_df = pd.concat(per_sim.values(), axis=1).sort_index()
         aligned_df.index = pd.to_datetime(aligned_df.index, utc=False)
+
+        # Drop incomplete last aggregate period (non-daily only).
+        # If the raw daily data doesn't cover the full last resampled period,
+        # truncate so the graph stops before the incomplete bin.
+        _is_daily_freq = freq_str.upper().endswith('D') and int(''.join(c for c in freq_str if c.isdigit()) or '1') == 1
+        if not _is_daily_freq and _raw_daily_end is not None and len(aligned_df) > 1:
+            try:
+                # The resampled index label marks the period end (e.g. month-end, year-end).
+                # If the raw daily data doesn't reach that date, the period is incomplete.
+                _last_label = pd.Timestamp(aligned_df.index[-1]).normalize()
+                if _raw_daily_end < _last_label:
+                    aligned_df = aligned_df.iloc[:-1]
+                    _dbg("incomplete_period_trim", dict(dropped=str(_last_label.date()), raw_end=str(_raw_daily_end.date())))
+            except Exception as _e_trim:
+                _dbg("incomplete_period_trim failed", str(_e_trim))
+
         arr = aligned_df.to_numpy(dtype=float)  # shape: (T, N)
         # Ensure x-axis values are JSON-safe strings to avoid timezone packing issues in Jupyter
         def _to_plotly_x(idx: pd.Index) -> List[str]:
@@ -2182,11 +2229,21 @@ def fan_compare_simulations_dashboard(
             else:
                 aligned_df_plot = aligned_df.copy()
             aligned_df_plot.index = pd.to_datetime(aligned_df_plot.index, utc=False)
+            # Trim incomplete last aggregate period (same logic as aligned_df)
+            if not _is_daily_freq and _raw_daily_end is not None and len(aligned_df_plot) > 1:
+                try:
+                    _lp = pd.Timestamp(aligned_df_plot.index[-1]).normalize()
+                    if _raw_daily_end < _lp:
+                        aligned_df_plot = aligned_df_plot.iloc[:-1]
+                except Exception:
+                    pass
             arr_plot = aligned_df_plot.to_numpy(dtype=float)
             percs_plot = [5, 10, 25, 50, 60, 75, 90, 95]
             qs_plot = np.nanpercentile(arr_plot, percs_plot, axis=1) if arr_plot.shape[1] else np.full((len(percs_plot), 0), np.nan)
             q_plot = {p: qs_plot[i, :] if arr_plot.shape[1] else np.array([]) for i, p in enumerate(percs_plot)}
             _last["aligned_df_plot"] = aligned_df_plot
+            # Effective plot end (used to clip overlay resampled series so they don't extend past trimmed main data)
+            _plot_end_ts = pd.Timestamp(aligned_df_plot.index[-1]) if len(aligned_df_plot) else None
             # Compute per-timestamp min/max for UNFILTERED data so duration curve band
             # matches the quantile lines (avoids mismatch under Non-event filtering)
             try:
@@ -2219,6 +2276,7 @@ def fan_compare_simulations_dashboard(
             arr_plot = arr
             q_plot = q
             _last["y_fixed"] = _last.get("y_fixed", None)
+            _plot_end_ts = pd.Timestamp(aligned_df.index[-1]) if len(aligned_df) else None
 
         # Per-point human-friendly hover scaling (k = thousands, M = millions)
         # Keeps numbers readable and avoids misleading labels for small values.
@@ -2286,8 +2344,8 @@ def fan_compare_simulations_dashboard(
                             ))
                         fig.layout.shapes = tuple(remaining + new_shapes)
                         _last['filtered_out_overlay'] = blocks
-                    # Legend proxy (avoid duplicates)
-                    if not any(getattr(tr, 'name', '') == 'Filtered (excluded from stats)' for tr in fig.data):
+                    # Legend proxy: only show when there are actual excluded blocks
+                    if blocks and not any(getattr(tr, 'name', '') == 'Filtered (excluded from stats)' for tr in fig.data):
                         fig.add_trace(go.Scatter(
                             x=[None], y=[None], mode='markers',
                             marker=dict(size=10, color='rgba(90,90,90,0.30)', symbol='square'),
@@ -2313,6 +2371,7 @@ def fan_compare_simulations_dashboard(
                 finite = np.isfinite(col)
                 cd[:, j] = np.where(finite, col, None)
             return cd
+        _deferred_central_trace = None  # median or mean trace, added after flows/erosion
         if n_runs_here >= min_runs_for_bands:
             # Use None values for invalid points to prevent triangular fill artifacts
             x_arr = np.array(x_dt, dtype=object)
@@ -2352,13 +2411,13 @@ def fan_compare_simulations_dashboard(
                     fill="tonexty", fillcolor=rgba(0.28),
                     name="p25-p75", showlegend=True, hoverinfo="skip"
                 ))
-                # Median
-                fig.add_trace(go.Scatter(
+                # Median — deferred: added after flows/erosion for correct z-order
+                _deferred_central_trace = go.Scatter(
                     x=x_dt, y=_nan_to_none(q_plot[50]), mode="lines", line=dict(color="black", width=2),
                     name="median",
                     customdata=_make_customdata_multi(q_plot[5], q_plot[25], q_plot[50], q_plot[75], q_plot[95]),
                     hovertemplate=_median_hovertemplate(cb_show_names_in_tooltip.value, _run_label),
-                ))
+                )
         else:
             # Too few runs: show min-max envelope + mean line
             # Only compute envelope where we have sufficient data (at least 50% of runs)
@@ -2400,12 +2459,13 @@ def fan_compare_simulations_dashboard(
                     max_data[:, 0], max_data[:, 1]    # max value, max unit
                 ])
                 
-                fig.add_trace(go.Scatter(
+                # Mean — deferred: added after flows/erosion for correct z-order
+                _deferred_central_trace = go.Scatter(
                     x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
                     name="mean",
                     customdata=combined_customdata,
                     hovertemplate=("max: %{customdata[4]:.8g}%{customdata[5]}<br>mean: %{customdata[2]:.8g}%{customdata[3]}<br>min: %{customdata[0]:.8g}%{customdata[1]}<extra></extra>"),
-                ))
+                )
 
         # Store band data for comprehensive statistics (grouped by series)
         band_groups: Dict[str, Dict[str, pd.Series]] = {}
@@ -2623,6 +2683,9 @@ def fan_compare_simulations_dashboard(
                         s_ex = _resample_series(sub, base_col, freq=_make_freq_string(dd_freq.value, sl_bin.value), how=dd_method.value,
                                                 flow_col=extra_flow_col if extra_flow_col in sub.columns else None)
                     s_ex = s_ex.dropna()
+                    # Clip to main graph end (drop incomplete trailing aggregate)
+                    if _plot_end_ts is not None and not s_ex.empty:
+                        s_ex = s_ex.loc[s_ex.index <= _plot_end_ts]
                     if s_ex.empty:
                         continue
                     # Build filtered series for stats correlations
@@ -2780,6 +2843,7 @@ def fan_compare_simulations_dashboard(
         # Measured overlay: per category -> per station
         if measured_present and cb_meas_on.value and isinstance(measured_use_df, pd.DataFrame) and not measured_use_df.empty:
             _meas_for_stats: List[pd.Series] = []
+            _deferred_diamond_traces: list = []  # added last for z-order
             # Color map for stations across categories (consistent colors per station)
             palette = [
                 "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2",
@@ -2882,6 +2946,9 @@ def fan_compare_simulations_dashboard(
                     else:
                         s_aggr = s_daily.resample(freq_str).mean()
                     s_plot = s_aggr.dropna()
+                    # Clip to main graph end (drop incomplete trailing aggregate)
+                    if _plot_end_ts is not None and not s_plot.empty:
+                        s_plot = s_plot.loc[s_plot.index <= _plot_end_ts]
                     _dbg_df_info(s_plot, f"measured {chem_name} st={st} resampled")
                     if s_plot.empty:
                         continue
@@ -2962,7 +3029,7 @@ def fan_compare_simulations_dashboard(
                             if sel_index is None or len(sel_index) == 0:
                                 return
                             ss = combined_series.loc[sel_index]
-                            fig.add_trace(go.Scatter(
+                            _deferred_diamond_traces.append(go.Scatter(
                                 x=_to_plotly_x(ss.index), y=ss.values, mode="markers",
                                 name=f"{base_label} ({name_suffix})",
                                 marker=dict(symbol="diamond", size=11, color=color, line=dict(width=0.6, color="#333")),
@@ -2975,7 +3042,7 @@ def fan_compare_simulations_dashboard(
                         _add_pts(orange_idx, "#ff7f0e", "deviation")
                         _add_pts(green_idx, color_use, "kept")
                     except Exception:
-                        fig.add_trace(go.Scatter(
+                        _deferred_diamond_traces.append(go.Scatter(
                             x=_to_plotly_x(combined_series.index), y=combined_series.values, mode="markers",
                             name=base_label,
                             marker=dict(symbol="diamond", size=11, color=station_colors.get(st, "#2ca02c"), line=dict(width=0.6, color="#333")),
@@ -3017,6 +3084,9 @@ def fan_compare_simulations_dashboard(
                 else:
                     s_flow = s_daily.resample(freq_str).mean()
                 s_flow = s_flow.dropna()
+                # Clip to main graph end (drop incomplete trailing period already trimmed from simulation data)
+                if _plot_end_ts is not None and not s_flow.empty:
+                    s_flow = s_flow.loc[s_flow.index <= _plot_end_ts]
                 if not s_flow.empty:
                     _last["flow_series"] = s_flow
                     # y2 axis range
@@ -3040,12 +3110,6 @@ def fan_compare_simulations_dashboard(
                         hovertemplate="Water flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
                         visible=True,
                     ))
-                    # Reorder traces so water flow draws behind others (background)
-                    try:
-                        if len(fig.data) >= 1:
-                            fig.data = (fig.data[-1],) + fig.data[:-1]
-                    except Exception:
-                        pass
             except Exception:
                 _last["flow_series"] = None
 
@@ -3100,6 +3164,10 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         s_swat_mean = None
                 if s_swat_mean is not None and not s_swat_mean.empty:
+                    # Clip to main graph end (drop incomplete trailing period)
+                    if _plot_end_ts is not None:
+                        s_swat_mean = s_swat_mean.loc[s_swat_mean.index <= _plot_end_ts]
+                if s_swat_mean is not None and not s_swat_mean.empty:
                     _last["swat_flow_series"] = s_swat_mean
                     # Ensure y2 axis exists and add SWAT flow trace
                     fig.update_layout(yaxis2=dict(
@@ -3115,17 +3183,6 @@ def fan_compare_simulations_dashboard(
                         hovertemplate="SWAT flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
                         visible=True,
                     ))
-                    # Reorder: SWAT flow behind other traces but in front of measured water flow
-                    try:
-                        if len(fig.data) >= 2:
-                            swat_tr = fig.data[-1]
-                            rest = fig.data[:-1]
-                            # measured water flow is at index 0; insert SWAT right after it
-                            fig.data = (rest[0], swat_tr) + rest[1:]
-                        elif len(fig.data) == 1:
-                            pass  # only trace, nothing to reorder
-                    except Exception:
-                        pass
         except Exception:
             _last["swat_flow_series"] = None
 
@@ -3212,6 +3269,10 @@ def fan_compare_simulations_dashboard(
                 s_ero_mean.name = "erosion_mean"
                 s_ero_mean = s_ero_mean.dropna()
             if s_ero_mean is not None and not s_ero_mean.empty:
+                # Clip to main graph end (drop incomplete trailing period)
+                if _plot_end_ts is not None:
+                    s_ero_mean = s_ero_mean.loc[s_ero_mean.index <= _plot_end_ts]
+            if s_ero_mean is not None and not s_ero_mean.empty:
                 _last["erosion_series"] = s_ero_mean
                 # Configure y3 axis range
                 ev = s_ero_mean.values[np.isfinite(s_ero_mean.values)]
@@ -3260,12 +3321,7 @@ def fan_compare_simulations_dashboard(
                     hovertemplate="Erosion: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
                     visible=True,
                 ))
-                # Reorder traces so erosion draws behind others (background)
-                try:
-                    if len(fig.data) >= 1:
-                        fig.data = (fig.data[-1],) + fig.data[:-1]
-                except Exception:
-                    pass
+                # (trace reorder handled by consolidated reorder block below)
             else:
                 # Requested but couldn't find valid sediment columns across simulations
                 try:
@@ -3280,6 +3336,22 @@ def fan_compare_simulations_dashboard(
             except Exception:
                 pass
             _last["erosion_series"] = None
+
+        # Add deferred central trace (median or mean) AFTER flows/erosion
+        # so it draws on top of them in the Plotly rendering order.
+        if _deferred_central_trace is not None:
+            fig.add_trace(_deferred_central_trace)
+
+        # Add deferred measured diamond traces last (on top of everything)
+        try:
+            for _dt in _deferred_diamond_traces:
+                fig.add_trace(_dt)
+        except NameError:
+            pass  # _deferred_diamond_traces not defined (no measured overlay)
+
+        # -- stale reorder block kept as no-op safety comment --
+        # The correct z-order is now enforced by the add_trace() call
+        # sequence above.  No post-hoc fig.data reassignment needed.
 
         # Save measured series for stats box
         if measured_present and cb_meas_on.value:
@@ -3762,7 +3834,9 @@ def fan_compare_simulations_dashboard(
                     ext_flow_valid=isinstance(_last.get("flow_series"), pd.Series) and not (_last.get("flow_series") is None or _last.get("flow_series").empty)
                 ))
                 y_axis_title = _last.get("y_axis_title", "Value")
-                widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title)
+                # Pass measured water flow for the FDC overlay (only when flow toggle is on)
+                meas_flow_local = _last.get("flow_series") if cb_flow_on.value else None
+                widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title, measured_flow_series=meas_flow_local)
                 # Optionally add flow-stratified curve (min/mean/max by flow exceedance) using current ensemble
                 if cb_flow_strat.value:
                     try:
@@ -4904,6 +4978,7 @@ def export_dashboard_stats_from_config(
     syn_var = "KJELDAHL_OUTkg"
     derived_components = ("ORGN_OUTkg", "NH4_OUTkg")
     per_sim: Dict[str, pd.Series] = {}
+    _raw_daily_end_hl: Optional[pd.Timestamp] = None  # track pre-resample daily range
     for sim_name, df in sim_dfs.items():
         if not isinstance(df, pd.DataFrame) or df.empty:
             continue
@@ -4929,6 +5004,13 @@ def export_dashboard_stats_from_config(
             sub = _slice_time(sub, cfg.get("start"), cfg.get("end"))
         if season_months:
             sub = _filter_season(sub, season_months)
+        # Track raw daily end before event filtering for incomplete-period detection
+        try:
+            _sp_max_hl = pd.Timestamp(sub.index.max()).normalize()
+            if _raw_daily_end_hl is None or _sp_max_hl > _raw_daily_end_hl:
+                _raw_daily_end_hl = _sp_max_hl
+        except Exception:
+            pass
         if selected_days_set is not None:
             mask = sub.index.floor("D").isin(list(selected_days_set))
             sub = sub.loc[mask]
@@ -4974,6 +5056,17 @@ def export_dashboard_stats_from_config(
 
     aligned_df = pd.concat(per_sim.values(), axis=1).sort_index()
     aligned_df.index = pd.to_datetime(aligned_df.index, utc=False)
+
+    # Drop incomplete last aggregate period (non-daily only), same logic as interactive dashboard
+    _is_daily_freq_hl = freq_str.upper().endswith('D') and int(''.join(c for c in freq_str if c.isdigit()) or '1') == 1
+    if not _is_daily_freq_hl and _raw_daily_end_hl is not None and len(aligned_df) > 1:
+        try:
+            _last_label_hl = pd.Timestamp(aligned_df.index[-1]).normalize()
+            if _raw_daily_end_hl < _last_label_hl:
+                aligned_df = aligned_df.iloc[:-1]
+        except Exception:
+            pass
+
     arr = aligned_df.to_numpy(dtype=float)
     if arr.shape[1] == 0:
         raise ValueError("No aligned data after resampling")

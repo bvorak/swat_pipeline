@@ -24,14 +24,6 @@ trabajoFM/notebooks/04_sensitivity_stats.pre_se_clip_20260402_181302.ipynb
 trabajoFM/notebooks/04_sensitivity_stats.pre_separator_patch_20260402_155416.ipynb
 trabajoFM/notebooks/04_sensitivity_stats.pre_errbar_patch_20260402_173824.ipynb
 trabajoFM/notebooks/03_dashboard_RCH_analysis.pre_reload_patch_20260402_170759.ipynb
-trabajoFM/python_pipeline_scripts/__pycache__/dashboard.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/__pycache__/stats.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/transforms/__pycache__/soil_chm.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/writers/__pycache__/__init__.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/writers/__pycache__/chm_reader.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/writers/__pycache__/sol_reader.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/__pycache__/dashboard.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/__pycache__/stats.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/transforms/__pycache__/soil_chm.cpython-312.pyc
-trabajoFM/python_pipeline_scripts/writers/__pycache__/__init__.cpython-312.pyc
+__pycache__/
+
 trabajoFM/python_pipeline_scripts/__pycache__/dashboard.cpython-312.pyc
