@@ -330,6 +330,7 @@ def fan_compare_simulations_dashboard(
     cb_autoscale_y_live = widgets.Checkbox(value=True, description="Auto-scale Y on zoom")
     cb_range_slider = widgets.Checkbox(value=True, description="Show range slider")
     cb_show_names_in_tooltip = widgets.Checkbox(value=False, description="Names in tooltip")
+    cb_show_ensemble = widgets.Checkbox(value=True, description="Show input scenarios")
 
     # Measured controls
     measured_present = measured_df is not None and isinstance(measured_df, pd.DataFrame) and not measured_df.empty
@@ -369,7 +370,7 @@ def fan_compare_simulations_dashboard(
 
     cb_meas_on = widgets.Checkbox(value=measured_present, description="Show measured")
     # Default ON when a water_flow_df is provided; we will auto-pick the column later
-    cb_flow_on = widgets.Checkbox(value=(isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty), description="Show water flow (m3/d)")
+    cb_flow_on = widgets.Checkbox(value=(isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty), description="Show Measured water flow (m3/d)")
     # SWAT avg flow availability and toggle (FLOW_OUT * 86400)
     def _has_swat_flow(_df: pd.DataFrame) -> bool:
         if not isinstance(_df, pd.DataFrame):
@@ -832,6 +833,8 @@ def fan_compare_simulations_dashboard(
             cb_show_names_in_tooltip.value = bool(ui_defaults.get("show_names_in_tooltip"))
         if isinstance(ui_defaults.get("range_slider"), bool):
             cb_range_slider.value = bool(ui_defaults.get("range_slider"))
+        if isinstance(ui_defaults.get("show_ensemble"), bool):
+            cb_show_ensemble.value = bool(ui_defaults.get("show_ensemble"))
         if isinstance(ui_defaults.get("show_diags"), bool):
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
         if isinstance(ui_defaults.get("flow_strat_curve"), bool):
@@ -1011,6 +1014,7 @@ def fan_compare_simulations_dashboard(
             "autoscale_y_live": cb_autoscale_y_live.value,
             "range_slider": cb_range_slider.value,
             "show_names_in_tooltip": cb_show_names_in_tooltip.value,
+            "show_ensemble": cb_show_ensemble.value,
             "show_diagnostics": cb_show_diags.value,
             "show_measured": cb_meas_on.value,
             "show_water_flow": cb_flow_on.value,
@@ -1616,7 +1620,7 @@ def fan_compare_simulations_dashboard(
                 # Extract unit from y_axis_title (e.g. "Concentration (mg/L)" -> "mg/L")
                 import re as _re_ldc
                 _unit_match = _re_ldc.search(r'\(([^)]+)\)', y_axis_title)
-                y_axis_final = _unit_match.group(1) if _unit_match else y_axis_title
+                y_axis_final = _unit_match.group(1) + " (log)" if _unit_match else y_axis_title
 
                 # Ensure x-axis shows 0 (high flows) to 100 (low flows) from left to right (standard orientation)
                 # Decide x-axis range: optionally clip to measured overlay extent if requested in ui_defaults
@@ -2323,37 +2327,38 @@ def fan_compare_simulations_dashboard(
             p75_masked = np.where(mask50, p75, np.nan)
             p25_masked = np.where(mask50, p25, np.nan)
             
-            # 90% band (p05..p95)
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(p95_masked), mode="lines",
-                line=dict(color=rgba(0.12), width=0.5),
-                name="p95", showlegend=False, hoverinfo="skip"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(p05_masked), mode="lines",
-                line=dict(color=rgba(0.12), width=0.5),
-                fill="tonexty", fillcolor=rgba(0.12),
-                name="p05-p95", showlegend=True, hoverinfo="skip"
-            ))
-            # 50% band (p25..p75)
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(p75_masked), mode="lines",
-                line=dict(color=rgba(0.28), width=0.5),
-                name="p75", showlegend=False, hoverinfo="skip"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(p25_masked), mode="lines",
-                line=dict(color=rgba(0.28), width=0.5),
-                fill="tonexty", fillcolor=rgba(0.28),
-                name="p25-p75", showlegend=True, hoverinfo="skip"
-            ))
-            # Median
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(q_plot[50]), mode="lines", line=dict(color="black", width=2),
-                name="median",
-                customdata=_make_customdata_multi(q_plot[5], q_plot[25], q_plot[50], q_plot[75], q_plot[95]),
-                hovertemplate=_median_hovertemplate(cb_show_names_in_tooltip.value, _run_label),
-            ))
+            if cb_show_ensemble.value:
+                # 90% band (p05..p95)
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(p95_masked), mode="lines",
+                    line=dict(color=rgba(0.12), width=0.5),
+                    name="p95", showlegend=False, hoverinfo="skip"
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(p05_masked), mode="lines",
+                    line=dict(color=rgba(0.12), width=0.5),
+                    fill="tonexty", fillcolor=rgba(0.12),
+                    name="p05-p95", showlegend=True, hoverinfo="skip"
+                ))
+                # 50% band (p25..p75)
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(p75_masked), mode="lines",
+                    line=dict(color=rgba(0.28), width=0.5),
+                    name="p75", showlegend=False, hoverinfo="skip"
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(p25_masked), mode="lines",
+                    line=dict(color=rgba(0.28), width=0.5),
+                    fill="tonexty", fillcolor=rgba(0.28),
+                    name="p25-p75", showlegend=True, hoverinfo="skip"
+                ))
+                # Median
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(q_plot[50]), mode="lines", line=dict(color="black", width=2),
+                    name="median",
+                    customdata=_make_customdata_multi(q_plot[5], q_plot[25], q_plot[50], q_plot[75], q_plot[95]),
+                    hovertemplate=_median_hovertemplate(cb_show_names_in_tooltip.value, _run_label),
+                ))
         else:
             # Too few runs: show min-max envelope + mean line
             # Only compute envelope where we have sufficient data (at least 50% of runs)
@@ -2372,34 +2377,35 @@ def fan_compare_simulations_dashboard(
                     vmin[sufficient_indices] = np.nanmin(arr_plot[sufficient_indices, :], axis=1)
                     vmax[sufficient_indices] = np.nanmax(arr_plot[sufficient_indices, :], axis=1)
                     vmean[sufficient_indices] = np.nanmean(arr_plot[sufficient_indices, :], axis=1)
-            # Max then min with fill between
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(vmax), mode="lines", line=dict(color=rgba(0.20), width=0.5),
-                name="max", showlegend=False, hoverinfo="skip"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(vmin), mode="lines", line=dict(color=rgba(0.20), width=0.5),
-                fill="tonexty", fillcolor=rgba(0.18),
-                name="min-max", showlegend=True, hoverinfo="skip"
-            ))
-            # Create customdata with min, mean, max and their formatted units
-            mean_data = _make_customdata(vmean)
-            min_data = _make_customdata(vmin)  
-            max_data = _make_customdata(vmax)
-            
-            # Combine into 6-column customdata: [min_val, min_unit, mean_val, mean_unit, max_val, max_unit]
-            combined_customdata = np.column_stack([
-                min_data[:, 0], min_data[:, 1],   # min value, min unit
-                mean_data[:, 0], mean_data[:, 1], # mean value, mean unit  
-                max_data[:, 0], max_data[:, 1]    # max value, max unit
-            ])
-            
-            fig.add_trace(go.Scatter(
-                x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
-                name="mean",
-                customdata=combined_customdata,
-                hovertemplate=("max: %{customdata[4]:.8g}%{customdata[5]}<br>mean: %{customdata[2]:.8g}%{customdata[3]}<br>min: %{customdata[0]:.8g}%{customdata[1]}<extra></extra>"),
-            ))
+            if cb_show_ensemble.value:
+                # Max then min with fill between
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(vmax), mode="lines", line=dict(color=rgba(0.20), width=0.5),
+                    name="max", showlegend=False, hoverinfo="skip"
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(vmin), mode="lines", line=dict(color=rgba(0.20), width=0.5),
+                    fill="tonexty", fillcolor=rgba(0.18),
+                    name="min-max", showlegend=True, hoverinfo="skip"
+                ))
+                # Create customdata with min, mean, max and their formatted units
+                mean_data = _make_customdata(vmean)
+                min_data = _make_customdata(vmin)  
+                max_data = _make_customdata(vmax)
+                
+                # Combine into 6-column customdata: [min_val, min_unit, mean_val, mean_unit, max_val, max_unit]
+                combined_customdata = np.column_stack([
+                    min_data[:, 0], min_data[:, 1],   # min value, min unit
+                    mean_data[:, 0], mean_data[:, 1], # mean value, mean unit  
+                    max_data[:, 0], max_data[:, 1]    # max value, max unit
+                ])
+                
+                fig.add_trace(go.Scatter(
+                    x=x_dt, y=_nan_to_none(vmean), mode="lines", line=dict(color="black", width=2),
+                    name="mean",
+                    customdata=combined_customdata,
+                    hovertemplate=("max: %{customdata[4]:.8g}%{customdata[5]}<br>mean: %{customdata[2]:.8g}%{customdata[3]}<br>min: %{customdata[0]:.8g}%{customdata[1]}<extra></extra>"),
+                ))
 
         # Store band data for comprehensive statistics (grouped by series)
         band_groups: Dict[str, Dict[str, pd.Series]] = {}
@@ -2593,14 +2599,17 @@ def fan_compare_simulations_dashboard(
                         sub = _slice_time(sub, start, end)
                     if season_months:
                         sub = _filter_season(sub, season_months)
+                    if sub.empty:
+                        continue
+                    # Build a filtered copy for stats only (event filtering affects stats, not display)
                     if selected_days_set is not None:
                         try:
                             day_mask = sub.index.floor('D').isin(list(selected_days_set))
-                            sub = sub.loc[day_mask]
+                            sub_filt = sub.loc[day_mask]
                         except Exception:
-                            pass
-                    if sub.empty:
-                        continue
+                            sub_filt = sub
+                    else:
+                        sub_filt = sub
                     if is_conc_mode:
                         if extra_flow_col not in sub.columns:
                             continue
@@ -2616,9 +2625,26 @@ def fan_compare_simulations_dashboard(
                     s_ex = s_ex.dropna()
                     if s_ex.empty:
                         continue
-                    # Store for stats correlations
+                    # Build filtered series for stats correlations
+                    if sub_filt is not sub:
+                        if is_conc_mode:
+                            if extra_flow_col in sub_filt.columns:
+                                with np.errstate(invalid='ignore', divide='ignore'):
+                                    base_col_f = (SYN_VAR if var == SYN_VAR else var)
+                                    sub_filt["__conc_mgL__"] = (sub_filt[base_col_f] / (sub_filt[extra_flow_col] * 86400.0)) * 1000.0
+                                s_ex_stats = _resample_series(sub_filt, "__conc_mgL__", freq=_make_freq_string(dd_freq.value, sl_bin.value), how=how_here, flow_col=extra_flow_col)
+                            else:
+                                s_ex_stats = s_ex
+                        else:
+                            base_col_f = (SYN_VAR if var == SYN_VAR else var)
+                            s_ex_stats = _resample_series(sub_filt, base_col_f, freq=_make_freq_string(dd_freq.value, sl_bin.value), how=dd_method.value,
+                                                    flow_col=extra_flow_col if extra_flow_col in sub_filt.columns else None)
+                        s_ex_stats = s_ex_stats.dropna()
+                    else:
+                        s_ex_stats = s_ex
+                    # Store filtered series for stats correlations
                     try:
-                        _last["extra_series"][str(name)] = s_ex
+                        _last["extra_series"][str(name)] = s_ex_stats if not s_ex_stats.empty else s_ex
                     except Exception:
                         pass
                     color = extra_palette[ei % len(extra_palette)]; ei += 1
@@ -2985,12 +3011,7 @@ def fan_compare_simulations_dashboard(
                 if season_months:
                     months = set(int(m) for m in season_months)
                     s_daily = s_daily.loc[s_daily.index.month.isin(months)]
-                if selected_days_set is not None:
-                    try:
-                        s_daily = s_daily.loc[s_daily.index.isin(list(selected_days_set))]
-                    except Exception:
-                        pass
-                # Resample per selected method
+                # Resample UNFILTERED daily series for display (event filtering must not affect the plot line)
                 if dd_method.value == "sum":
                     s_flow = s_daily.resample(freq_str).sum(min_count=1)
                 else:
@@ -3006,14 +3027,14 @@ def fan_compare_simulations_dashboard(
                     y2_range = [fmin - fpad, fmax + fpad]
                     _last["flow_y_range"] = y2_range
                     fig.update_layout(yaxis2=dict(
-                        title="m3/day water flows", overlaying='y', side='right', showgrid=False,
+                        title="Measured water flow (m3/d)", overlaying='y', side='right', showgrid=False,
                         autorange=False, range=y2_range, title_standoff=20, automargin=True,
                         title_font_color="#1f77b4"
                     ))
                     # Single dotted blue line, with legend label requested
                     fig.add_trace(go.Scatter(
                         x=_to_plotly_x(s_flow.index), y=s_flow.values, mode="lines",
-                        name="m3/day water flows", yaxis='y2',
+                        name="Measured water flow (m3/d)", yaxis='y2',
                         line=dict(color="#1f77b4", width=1.2, dash="dot"),
                         customdata=_make_customdata(s_flow.values),
                         hovertemplate="Water flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
@@ -3048,12 +3069,6 @@ def fan_compare_simulations_dashboard(
                             sub = _slice_time(sub, start, end)
                         if season_months:
                             sub = _filter_season(sub, season_months)
-                        if selected_days_set is not None:
-                            try:
-                                mask = sub.index.floor('D').isin(list(selected_days_set))
-                                sub = sub.loc[mask]
-                            except Exception:
-                                pass
                         if sub.empty:
                             continue
                         # Convert flow to numeric and compute m3/day
@@ -3065,7 +3080,7 @@ def fan_compare_simulations_dashboard(
                             sub["__m3day__"] = sub[fcol].astype(float) * 86400.0
                         # Daily aggregate (sum duplicates)
                         s_daily = sub["__m3day__"].groupby(sub.index.floor('D')).sum(min_count=1)
-                        # Resample per selected method
+                        # Resample UNFILTERED for display
                         if dd_method.value == "sum":
                             s_res = s_daily.resample(freq_str).sum(min_count=1)
                         else:
@@ -3088,22 +3103,27 @@ def fan_compare_simulations_dashboard(
                     _last["swat_flow_series"] = s_swat_mean
                     # Ensure y2 axis exists and add SWAT flow trace
                     fig.update_layout(yaxis2=dict(
-                        title="m3/day water flows", overlaying='y', side='right', showgrid=False,
+                        title="Measured water flow (m3/d)", overlaying='y', side='right', showgrid=False,
                         autorange=False, title_standoff=20, automargin=True,
                         title_font_color="#1f77b4"
                     ))
                     fig.add_trace(go.Scatter(
                         x=_to_plotly_x(s_swat_mean.index), y=s_swat_mean.values, mode="lines",
-                        name="SWAT avg flow (m3/d)", yaxis='y2',
+                        name="Simulated water flow (m3/d)", yaxis='y2',
                         line=dict(color="#17becf", width=1.6, dash="solid"),
                         customdata=_make_customdata(s_swat_mean.values),
                         hovertemplate="SWAT flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
                         visible=True,
                     ))
-                    # Reorder traces so SWAT flow draws behind others (background)
+                    # Reorder: SWAT flow behind other traces but in front of measured water flow
                     try:
-                        if len(fig.data) >= 1:
-                            fig.data = (fig.data[-1],) + fig.data[:-1]
+                        if len(fig.data) >= 2:
+                            swat_tr = fig.data[-1]
+                            rest = fig.data[:-1]
+                            # measured water flow is at index 0; insert SWAT right after it
+                            fig.data = (rest[0], swat_tr) + rest[1:]
+                        elif len(fig.data) == 1:
+                            pass  # only trace, nothing to reorder
                     except Exception:
                         pass
         except Exception:
@@ -3128,7 +3148,7 @@ def fan_compare_simulations_dashboard(
                 y2_range = [fmin - fpad, fmax + fpad]
                 _last["flow_y_range"] = y2_range
                 fig.update_layout(yaxis2=dict(
-                    title="m3/day water flows", overlaying='y', side='right', showgrid=False,
+                    title="Measured water flow (m3/d)", overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y2_range, title_standoff=20, automargin=True,
                     title_font_color="#1f77b4"
                 ))
@@ -4103,6 +4123,13 @@ def fan_compare_simulations_dashboard(
             pass
     cb_range_slider.observe(_on_range_slider_toggle, names="value")
 
+    def _on_ensemble_toggle(_):
+        try:
+            _compute_and_plot()
+        except Exception:
+            pass
+    cb_show_ensemble.observe(_on_ensemble_toggle, names="value")
+
     # Stats/dx toggles
     for _w in (dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment):
         try:
@@ -4122,7 +4149,7 @@ def fan_compare_simulations_dashboard(
 
     # Layout controls
     controls_left = widgets.VBox([num_sim, dd_var, tg_units, dd_method, dd_flow_source, lbl_units])
-    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider]
+    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider, cb_show_ensemble]
 
     if measured_present:
         cat_boxes = []
@@ -4552,6 +4579,7 @@ def _normalize_headless_dashboard_config(
         "show_swat_flow": bool(raw.get("show_swat_flow", False)),
         "show_erosion": bool(raw.get("show_erosion", False)),
         "show_diagnostics": bool(raw.get("show_diagnostics", True)),
+        "show_ensemble": bool(raw.get("show_ensemble", True)),
         "lag_metric": raw.get("lag_metric", "r"),
         "max_lag": int(raw.get("max_lag", 2)),
         "local_window_ks": list(raw.get("local_window_ks", [1, 2])),
