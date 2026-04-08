@@ -42,6 +42,101 @@ Your job is to understand and extend the existing pipeline without creating a pa
 - After fallback patching, re-read from disk and explicitly confirm expected markers are present.
 - Warn the user that reopening the notebook tab may be required when the UI model was stale.
 
+## Available Utilities & Tools
+- **Mojibake Cleanup Script** (`trabajoFM/python_pipeline_scripts/mojibake_cleanup.py`)
+  - Use when UTF-8 double-encoding corruption appears in notebooks or JSON files
+   - Cleans 20+ mojibake patterns including arrows (→), math operators (−, ≈), box-drawing, accented letters, and the repeating euro-quote separator corruption (`€"€"€"...`)
+   - Keep hex replacements for euro-quote artifacts explicit (`e282ac22` and `e282ac`) to avoid reintroducing this corruption class
+  - Command: `python trabajoFM/python_pipeline_scripts/mojibake_cleanup.py <notebook.ipynb>`
+  - Creates timestamped backup before modifications and validates JSON integrity after cleanup
+  - Processes both cell sources and outputs, handling UTF-8 BOM if present
+
+## File Encoding & Mojibake Prevention (Enhanced Workflow)
+**CRITICAL**: Mojibake arises from platform/tool encoding mismatches. Prevent it by strictly enforcing UTF-8 at every step.
+- **Encoding enforcement**: Always use UTF-8 encoding (with explicit `Encoding UTF8` flag) when reading or writing ANY file—notebooks, Python scripts, JSON, markdown, or text.
+- **Terminal file operations**: When using `run_in_terminal` for file reads/writes, always explicitly specify UTF-8 encoding:
+  - PowerShell: Use `-Encoding UTF8` in `Get-Content`, `Set-Content`, and `Out-File`.
+  - Example: `Get-Content -Raw -LiteralPath <path> -Encoding UTF8` and `Set-Content -LiteralPath <path> -Value <content> -Encoding UTF8`.
+- **String replacements in terminal**: When using regex or string replacement in the terminal:
+  - Always use UTF-8 safe patterns (no unescaped special bytes).
+  - Test replacements on small subsets first if doing complex transformations.
+  - Use `[regex]::Replace()` in PowerShell with properly escaped Unicode patterns.
+- **Verification after writes**: After any terminal-based file mutation, immediately verify the result:
+  - Use `Select-String` with the expected content marker to confirm the write persisted correctly.
+  - Choose unique, short substrings from the new code as verification markers.
+  - If verification fails, re-read the file and diagnose encoding issues before proceeding.
+- **Avoid inline terminal scripts for complex replacements**: If a replacement involves many edge cases or special characters, write the logic to a temporary Python script instead, then delete the script after execution. Python's default UTF-8 handling is safer than shell string quoting.
+- **File read context**: When using `read_file` for matching text in `replace_string_in_file`, ensure the displayed content matches the actual file bytes. Mojibake typically appears as mismatched diacritics or corruption in grep/terminal output—if you see unusual characters in search results, re-read the file directly to verify before attempting replacement.
+- **Notebook JSON special handling**: `.ipynb` files are JSON with multi-line string values. When editing via terminal:
+  - Prefer `replace_string_in_file` tool to direct JSON mutation (editors handle encoding better).
+  - If terminal edit is necessary, read a generous context window before and after to ensure boundary matching is exact.
+  - Always save with `workbench.action.files.save` immediately after each batch of terminal edits to sync editor and disk state.
+
+## File Encoding Prevention Strategy (Deep Dive)
+
+### When NOT to Use Terminal for File Mutation
+- **Avoid** inline `Get-Content | ForEach-Object { $_ -replace ... } | Set-Content` pipelines
+- **Avoid** embedding non-ASCII characters in PowerShell command strings
+- **Avoid** using backticks or regex in PowerShell inline scripts for Unicode operations
+- **Reason**: PowerShell string parsing, quoting, and continuation can corrupt Unicode byte sequences, introducing mojibake
+
+### Preferred: Python for Complex File Operations
+1. **Always use `encoding='utf-8-sig'`** when loading JSON files (handles Byte Order Mark)
+2. **Always use `encoding='utf-8'`** when writing back (standard JSON expects no BOM)
+3. **Avoid embedding mojibake-prone characters** in the Python source itself; use `bytes.fromhex()` or escape sequences
+4. **Validate JSON after modifications** using `json.loads()` before writing
+5. **Verify persistence** by re-reading the file and checking for expected markers
+
+Example safe Python pattern:
+```python
+import json
+from pathlib import Path
+
+# Read with BOM handling
+with open(path, 'r', encoding='utf-8-sig') as f:
+    data = json.load(f)
+
+# Modify data
+# ...
+
+# Write back without BOM
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f)
+
+# Verify by re-reading
+with open(path, 'r', encoding='utf-8') as f:
+    verify = json.load(f)
+```
+
+### Preferred: PowerShell [System.IO.File] for Direct Byte Operations
+1. **Use `[System.IO.File]::ReadAllText(path, [System.Text.Encoding]::UTF8)`** for robust file reads
+2. **Use `[System.IO.File]::WriteAllText(path, content, [System.Text.Encoding]::UTF8)`** for robust writes
+3. **Bypass** PowerShell's string encoding layer entirely—[System.IO.File] operates at the .NET level
+4. **Still verify** persistence by re-reading
+
+Example:
+```powershell
+$path = "path/to/file.ipynb"
+$content = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+# Perform replacements on $content
+[System.IO.File]::WriteAllText($path, $content, [System.Text.Encoding]::UTF8)
+```
+
+### Never (Anti-Patterns)
+- ❌ `Get-Content` → inline replacements → `Set-Content` for Unicode files
+- ❌ Embedding special chars (→, −, ≈, €, etc.) directly in PowerShell inline scripts
+- ❌ Using backticks `` ` `` for line continuation in string operations with Unicode
+- ❌ Assuming PowerShell's default console encoding is UTF-8 (it often isn't on Windows)
+- ❌ Skipping verification after file writes—always re-read and check
+
+### Recovery Plan
+If mojibake corruption appears in a notebook or JSON after editing:
+1. **Stop immediately** — do not make further changes
+2. **Run cleanup**: `python trabajoFM/python_pipeline_scripts/mojibake_cleanup.py <file.ipynb>`
+3. **Verify** the backup was created and the file is now clean (re-read in editor or terminal)
+4. **Analyze** what operation introduced the corruption and document the lesson
+5. **Euro-quote specific check**: if separators look like `€"€"€"...`, scan for `€` with `Select-String -Path <file.ipynb> -Pattern "€"`; if hits remain after cleanup, extend hex mappings and re-run cleanup
+
 ## Concurrent Edit / Merge Policy
 - Assume the user may edit notebooks while the agent is working.
 - If cell ids changed or edits fail due to invalid ids, do not force overwrite with old assumptions; refresh summary and rebase edits onto current notebook structure.
