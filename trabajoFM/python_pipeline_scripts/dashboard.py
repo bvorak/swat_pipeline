@@ -687,7 +687,9 @@ def fan_compare_simulations_dashboard(
         "trace_order": None,
     }
     _TRACE_ORDER_DEFAULT = ("bands", "extra", "measured_flow", "swat_flow", "erosion", "central", "measured")
-    _state = {"updating": False, "duration_refresher": None, "measured_defaults_var": None}
+    _state = {"updating": False, "duration_refresher": None, "measured_defaults_var": None,
+              "_gen": 0, "_gen_lock": __import__('threading').Lock(),
+              "_xrange_timer": None, "_xrange_timer_lock": __import__('threading').Lock()}
 
     TICK_STOPS = [
         dict(dtickrange=[None, 1000 * 60 * 60 * 24], value="%Y-%m-%d\n%H:%M"),
@@ -1288,6 +1290,7 @@ def fan_compare_simulations_dashboard(
         template_name: str,
         y_axis_title: str,
         measured_flow_series: Optional[pd.Series] = None,
+        daily_flow_series: Optional[pd.Series] = None,
     ) -> List[widgets.Widget]:
         """
         Build and return a list of Plotly FigureWidget objects representing simulation load and flow duration curves.
@@ -1716,103 +1719,172 @@ def fan_compare_simulations_dashboard(
                     _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
                 # ----- Flow-regime background shading on the LDC -----
-                # Shade each day's x-rank position using the FULL event
-                # classification (threshold + min-days + buffer), consistent
-                # with the dashboard's event-day filter toggle.
-                # Uses a fast numpy-only path (no DataFrame / add_event_flags
-                # overhead) to keep the LDC responsive.
+                # The boundary ensures ALL event-classified measured points
+                # (threshold + min-days + buffer) sit inside the event zone.
+                # We compute the full event mask, collect measured days that
+                # are events, find the MINIMUM flow among them, and place the
+                # boundary at that flow's sorted position.  Fallback: if no
+                # measured event days exist, use the flow threshold directly.
                 if LDC_SORT_BY_FLOW:
                     try:
                         if paired_index is not None and paired_x_rank is not None:
-                            # ---- resolve threshold ----
+                            # ---- resolve threshold & buffer params ----
                             _thr_token_bg = str(dd_event_threshold.value) if 'dd_event_threshold' in dir() else "p75"
                             _buf_bg = int(sl_event_buffer_days.value) if ('sl_event_buffer_days' in dir() and isinstance(sl_event_buffer_days.value, (int, float))) else 0
                             _etmin_bg = float(fl_event_min_days.value) if ('fl_event_min_days' in dir() and isinstance(fl_event_min_days.value, (int, float))) else 1.0
-                            # Get the unsorted daily flow array aligned to q_plot index
-                            _flow_unsorted = flow_series.reindex(q_plot.index).to_numpy(dtype=float)
-                            _flow_valid = _flow_unsorted[np.isfinite(_flow_unsorted)]
+                            # Use DAILY flow for threshold + event mask so that
+                            # weekly/monthly aggregation doesn't shift the p75
+                            # (aggregated means compress the distribution).
+                            _daily_bg = daily_flow_series
+                            if isinstance(_daily_bg, pd.Series) and not _daily_bg.empty:
+                                _flow_daily_arr = _daily_bg.to_numpy(dtype=float)
+                                _flow_daily_valid = _flow_daily_arr[np.isfinite(_flow_daily_arr)]
+                            else:
+                                _flow_daily_arr = None
+                                _flow_daily_valid = np.array([], dtype=float)
+                            # Threshold from aggregated flow only when no daily available
+                            _flow_unsorted_bg = flow_series.reindex(q_plot.index).to_numpy(dtype=float)
+                            _flow_valid_bg = _flow_unsorted_bg[np.isfinite(_flow_unsorted_bg)]
                             if _thr_token_bg == "abs":
                                 _flow_thr_bg = float(tb_event_abs.value) if ('tb_event_abs' in dir() and isinstance(tb_event_abs.value, (int, float)) and not np.isnan(tb_event_abs.value)) else None
-                            elif _thr_token_bg.startswith("p") and _flow_valid.size:
-                                _flow_thr_bg = float(np.nanpercentile(_flow_valid, float(_thr_token_bg[1:])))
-                            else:
-                                _flow_thr_bg = float(np.nanpercentile(_flow_valid, 75.0)) if _flow_valid.size else None
-                            if _flow_thr_bg is not None and _flow_valid.size:
-                                # ---- fast event mask on unsorted daily series ----
-                                _above = (_flow_unsorted >= _flow_thr_bg) & np.isfinite(_flow_unsorted)
-                                # Min-days filter: keep only runs >= _etmin_bg days
-                                _min_samples = max(1, int(np.ceil(_etmin_bg)))
-                                _d_runs = np.diff(np.r_[0, _above.astype(np.int8), 0])
-                                _starts = np.where(_d_runs == 1)[0]
-                                _ends = np.where(_d_runs == -1)[0]
-                                _core_mask = np.zeros(len(_flow_unsorted), dtype=bool)
-                                for _s, _e in zip(_starts, _ends):
-                                    if (_e - _s) >= _min_samples:
-                                        _core_mask[_s:_e] = True
-                                # Buffer: dilate by _buf_bg days in both directions
-                                if _buf_bg > 0:
-                                    _buffered_mask = _core_mask.copy()
-                                    for _kb in range(1, _buf_bg + 1):
-                                        _buffered_mask[_kb:] |= _core_mask[:-_kb]
-                                        _buffered_mask[:-_kb] |= _core_mask[_kb:]
+                            elif _thr_token_bg.startswith("p"):
+                                _pctile = float(_thr_token_bg[1:])
+                                if _flow_daily_valid.size:
+                                    _flow_thr_bg = float(np.nanpercentile(_flow_daily_valid, _pctile))
+                                elif _flow_valid_bg.size:
+                                    _flow_thr_bg = float(np.nanpercentile(_flow_valid_bg, _pctile))
                                 else:
-                                    _buffered_mask = _core_mask
-                                # Reindex into sorted paired order
-                                _idx_to_pos = {dt: i for i, dt in enumerate(q_plot.index)}
-                                _ev_mask_ldc = np.array([_buffered_mask[_idx_to_pos[dt]] if dt in _idx_to_pos else False for dt in paired_index], dtype=bool)
-                                _dbg("ldc_event_mask", dict(core=int(_core_mask.sum()), buffered=int(_buffered_mask.sum()), mask_true=int(_ev_mask_ldc.sum()), mask_len=len(_ev_mask_ldc)))
-                                # ---- colours ----
-                                _ev_hex_bg = cp_event_color.value if 'cp_event_color' in dir() else "#fdd0a2"
-                                _ne_hex_bg = cp_nonevent_color.value if 'cp_nonevent_color' in dir() else "#c6dbef"
-                                def _hex_rgba_ldc(h: str, a: float) -> str:
-                                    h = h.lstrip('#')
-                                    if len(h) == 3:
-                                        h = ''.join(c * 2 for c in h)
-                                    return f"rgba({int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{a})"
-                                _bg_alpha = 0.12
-                                # ---- draw contiguous runs as rectangles ----
-                                # Group consecutive identical-flag positions to
-                                # minimise the number of Plotly shapes.
-                                _n_pts = len(paired_x_rank)
-                                _half_gap = (paired_x_rank[1] - paired_x_rank[0]) / 2.0 if _n_pts >= 2 else 0.5
-                                _run_start = 0
-                                _has_event_zone = False
-                                _has_base_zone = False
-                                for _ri in range(1, _n_pts + 1):
-                                    # Detect run boundary (or end of array)
-                                    if _ri < _n_pts and _ev_mask_ldc[_ri] == _ev_mask_ldc[_run_start]:
-                                        continue
-                                    _is_ev_run = bool(_ev_mask_ldc[_run_start])
-                                    _x0_run = float(paired_x_rank[_run_start]) - _half_gap
-                                    _x1_run = float(paired_x_rank[_ri - 1]) + _half_gap
-                                    _fill_c = _hex_rgba_ldc(_ev_hex_bg if _is_ev_run else _ne_hex_bg, _bg_alpha)
+                                    _flow_thr_bg = None
+                            else:
+                                if _flow_daily_valid.size:
+                                    _flow_thr_bg = float(np.nanpercentile(_flow_daily_valid, 75.0))
+                                elif _flow_valid_bg.size:
+                                    _flow_thr_bg = float(np.nanpercentile(_flow_valid_bg, 75.0))
+                                else:
+                                    _flow_thr_bg = None
+                            if _flow_thr_bg is not None and (_flow_daily_valid.size or _flow_valid_bg.size):
+                                # ---- event mask on DAILY flow (threshold + min-days + buffer) ----
+                                if _flow_daily_arr is not None and _flow_daily_valid.size:
+                                    _above_bg = (_flow_daily_arr >= _flow_thr_bg) & np.isfinite(_flow_daily_arr)
+                                    _min_samples_bg = max(1, int(np.ceil(_etmin_bg)))
+                                    _d_runs_bg = np.diff(np.r_[0, _above_bg.astype(np.int8), 0])
+                                    _starts_bg = np.where(_d_runs_bg == 1)[0]
+                                    _ends_bg = np.where(_d_runs_bg == -1)[0]
+                                    _core_bg = np.zeros(len(_flow_daily_arr), dtype=bool)
+                                    for _s, _e in zip(_starts_bg, _ends_bg):
+                                        if (_e - _s) >= _min_samples_bg:
+                                            _core_bg[_s:_e] = True
+                                    if _buf_bg > 0:
+                                        _ev_mask_daily = _core_bg.copy()
+                                        for _kb in range(1, _buf_bg + 1):
+                                            _ev_mask_daily[_kb:] |= _core_bg[:-_kb]
+                                            _ev_mask_daily[:-_kb] |= _core_bg[_kb:]
+                                    else:
+                                        _ev_mask_daily = _core_bg
+                                    # Build day -> event flag lookup
+                                    _daily_idx = _daily_bg.index
+                                    _ev_day_set: set = set()
+                                    for _kd in range(len(_daily_idx)):
+                                        if _ev_mask_daily[_kd]:
+                                            _ev_day_set.add(pd.Timestamp(_daily_idx[_kd]).normalize())
+                                else:
+                                    # Fallback: event mask on aggregated flow
+                                    _above_bg = (_flow_unsorted_bg >= _flow_thr_bg) & np.isfinite(_flow_unsorted_bg)
+                                    _min_samples_bg = max(1, int(np.ceil(_etmin_bg)))
+                                    _d_runs_bg = np.diff(np.r_[0, _above_bg.astype(np.int8), 0])
+                                    _starts_bg = np.where(_d_runs_bg == 1)[0]
+                                    _ends_bg = np.where(_d_runs_bg == -1)[0]
+                                    _core_bg = np.zeros(len(_flow_unsorted_bg), dtype=bool)
+                                    for _s, _e in zip(_starts_bg, _ends_bg):
+                                        if (_e - _s) >= _min_samples_bg:
+                                            _core_bg[_s:_e] = True
+                                    if _buf_bg > 0:
+                                        _ev_mask_agg = _core_bg.copy()
+                                        for _kb in range(1, _buf_bg + 1):
+                                            _ev_mask_agg[_kb:] |= _core_bg[:-_kb]
+                                            _ev_mask_agg[:-_kb] |= _core_bg[_kb:]
+                                    else:
+                                        _ev_mask_agg = _core_bg
+                                    _ev_day_set = None  # no daily lookup available
+                                # ---- collect measured dates ----
+                                _meas_list_bg = _last.get("meas_series") or []
+                                _meas_dates_bg: set = set()
+                                if isinstance(_meas_list_bg, (list, tuple)):
+                                    for _ms_bg in _meas_list_bg:
+                                        if isinstance(_ms_bg, pd.Series) and not _ms_bg.empty:
+                                            _meas_dates_bg.update(pd.Timestamp(d) for d in _ms_bg.dropna().index)
+                                # ---- min flow among event-classified measured days ----
+                                _min_ev_flow = None
+                                if _ev_day_set is not None:
+                                    # Daily event set available — match measured dates
+                                    for _md in _meas_dates_bg:
+                                        _md_n = pd.Timestamp(_md).normalize()
+                                        if _md_n in _ev_day_set:
+                                            _fv = _daily_bg.get(_md_n)
+                                            if _fv is not None and np.isfinite(float(_fv)):
+                                                _fv = float(_fv)
+                                                if _min_ev_flow is None or _fv < _min_ev_flow:
+                                                    _min_ev_flow = _fv
+                                else:
+                                    # Fallback: use aggregated mask
+                                    _qidx_bg = q_plot.index
+                                    for _im in range(len(_qidx_bg)):
+                                        if _qidx_bg[_im] in _meas_dates_bg and _ev_mask_agg[_im]:
+                                            _fv = _flow_unsorted_bg[_im]
+                                            if np.isfinite(_fv) and (_min_ev_flow is None or _fv < _min_ev_flow):
+                                                _min_ev_flow = _fv
+                                _boundary_flow = _min_ev_flow if _min_ev_flow is not None else _flow_thr_bg
+                                # ---- find boundary position in sorted chart ----
+                                _flow_sorted_bg = flow_series.reindex(paired_index).to_numpy(dtype=float)
+                                _boundary_x = None
+                                for _i_bg in range(len(_flow_sorted_bg)):
+                                    if np.isfinite(_flow_sorted_bg[_i_bg]) and _flow_sorted_bg[_i_bg] >= _boundary_flow:
+                                        _n_pts = len(paired_x_rank)
+                                        _half_gap = (paired_x_rank[1] - paired_x_rank[0]) / 2.0 if _n_pts >= 2 else 0.5
+                                        _boundary_x = float(paired_x_rank[_i_bg]) - _half_gap
+                                        break
+                                # ---- draw ----
+                                if _boundary_x is not None:
+                                    _ev_hex_bg = cp_event_color.value if 'cp_event_color' in dir() else "#fdd0a2"
+                                    _ne_hex_bg = cp_nonevent_color.value if 'cp_nonevent_color' in dir() else "#c6dbef"
+                                    def _hex_rgba_ldc(h: str, a: float) -> str:
+                                        h = h.lstrip('#')
+                                        if len(h) == 3:
+                                            h = ''.join(c * 2 for c in h)
+                                        return f"rgba({int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{a})"
+                                    _bg_alpha = 0.12
                                     fig_ldc.add_shape(
                                         type="rect", xref="x", yref="paper",
-                                        x0=max(0, _x0_run), x1=min(100, _x1_run), y0=0, y1=1,
-                                        fillcolor=_fill_c, line=dict(width=0), layer="below",
+                                        x0=0, x1=_boundary_x, y0=0, y1=1,
+                                        fillcolor=_hex_rgba_ldc(_ne_hex_bg, _bg_alpha),
+                                        line=dict(width=0), layer="below",
                                     )
-                                    if _is_ev_run:
-                                        _has_event_zone = True
-                                    else:
-                                        _has_base_zone = True
-                                    _run_start = _ri
-                                # Legend proxy traces
-                                if not any(getattr(tr, 'name', '') == 'Event-day zone' for tr in fig_ldc.data):
-                                    if _has_event_zone:
+                                    fig_ldc.add_shape(
+                                        type="rect", xref="x", yref="paper",
+                                        x0=_boundary_x, x1=100, y0=0, y1=1,
+                                        fillcolor=_hex_rgba_ldc(_ev_hex_bg, _bg_alpha),
+                                        line=dict(width=0), layer="below",
+                                    )
+                                    fig_ldc.add_shape(
+                                        type="line", xref="x", yref="paper",
+                                        x0=_boundary_x, x1=_boundary_x, y0=0, y1=1,
+                                        line=dict(color="grey", width=1.2, dash="dot"),
+                                        layer="above",
+                                    )
+                                    if not any(getattr(tr, 'name', '') == 'Event-day zone' for tr in fig_ldc.data):
                                         fig_ldc.add_trace(go.Scatter(
                                             x=[None], y=[None], mode='markers',
                                             marker=dict(size=12, color=_hex_rgba_ldc(_ev_hex_bg, 0.35), symbol='square'),
                                             name='Event-day zone', showlegend=True,
                                             legendrank=100,
                                         ))
-                                    if _has_base_zone:
                                         fig_ldc.add_trace(go.Scatter(
                                             x=[None], y=[None], mode='markers',
                                             marker=dict(size=12, color=_hex_rgba_ldc(_ne_hex_bg, 0.35), symbol='square'),
                                             name='Non-event zone', showlegend=True,
                                             legendrank=200,
                                         ))
-                                _dbg("ldc_event_bg", dict(n_shapes=int(_has_event_zone) + int(_has_base_zone), buffer=_buf_bg))
+                                    _dbg("ldc_event_bg", dict(boundary=_boundary_x, boundary_flow=_boundary_flow, threshold=_flow_thr_bg, min_ev_meas_flow=_min_ev_flow))
                     except Exception as _e_ldc_bg:
                         _dbg("ldc_event_bg_failed", str(_e_ldc_bg))
                 # Apply optional log scaling before final layout so we can adjust label
@@ -2020,6 +2092,10 @@ def fan_compare_simulations_dashboard(
             pass
         freq_str = _make_freq_string(dd_freq.value, sl_bin.value)
         var = dd_var.value
+        # ---- bump generation counter so stale background threads bail ----
+        with _state["_gen_lock"]:
+            _state["_gen"] += 1
+            _current_gen = _state["_gen"]
         # Debug mapping for measured presets
         if measured_present:
             try:
@@ -2189,6 +2265,8 @@ def fan_compare_simulations_dashboard(
             "selected": idx_selected,
             "all_days": idx_all_days,
         }
+        # Preserve daily SWAT flow for LDC threshold (immune to aggregation)
+        _last["swat_flow_daily"] = s_swat_avg_daily
 
         # Extract a single resampled series per run for the selected reach/variable
         # Maintain filtered (stats) and unfiltered (plot) collections
@@ -4032,6 +4110,24 @@ def fan_compare_simulations_dashboard(
         # After the figure is rendered, kick off async stats computation for responsiveness
         import threading
 
+        def _debounced_stats_update(view_window, delay=0.35):
+            """Schedule a stats update, cancelling any pending one (debounce)."""
+            import threading as _thr
+            with _state["_xrange_timer_lock"]:
+                old = _state.get("_xrange_timer")
+                if old is not None:
+                    old.cancel()
+                with _state["_gen_lock"]:
+                    gen = _state["_gen"]
+                def _guarded():
+                    if _state["_gen"] != gen:
+                        return
+                    _compute_stats_and_update(view_window)
+                t = _thr.Timer(delay, _guarded)
+                t.daemon = True
+                _state["_xrange_timer"] = t
+                t.start()
+
         def _on_xrange_change(layout, xrange):
             if _last["aligned_df"] is None:
                 return
@@ -4056,8 +4152,7 @@ def fan_compare_simulations_dashboard(
                         diag_box.children = [widgets.HTML("<i>⏳ Building diagnostics…</i>")]
                     except Exception:
                         pass
-                import threading
-                threading.Thread(target=_compute_stats_and_update, args=((x0, x1),), daemon=True).start()
+                _debounced_stats_update((x0, x1))
                 return
             try:
                 x0 = pd.to_datetime(xrange[0]); x1 = pd.to_datetime(xrange[1])
@@ -4140,8 +4235,7 @@ def fan_compare_simulations_dashboard(
                     diag_box.children = [widgets.HTML("<i>⏳ Building diagnostics…</i>")]
                 except Exception:
                     pass
-            import threading
-            threading.Thread(target=_compute_stats_and_update, args=((x0, x1),), daemon=True).start()
+            _debounced_stats_update((x0, x1))
 
         fig.layout.xaxis.on_change(_on_xrange_change, 'range')
 
@@ -4175,6 +4269,9 @@ def fan_compare_simulations_dashboard(
             display(fig)
 
         def _async_update_duration_curves():
+            # Bail early if a newer update already started
+            if _state["_gen"] != _current_gen:
+                return
             try:
                 q_plot_local = _last.get("q_plot_df")
                 # Explicitly choose flow series (prefer swat) without boolean or on Series
@@ -4190,7 +4287,11 @@ def fan_compare_simulations_dashboard(
                 y_axis_title = _last.get("y_axis_title", "Value")
                 # Pass measured water flow for the FDC overlay (only when flow toggle is on)
                 meas_flow_local = _last.get("flow_series") if cb_flow_on.value else None
-                widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title, measured_flow_series=meas_flow_local)
+                daily_flow_local = _last.get("swat_flow_daily")
+                widgets_list = _build_sim_duration_widgets(q_plot_local, flow_series_local, template, y_axis_title, measured_flow_series=meas_flow_local, daily_flow_series=daily_flow_local)
+                # Check cancellation before expensive flow-strat computation
+                if _state["_gen"] != _current_gen:
+                    return
                 # Optionally add flow-stratified curve (min/mean/max by flow exceedance) using current ensemble
                 if cb_flow_strat.value:
                     try:
@@ -4369,6 +4470,9 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         pass
                     if cb_flow_strat.value and len(widgets_list) >= 2:
+                        # Check cancellation before UI update
+                        if _state["_gen"] != _current_gen:
+                            return
                         overlay_layout = bool(cb_flow_overlay.value)
                         if overlay_layout:
                             try:
@@ -4395,12 +4499,17 @@ def fan_compare_simulations_dashboard(
         _dur_threading.Thread(target=_async_update_duration_curves, daemon=True).start()
 
         # Trigger stats computation after figure is on screen
+        # (pass generation so the thread can bail if superseded)
+        def _gen_guarded_stats(view_window, gen):
+            if _state["_gen"] != gen:
+                return
+            _compute_stats_and_update(view_window)
         try:
             stats_html.value = "<i>⏳ Computing stats…</i>"
         except Exception:
             pass
         import threading
-        threading.Thread(target=_compute_stats_and_update, args=(None,), daemon=True).start()
+        threading.Thread(target=_gen_guarded_stats, args=(None, _current_gen), daemon=True).start()
         _release()
 
     # observers
