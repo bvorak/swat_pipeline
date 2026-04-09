@@ -188,6 +188,15 @@ def fan_compare_simulations_dashboard(
     ui_defaults: Optional[Dict[str, Any]] = None,
     # Optional erosion overlay toggle default
     erosion_on_default: Optional[bool] = None,
+    # Event-day background illustration (purely visual, no stats impact)
+    show_event_bg: Optional[bool] = None,
+    event_bg_color: str = "#fdd0a2",
+    nonevent_bg_color: str = "#c6dbef",
+    # Trace z-order: list of group names bottom-to-top
+    trace_order: Optional[List[str]] = None,
+    # Band color and opacity (hex color, base alpha 0-1)
+    band_color: str = "#1f77b4",
+    band_alpha: float = 0.28,
     # Optional export directory for JSON stats bundles
     stats_export_dir: Optional[Union[str, Path]] = None,
     # Debug: print pipeline info for filtering/resampling
@@ -331,6 +340,13 @@ def fan_compare_simulations_dashboard(
     cb_range_slider = widgets.Checkbox(value=True, description="Show range slider")
     cb_show_names_in_tooltip = widgets.Checkbox(value=False, description="Names in tooltip")
     cb_show_ensemble = widgets.Checkbox(value=True, description="Show input scenarios")
+    # Event-day background illustration (purely visual, no stats impact)
+    cb_show_event_bg = widgets.Checkbox(value=(show_event_bg if show_event_bg is not None else False),
+                                        description="Show event background")
+    cp_event_color = widgets.ColorPicker(value=event_bg_color, description="High-flow:", concise=True,
+                                         layout=widgets.Layout(width="140px"))
+    cp_nonevent_color = widgets.ColorPicker(value=nonevent_bg_color, description="Baseflow:", concise=True,
+                                            layout=widgets.Layout(width="140px"))
 
     # Measured controls
     measured_present = measured_df is not None and isinstance(measured_df, pd.DataFrame) and not measured_df.empty
@@ -668,7 +684,9 @@ def fan_compare_simulations_dashboard(
         "flow_total_mode": "median",  # 'median' | 'extents'
         "latest_stats_export_payload": None,
         "latest_stats_export_path": None,
+        "trace_order": None,
     }
+    _TRACE_ORDER_DEFAULT = ("bands", "extra", "measured_flow", "swat_flow", "erosion", "central", "measured")
     _state = {"updating": False, "duration_refresher": None, "measured_defaults_var": None}
 
     TICK_STOPS = [
@@ -835,6 +853,18 @@ def fan_compare_simulations_dashboard(
             cb_range_slider.value = bool(ui_defaults.get("range_slider"))
         if isinstance(ui_defaults.get("show_ensemble"), bool):
             cb_show_ensemble.value = bool(ui_defaults.get("show_ensemble"))
+        if isinstance(ui_defaults.get("show_event_bg"), bool):
+            cb_show_event_bg.value = bool(ui_defaults.get("show_event_bg"))
+        if isinstance(ui_defaults.get("trace_order"), (list, tuple)):
+            trace_order = list(ui_defaults["trace_order"])
+        if isinstance(ui_defaults.get("band_color"), str):
+            band_color = ui_defaults["band_color"]
+        if isinstance(ui_defaults.get("band_alpha"), (int, float)):
+            band_alpha = float(ui_defaults["band_alpha"])
+        if isinstance(ui_defaults.get("event_bg_color"), str):
+            cp_event_color.value = ui_defaults["event_bg_color"]
+        if isinstance(ui_defaults.get("nonevent_bg_color"), str):
+            cp_nonevent_color.value = ui_defaults["nonevent_bg_color"]
         if isinstance(ui_defaults.get("show_diags"), bool):
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
         if isinstance(ui_defaults.get("flow_strat_curve"), bool):
@@ -1015,6 +1045,12 @@ def fan_compare_simulations_dashboard(
             "range_slider": cb_range_slider.value,
             "show_names_in_tooltip": cb_show_names_in_tooltip.value,
             "show_ensemble": cb_show_ensemble.value,
+            "show_event_bg": cb_show_event_bg.value,
+            "event_bg_color": cp_event_color.value,
+            "nonevent_bg_color": cp_nonevent_color.value,
+            "trace_order": _last.get("trace_order", list(_TRACE_ORDER_DEFAULT)),
+            "band_color": band_color,
+            "band_alpha": band_alpha,
             "show_diagnostics": cb_show_diags.value,
             "show_measured": cb_meas_on.value,
             "show_water_flow": cb_flow_on.value,
@@ -1336,6 +1372,33 @@ def fan_compare_simulations_dashboard(
                 ("min", "Simulation min", dict(color="#00441b", width=1.2)),  # optional (band bottom)
             ]
 
+            # ------------------------------------------------------------------
+            # Optional line visibility filter via ui_defaults.
+            #   ldc_lines: list of column keys to show, e.g. ["p50"] or ["min","p50","max"]
+            #   When omitted, all PLOT_LINES entries are shown.
+            # ------------------------------------------------------------------
+            try:
+                _ldc_lines = (ui_defaults or {}).get("ldc_lines")
+                if isinstance(_ldc_lines, (list, tuple)) and _ldc_lines:
+                    _ldc_lines_set = set(str(k).lower() for k in _ldc_lines)
+                    PLOT_LINES = [(c, n, s) for c, n, s in PLOT_LINES if c in _ldc_lines_set]
+            except Exception:
+                pass
+
+            # ------------------------------------------------------------------
+            # Rolling smoother window for paired mode (applied to every trace
+            # after ordering by flow/reference). Reduces visual noise while
+            # preserving the flow-regime diagnostic signal.
+            #   ldc_smooth_window: int (number of days). 0 or 1 = no smoothing.
+            #   Defaults to 0 (off).
+            # ------------------------------------------------------------------
+            try:
+                LDC_SMOOTH_WINDOW = int((ui_defaults or {}).get("ldc_smooth_window", 0))
+                if LDC_SMOOTH_WINDOW < 2:
+                    LDC_SMOOTH_WINDOW = 0
+            except Exception:
+                LDC_SMOOTH_WINDOW = 0
+
             # --------------------------------------------------------------
             # Log-scale toggle (base 10) for the Load Duration Curve.
             # Provide via ui_defaults={"ldc_log_scale": True} when invoking
@@ -1357,11 +1420,26 @@ def fan_compare_simulations_dashboard(
             except Exception:
                 LDC_LOG_SCALE = False
 
+            # Sort-by toggle: order the x-axis by load (default) or by SWAT flow.
+            # ui_defaults key: ldc_sort_by: 'load' | 'flow'
+            # When 'flow', the duration curve is re-ordered by flow exceedance
+            # probability, which is the standard hydrological LDC convention.
+            try:
+                _sort_by = str((ui_defaults or {}).get("ldc_sort_by", "load")).lower()
+                LDC_SORT_BY_FLOW = (_sort_by == "flow") and isinstance(flow_series, pd.Series) and not flow_series.empty
+            except Exception:
+                LDC_SORT_BY_FLOW = False
+            if LDC_SORT_BY_FLOW:
+                BAND_MODE = "paired"  # flow sorting requires paired day-level ordering
+
             if BAND_MODE == "paired" and all(c in q_plot.columns for c in ("min", "max")):
                 try:
                     # Determine ordering reference series
                     order_ref_series: Optional[pd.Series] = None
-                    if BAND_ORDER_REF == "mean":
+                    if LDC_SORT_BY_FLOW:
+                        # Use SWAT flow as the ordering reference (standard hydrological LDC)
+                        order_ref_series = flow_series.copy()
+                    elif BAND_ORDER_REF == "mean":
                         base_plot_df = _last.get("aligned_df_plot")
                         if isinstance(base_plot_df, pd.DataFrame) and not base_plot_df.empty:
                             try:
@@ -1385,18 +1463,34 @@ def fan_compare_simulations_dashboard(
                             "ref": order_ref_series,
                         }).dropna(subset=["min", "max", "ref"])  # keep complete cases
                         if not df_order.empty:
-                            # Descending ordering so high reference values (rare/high loads) on left
-                            order_idx = np.argsort(-df_order["ref"].to_numpy())
+                            if LDC_SORT_BY_FLOW:
+                                # Ascending: low flow on left (x≈0), high flow on right (x≈100)
+                                # → flow-percentile convention; p75 sits at x≈75.
+                                order_idx = np.argsort(df_order["ref"].to_numpy())
+                            else:
+                                # Descending: high loads on left (exceedance convention)
+                                order_idx = np.argsort(-df_order["ref"].to_numpy())
                             df_ordered = df_order.iloc[order_idx]
                             n_ord = df_ordered.shape[0]
                             x_rank = 100.0 * (np.arange(1, n_ord + 1) / (n_ord + 1))
                             paired_index = df_ordered.index
                             paired_x_rank = x_rank
+                            # Helper: optional rolling mean smoother
+                            def _ldc_smooth(arr: np.ndarray, w: int) -> np.ndarray:
+                                if w < 2 or arr.size < w:
+                                    return arr
+                                kernel = np.ones(w) / w
+                                # Use 'same' mode and handle edges via padding
+                                padded = np.pad(arr, (w // 2, w - 1 - w // 2), mode='edge')
+                                return np.convolve(padded, kernel, mode='valid')
+                            _sw = LDC_SMOOTH_WINDOW
                             # Add band (max then min with fill)
+                            _y_max_raw = df_ordered["max"].to_numpy(dtype=float)
+                            _y_min_raw = df_ordered["min"].to_numpy(dtype=float)
                             fig_ldc.add_trace(
                                 go.Scatter(
                                     x=x_rank,
-                                    y=df_ordered["max"].to_numpy(dtype=float),
+                                    y=_ldc_smooth(_y_max_raw, _sw),
                                     mode="lines",
                                     name="Max (paired)",
                                     line=dict(color="rgba(127,0,0,0.85)", width=0.8),
@@ -1406,7 +1500,7 @@ def fan_compare_simulations_dashboard(
                             fig_ldc.add_trace(
                                 go.Scatter(
                                     x=x_rank,
-                                    y=df_ordered["min"].to_numpy(dtype=float),
+                                    y=_ldc_smooth(_y_min_raw, _sw),
                                     mode="lines",
                                     name="Min-Max band (paired)",
                                     line=dict(color="rgba(0,68,27,0.85)", width=0.8),
@@ -1428,7 +1522,7 @@ def fan_compare_simulations_dashboard(
                                 fig_ldc.add_trace(
                                     go.Scatter(
                                         x=x_rank,
-                                        y=series_q,
+                                        y=_ldc_smooth(series_q, _sw),
                                         mode="lines",
                                         name=f"{name} (paired)",
                                         line=style,
@@ -1534,12 +1628,14 @@ def fan_compare_simulations_dashboard(
                         if combined:
                             x_pts: List[float] = []
                             y_pts: List[float] = []
+                            dt_pts: List[pd.Timestamp] = []
                             for i, dt in enumerate(paired_index):
                                 if dt in combined:
                                     x_here = float(paired_x_rank[i])
                                     for val in combined[dt]:
                                         x_pts.append(x_here)
                                         y_pts.append(val)
+                                        dt_pts.append(dt)
                             if x_pts:
                                 arr_x = np.array(x_pts, dtype=float)
                                 arr_y = np.array(y_pts, dtype=float)
@@ -1548,16 +1644,77 @@ def fan_compare_simulations_dashboard(
                                     meas_x_extent = (float(np.nanmin(arr_x)), float(np.nanmax(arr_x)))  # type: ignore
                                 except Exception:
                                     meas_x_extent = None  # type: ignore
-                                fig_ldc.add_trace(
-                                    go.Scatter(
-                                        x=arr_x,
-                                        y=arr_y,
-                                        mode="markers",
-                                        name="Measured (paired)",
-                                        marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
-                                        hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                # Split markers by event / non-event using same colours as main graph
+                                # When flow-sorted, classify by SWAT flow threshold directly
+                                # (not by buffered event_context days which may use a different
+                                # flow source / buffer). This keeps markers, background shading,
+                                # and the x-axis position all consistent.
+                                _show_event_split = False
+                                _ldc_ev_set: set = set()
+                                if LDC_SORT_BY_FLOW and paired_index is not None:
+                                    try:
+                                        _thr_token = str(dd_event_threshold.value) if 'dd_event_threshold' in dir() else "p75"
+                                        if _thr_token.startswith("p"):
+                                            _pct = float(_thr_token[1:])
+                                        elif _thr_token == "abs":
+                                            _pct = None
+                                        else:
+                                            _pct = 75.0
+                                        _flow_arr = flow_series.reindex(paired_index).to_numpy(dtype=float)
+                                        if _pct is not None:
+                                            _flow_thr = float(np.nanpercentile(_flow_arr[np.isfinite(_flow_arr)], _pct))
+                                        else:
+                                            _flow_thr = float(tb_event_abs.value) if 'tb_event_abs' in dir() else None
+                                        if _flow_thr is not None:
+                                            # Event = day with flow >= threshold
+                                            for _ii, _dt_ev in enumerate(paired_index):
+                                                _f_val = _flow_arr[_ii]
+                                                if np.isfinite(_f_val) and _f_val >= _flow_thr:
+                                                    _ldc_ev_set.add(pd.Timestamp(_dt_ev).normalize())
+                                            _show_event_split = len(_ldc_ev_set) > 0
+                                    except Exception:
+                                        pass
+                                if _show_event_split:
+                                    _ev_x, _ev_y = [], []
+                                    _ne_x, _ne_y = [], []
+                                    for _xi, _yi, _di in zip(arr_x, arr_y, dt_pts):
+                                        if pd.Timestamp(_di).normalize() in _ldc_ev_set:
+                                            _ev_x.append(_xi); _ev_y.append(_yi)
+                                        else:
+                                            _ne_x.append(_xi); _ne_y.append(_yi)
+                                    _ev_hex = cp_event_color.value if 'cp_event_color' in dir() else "#fdd0a2"
+                                    _ne_hex = cp_nonevent_color.value if 'cp_nonevent_color' in dir() else "#c6dbef"
+                                    if _ev_x:
+                                        fig_ldc.add_trace(go.Scatter(
+                                            x=np.array(_ev_x), y=np.array(_ev_y),
+                                            mode="markers", name="Measured (high-flow days)",
+                                            marker=dict(color=_ev_hex, size=9,
+                                                        line=dict(color="#333", width=0.8),
+                                                        symbol="diamond"),
+                                            hovertemplate="Measured (event): %{y:.4g}<extra></extra>",
+                                        ))
+                                    if _ne_x:
+                                        fig_ldc.add_trace(go.Scatter(
+                                            x=np.array(_ne_x), y=np.array(_ne_y),
+                                            mode="markers", name="Measured (baseflow days)",
+                                            marker=dict(color=_ne_hex, size=9,
+                                                        line=dict(color="#333", width=0.8),
+                                                        symbol="circle"),
+                                            hovertemplate="Measured (baseflow): %{y:.4g}<extra></extra>",
+                                        ))
+                                    _dbg("duration measured overlay (event-split)",
+                                         dict(n_event=len(_ev_x), n_nonevent=len(_ne_x)))
+                                else:
+                                    fig_ldc.add_trace(
+                                        go.Scatter(
+                                            x=arr_x,
+                                            y=arr_y,
+                                            mode="markers",
+                                            name="Measured (paired)",
+                                            marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
+                                            hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                        )
                                     )
-                                )
                                 added = True
                                 _dbg("duration measured overlay (paired)", dict(n_points=int(arr_y.size)))
                     else:
@@ -1593,6 +1750,72 @@ def fan_compare_simulations_dashboard(
                 except Exception as _e_meas_dc:
                     _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
+                # ----- Flow-regime background shading on the LDC -----
+                # When sorted by flow, shade the event (high-flow, right) and
+                # non-event (baseflow, left) zones using the same colours as
+                # the main graph's event background.
+                # Uses SWAT flow percentile threshold directly (same as marker
+                # colouring) so background, markers, and x-axis are consistent.
+                if LDC_SORT_BY_FLOW:
+                    try:
+                        if paired_index is not None and paired_x_rank is not None:
+                            # Compute flow threshold from the same SWAT flow series
+                            _thr_token_bg = str(dd_event_threshold.value) if 'dd_event_threshold' in dir() else "p75"
+                            if _thr_token_bg.startswith("p"):
+                                _pct_bg = float(_thr_token_bg[1:])
+                            elif _thr_token_bg == "abs":
+                                _pct_bg = None
+                            else:
+                                _pct_bg = 75.0
+                            _flow_arr_bg = flow_series.reindex(paired_index).to_numpy(dtype=float)
+                            if _pct_bg is not None:
+                                _flow_thr_bg = float(np.nanpercentile(_flow_arr_bg[np.isfinite(_flow_arr_bg)], _pct_bg))
+                            else:
+                                _flow_thr_bg = float(tb_event_abs.value) if 'tb_event_abs' in dir() else None
+                            if _flow_thr_bg is not None:
+                                # Find the boundary x-rank where flow crosses the threshold.
+                                # Ascending sort (flow-percentile): first qualifying index.
+                                # Descending sort (exceedance): last qualifying index.
+                                _boundary_x = None
+                                for _i_bg, _dt_bg in enumerate(paired_index):
+                                    _f_bg = _flow_arr_bg[_i_bg]
+                                    if np.isfinite(_f_bg) and _f_bg >= _flow_thr_bg:
+                                        _boundary_x = float(paired_x_rank[_i_bg])
+                                        if LDC_SORT_BY_FLOW:
+                                            break  # ascending: first match is boundary
+                                if _boundary_x is not None:
+                                    _ev_hex_bg = cp_event_color.value if 'cp_event_color' in dir() else "#fdd0a2"
+                                    _ne_hex_bg = cp_nonevent_color.value if 'cp_nonevent_color' in dir() else "#c6dbef"
+                                    def _hex_rgba_ldc(h: str, a: float) -> str:
+                                        h = h.lstrip('#')
+                                        if len(h) == 3:
+                                            h = ''.join(c * 2 for c in h)
+                                        return f"rgba({int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{a})"
+                                    _bg_alpha = 0.12
+                                    # Flow-percentile axis: low flow (left, 0) → high flow (right, 100)
+                                    # Events (high flow) are at x >= _boundary_x (right side)
+                                    fig_ldc.add_shape(
+                                        type="rect", xref="x", yref="paper",
+                                        x0=0, x1=_boundary_x, y0=0, y1=1,
+                                        fillcolor=_hex_rgba_ldc(_ne_hex_bg, _bg_alpha),
+                                        line=dict(width=0), layer="below",
+                                    )
+                                    fig_ldc.add_shape(
+                                        type="rect", xref="x", yref="paper",
+                                        x0=_boundary_x, x1=100, y0=0, y1=1,
+                                        fillcolor=_hex_rgba_ldc(_ev_hex_bg, _bg_alpha),
+                                        line=dict(width=0), layer="below",
+                                    )
+                                    # Thin vertical separator at the regime boundary
+                                    fig_ldc.add_shape(
+                                        type="line", xref="x", yref="paper",
+                                        x0=_boundary_x, x1=_boundary_x, y0=0, y1=1,
+                                        line=dict(color="grey", width=1.2, dash="dot"),
+                                        layer="above",
+                                    )
+                                    _dbg("ldc_event_bg", dict(boundary_x=_boundary_x, threshold=_flow_thr_bg))
+                    except Exception as _e_ldc_bg:
+                        _dbg("ldc_event_bg_failed", str(_e_ldc_bg))
                 # Apply optional log scaling before final layout so we can adjust label
                 if 'LDC_LOG_SCALE' in locals() and LDC_LOG_SCALE:
                     try:
@@ -1623,9 +1846,11 @@ def fan_compare_simulations_dashboard(
                 _unit_match = _re_ldc.search(r'\(([^)]+)\)', y_axis_title)
                 y_axis_final = _unit_match.group(1) + " (log)" if _unit_match else y_axis_title
 
-                # Ensure x-axis shows 0 (high flows) to 100 (low flows) from left to right (standard orientation)
+                # Ensure x-axis: flow-percentile (0=low,100=high) when flow-sorted, otherwise exceedance
                 # Decide x-axis range: optionally clip to measured overlay extent if requested in ui_defaults
                 clip_meas = bool((ui_defaults or {}).get("ldc_clip_meas_extent", False)) if 'ui_defaults' in locals() else False
+                _x_axis_label = (r"SWAT flow percentile (%)" if LDC_SORT_BY_FLOW
+                                 else r"% of time where predicted mean load exceeded (%)")
                 if clip_meas and 'meas_x_extent' in locals() and isinstance(meas_x_extent, tuple) and meas_x_extent:
                     try:
                         xmin, xmax = meas_x_extent  # type: ignore
@@ -1640,13 +1865,13 @@ def fan_compare_simulations_dashboard(
                                 need = 2.0 - (xmax_clip - xmin_clip)
                                 xmin_clip = max(0.0, xmin_clip - need/2)
                                 xmax_clip = min(100.0, xmax_clip + need/2)
-                            xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[xmin_clip, xmax_clip])
+                            xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[xmin_clip, xmax_clip])
                         else:
-                            xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
+                            xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
                     except Exception:
-                        xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
+                        xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
                 else:
-                    xaxis_obj = dict(title=dict(text=r"% of time where predicted mean load exceeded (%)", font=dict(size=19)), range=[0,100])
+                    xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
 
                 # Optional y-axis clipping when x clipping is enabled to focus on visible measurement-driven subset
                 if clip_meas:
@@ -1697,7 +1922,8 @@ def fan_compare_simulations_dashboard(
                 except Exception:
                     title_x = 0.35
                 _ldc_var_name = dd_var.value if 'dd_var' in dir() else ""
-                _ldc_title_text = f"{_ldc_var_name} \u2013 Simulation Load Duration Curve" if _ldc_var_name else "Simulation Load Duration Curve"
+                _ldc_suffix = "Load vs Flow Percentile" if LDC_SORT_BY_FLOW else "Simulation Load Duration Curve"
+                _ldc_title_text = f"{_ldc_var_name} \u2013 {_ldc_suffix}" if _ldc_var_name else _ldc_suffix
                 fig_ldc.update_layout(
                     title=dict(text=_ldc_title_text, x=title_x, xanchor="center", font=dict(size=22)),
                     xaxis=xaxis_obj,
@@ -2308,6 +2534,10 @@ def fan_compare_simulations_dashboard(
         if figure_width is not None:
             fig.layout.width = int(figure_width)
         fig.layout.height = int(figure_height)
+        # Z-order control: traces are collected per group, then added in order
+        _active_trace_order = list(trace_order) if trace_order else list(_TRACE_ORDER_DEFAULT)
+        _deferred_groups: Dict[str, list] = {k: [] for k in _TRACE_ORDER_DEFAULT}
+        _last["trace_order"] = _active_trace_order
         # Grey overlay for filtered-out days (aggregate any consecutive excluded days over full date span)
         try:
             if selected_days_set is not None and len(selected_days_set) > 0:
@@ -2332,7 +2562,7 @@ def fan_compare_simulations_dashboard(
                     if blocks != existing_ranges:
                         # Remove previous overlay shapes (keep other shapes if any by filtering on fillcolor signature)
                         prev_shapes = list(getattr(fig.layout, 'shapes', []))
-                        remaining = [s for s in prev_shapes if not (isinstance(s, dict) and str(s.get('fillcolor','')).startswith('rgba(90,90,90'))]
+                        remaining = [s for s in prev_shapes if not str(getattr(s, 'fillcolor', '') or '').startswith('rgba(90,90,90')]
                         new_shapes = []
                         for a, b in blocks:
                             new_shapes.append(dict(
@@ -2355,9 +2585,103 @@ def fan_compare_simulations_dashboard(
         except Exception as _e_overlay:
             _dbg('overlay build failed', str(_e_overlay))
 
+        # Event / non-event background illustration (purely visual, no stats impact)
+        try:
+            if cb_show_event_bg.value:
+                _ec = _last.get("event_context") or {}
+                _ev_days = _ec.get("buffered_events")  # DatetimeIndex or None
+                _all_days = _ec.get("all_days")         # DatetimeIndex or None
+                _dbg("event_bg: ev_days=%s all_days=%s" % (
+                    len(_ev_days) if _ev_days is not None else None,
+                    len(_all_days) if _all_days is not None else None,
+                ))
+                if _ev_days is not None and _all_days is not None and len(_ev_days) > 0 and len(_all_days) > 0:
+                    _noev_days = _all_days.difference(_ev_days)
+                    # Helper: group sorted DatetimeIndex into consecutive-day blocks
+                    def _group_consecutive(idx: pd.DatetimeIndex):
+                        if idx is None or len(idx) == 0:
+                            return []
+                        days_sorted = idx.sort_values().normalize()
+                        blks = []
+                        for d in days_sorted:
+                            if not blks or d - blks[-1][1] > pd.Timedelta(days=1):
+                                blks.append([d, d])
+                            else:
+                                blks[-1][1] = d
+                        return blks
+
+                    def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+                        h = hex_color.lstrip('#')
+                        if len(h) == 3:
+                            h = ''.join(c * 2 for c in h)
+                        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                        return f"rgba({r},{g},{b},{alpha})"
+
+                    ev_alpha = 0.30
+                    ev_rgba = _hex_to_rgba(cp_event_color.value, ev_alpha)
+                    noev_rgba = _hex_to_rgba(cp_nonevent_color.value, ev_alpha)
+
+                    ev_blocks = _group_consecutive(_ev_days)
+                    noev_blocks = _group_consecutive(_noev_days)
+                    _dbg("event_bg: ev_blocks=%d noev_blocks=%d alpha=%.2f" % (len(ev_blocks), len(noev_blocks), ev_alpha))
+
+                    # Remove previous event-bg shapes (works for both dict and Shape objects)
+                    prev_shapes = list(getattr(fig.layout, 'shapes', []))
+                    remaining = [s for s in prev_shapes if not str(getattr(s, 'name', '') or '').startswith('_event_bg')]
+                    event_bg_shapes = []
+                    for a, b in ev_blocks:
+                        event_bg_shapes.append(dict(
+                            type='rect', xref='x', yref='paper',
+                            x0=a, x1=(b + pd.Timedelta(days=1)),
+                            y0=0, y1=1, fillcolor=ev_rgba,
+                            line=dict(width=0), layer='below', name='_event_bg_ev',
+                        ))
+                    for a, b in noev_blocks:
+                        event_bg_shapes.append(dict(
+                            type='rect', xref='x', yref='paper',
+                            x0=a, x1=(b + pd.Timedelta(days=1)),
+                            y0=0, y1=1, fillcolor=noev_rgba,
+                            line=dict(width=0), layer='below', name='_event_bg_noev',
+                        ))
+                    fig.layout.shapes = tuple(remaining + event_bg_shapes)
+                    _dbg("event_bg: total shapes set = %d" % len(fig.layout.shapes))
+                    # Legend proxies for event and non-event backgrounds
+                    if not any(getattr(tr, 'name', '') == 'High-flow days' for tr in fig.data):
+                        fig.add_trace(go.Scatter(
+                            x=[None], y=[None], mode='markers',
+                            marker=dict(size=10, color=ev_rgba, symbol='square'),
+                            name='High-flow days', hoverinfo='skip', showlegend=True,
+                        ))
+                    if not any(getattr(tr, 'name', '') == 'Baseflow days' for tr in fig.data):
+                        fig.add_trace(go.Scatter(
+                            x=[None], y=[None], mode='markers',
+                            marker=dict(size=10, color=noev_rgba, symbol='square'),
+                            name='Baseflow days', hoverinfo='skip', showlegend=True,
+                        ))
+                else:
+                    _dbg("event_bg: skipped – no event/all_days data available")
+            else:
+                # Checkbox off – remove any leftover event-bg shapes
+                prev_shapes = list(getattr(fig.layout, 'shapes', []))
+                cleaned = [s for s in prev_shapes if not str(getattr(s, 'name', '') or '').startswith('_event_bg')]
+                if len(cleaned) != len(prev_shapes):
+                    fig.layout.shapes = tuple(cleaned)
+        except Exception as _e_evbg:
+            _dbg('event background build failed', str(_e_evbg))
+
         # Fan chart vs simplified band depending on number of runs
-        color = "#1f77b4"
-        rgba = lambda a: f"rgba(31,119,180,{a})"
+        # Parse band color into rgba helper
+        _bc = str(band_color).lstrip('#')
+        if len(_bc) == 3:
+            _bc = ''.join(c * 2 for c in _bc)
+        _br, _bg, _bb = int(_bc[0:2], 16), int(_bc[2:4], 16), int(_bc[4:6], 16)
+        _band_alpha = float(band_alpha)
+        # Derived alphas: outer band ~43% of base, inner band = base, min-max line ~71% of base, fill ~64%
+        _alpha_outer = round(_band_alpha * 0.43, 3)
+        _alpha_inner = round(_band_alpha, 3)
+        _alpha_mm_line = round(_band_alpha * 0.71, 3)
+        _alpha_mm_fill = round(_band_alpha * 0.64, 3)
+        rgba = lambda a: f"rgba({_br},{_bg},{_bb},{a})"
         n_runs_here = int(arr_plot.shape[1])
         min_runs_for_bands = 5
         # Median with percentile tooltip
@@ -2388,27 +2712,27 @@ def fan_compare_simulations_dashboard(
             
             if cb_show_ensemble.value:
                 # 90% band (p05..p95)
-                fig.add_trace(go.Scatter(
+                _deferred_groups["bands"].append(go.Scatter(
                     x=x_dt, y=_nan_to_none(p95_masked), mode="lines",
-                    line=dict(color=rgba(0.12), width=0.5),
+                    line=dict(color=rgba(_alpha_outer), width=0.5),
                     name="p95", showlegend=False, hoverinfo="skip"
                 ))
-                fig.add_trace(go.Scatter(
+                _deferred_groups["bands"].append(go.Scatter(
                     x=x_dt, y=_nan_to_none(p05_masked), mode="lines",
-                    line=dict(color=rgba(0.12), width=0.5),
-                    fill="tonexty", fillcolor=rgba(0.12),
+                    line=dict(color=rgba(_alpha_outer), width=0.5),
+                    fill="tonexty", fillcolor=rgba(_alpha_outer),
                     name="p05-p95", showlegend=True, hoverinfo="skip"
                 ))
                 # 50% band (p25..p75)
-                fig.add_trace(go.Scatter(
+                _deferred_groups["bands"].append(go.Scatter(
                     x=x_dt, y=_nan_to_none(p75_masked), mode="lines",
-                    line=dict(color=rgba(0.28), width=0.5),
+                    line=dict(color=rgba(_alpha_inner), width=0.5),
                     name="p75", showlegend=False, hoverinfo="skip"
                 ))
-                fig.add_trace(go.Scatter(
+                _deferred_groups["bands"].append(go.Scatter(
                     x=x_dt, y=_nan_to_none(p25_masked), mode="lines",
-                    line=dict(color=rgba(0.28), width=0.5),
-                    fill="tonexty", fillcolor=rgba(0.28),
+                    line=dict(color=rgba(_alpha_inner), width=0.5),
+                    fill="tonexty", fillcolor=rgba(_alpha_inner),
                     name="p25-p75", showlegend=True, hoverinfo="skip"
                 ))
                 # Median — deferred: added after flows/erosion for correct z-order
@@ -2438,13 +2762,13 @@ def fan_compare_simulations_dashboard(
                     vmean[sufficient_indices] = np.nanmean(arr_plot[sufficient_indices, :], axis=1)
             if cb_show_ensemble.value:
                 # Max then min with fill between
-                fig.add_trace(go.Scatter(
-                    x=x_dt, y=_nan_to_none(vmax), mode="lines", line=dict(color=rgba(0.20), width=0.5),
+                _deferred_groups["bands"].append(go.Scatter(
+                    x=x_dt, y=_nan_to_none(vmax), mode="lines", line=dict(color=rgba(_alpha_mm_line), width=0.5),
                     name="max", showlegend=False, hoverinfo="skip"
                 ))
-                fig.add_trace(go.Scatter(
-                    x=x_dt, y=_nan_to_none(vmin), mode="lines", line=dict(color=rgba(0.20), width=0.5),
-                    fill="tonexty", fillcolor=rgba(0.18),
+                _deferred_groups["bands"].append(go.Scatter(
+                    x=x_dt, y=_nan_to_none(vmin), mode="lines", line=dict(color=rgba(_alpha_mm_line), width=0.5),
+                    fill="tonexty", fillcolor=rgba(_alpha_mm_fill),
                     name="min-max", showlegend=True, hoverinfo="skip"
                 ))
                 # Create customdata with min, mean, max and their formatted units
@@ -2711,7 +3035,7 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         pass
                     color = extra_palette[ei % len(extra_palette)]; ei += 1
-                    fig.add_trace(go.Scatter(
+                    _deferred_groups["extra"].append(go.Scatter(
                         x=_to_plotly_x(s_ex.index), y=s_ex.values, mode="lines",
                         name=str(name), line=dict(color=color, width=2),
                         customdata=_make_customdata(s_ex.values),
@@ -3102,9 +3426,9 @@ def fan_compare_simulations_dashboard(
                         title_font_color="#1f77b4"
                     ))
                     # Single dotted blue line, with legend label requested
-                    fig.add_trace(go.Scatter(
+                    _deferred_groups["measured_flow"].append(go.Scatter(
                         x=_to_plotly_x(s_flow.index), y=s_flow.values, mode="lines",
-                        name="Measured water flow (m3/d)", yaxis='y2',
+                        name="Water flow (m3/d)", yaxis='y2',
                         line=dict(color="#1f77b4", width=1.2, dash="dot"),
                         customdata=_make_customdata(s_flow.values),
                         hovertemplate="Water flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
@@ -3114,9 +3438,11 @@ def fan_compare_simulations_dashboard(
                 _last["flow_series"] = None
 
         # SWAT average flow overlay (from simulation DataFrames; FLOW_OUT * 86400)
+        # Always compute when flow checkbox is on OR ldc_sort_by == "flow"
         _last["swat_flow_series"] = None
+        _need_swat_flow = bool(cb_swat_flow_on.value) or str((ui_defaults or {}).get("ldc_sort_by", "")).lower() == "flow"
         try:
-            if bool(cb_swat_flow_on.value):
+            if _need_swat_flow:
                 per_sim_flow: Dict[str, pd.Series] = {}
                 for sim_name, df in sim_dfs.items():
                     try:
@@ -3169,20 +3495,22 @@ def fan_compare_simulations_dashboard(
                         s_swat_mean = s_swat_mean.loc[s_swat_mean.index <= _plot_end_ts]
                 if s_swat_mean is not None and not s_swat_mean.empty:
                     _last["swat_flow_series"] = s_swat_mean
-                    # Ensure y2 axis exists and add SWAT flow trace
-                    fig.update_layout(yaxis2=dict(
-                        title="Measured water flow (m3/d)", overlaying='y', side='right', showgrid=False,
-                        autorange=False, title_standoff=20, automargin=True,
-                        title_font_color="#1f77b4"
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=_to_plotly_x(s_swat_mean.index), y=s_swat_mean.values, mode="lines",
-                        name="Simulated water flow (m3/d)", yaxis='y2',
-                        line=dict(color="#17becf", width=1.6, dash="solid"),
-                        customdata=_make_customdata(s_swat_mean.values),
-                        hovertemplate="SWAT flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
-                        visible=True,
-                    ))
+                    # Only add the trace to the main chart when the display checkbox is on
+                    if bool(cb_swat_flow_on.value):
+                        # Ensure y2 axis exists and add SWAT flow trace
+                        fig.update_layout(yaxis2=dict(
+                            title="Water flow (m3/d)", overlaying='y', side='right', showgrid=False,
+                            autorange=False, title_standoff=20, automargin=True,
+                            title_font_color="#1f77b4"
+                        ))
+                        _deferred_groups["swat_flow"].append(go.Scatter(
+                            x=_to_plotly_x(s_swat_mean.index), y=s_swat_mean.values, mode="lines",
+                            name="Simulated water flow (m3/d)", yaxis='y2',
+                            line=dict(color="#17becf", width=1.6, dash="solid"),
+                            customdata=_make_customdata(s_swat_mean.values),
+                            hovertemplate="SWAT flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
+                            visible=True,
+                        ))
         except Exception:
             _last["swat_flow_series"] = None
 
@@ -3205,7 +3533,7 @@ def fan_compare_simulations_dashboard(
                 y2_range = [fmin - fpad, fmax + fpad]
                 _last["flow_y_range"] = y2_range
                 fig.update_layout(yaxis2=dict(
-                    title="Measured water flow (m3/d)", overlaying='y', side='right', showgrid=False,
+                    title="Water flow (m3/d)", overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y2_range, title_standoff=20, automargin=True,
                     title_font_color="#1f77b4"
                 ))
@@ -3313,7 +3641,7 @@ def fan_compare_simulations_dashboard(
                     autorange=False, range=y3_range, anchor='x', title_standoff=100, automargin=True,
                     ticklabelposition='inside', ticks='inside', title_font_color="#8c564b"
                 ))
-                fig.add_trace(go.Scatter(
+                _deferred_groups["erosion"].append(go.Scatter(
                     x=_to_plotly_x(s_ero_mean.index), y=s_ero_mean.values, mode="lines",
                     name="Erosion (SED_IN - SED_OUT)", yaxis='y3',
                     line=dict(color="#8c564b", width=1.8),
@@ -3337,21 +3665,38 @@ def fan_compare_simulations_dashboard(
                 pass
             _last["erosion_series"] = None
 
-        # Add deferred central trace (median or mean) AFTER flows/erosion
-        # so it draws on top of them in the Plotly rendering order.
+        # Fold per-variable deferred traces into the group system
         if _deferred_central_trace is not None:
-            fig.add_trace(_deferred_central_trace)
-
-        # Add deferred measured diamond traces last (on top of everything)
+            _deferred_groups["central"].append(_deferred_central_trace)
         try:
-            for _dt in _deferred_diamond_traces:
-                fig.add_trace(_dt)
+            _deferred_groups["measured"].extend(_deferred_diamond_traces)
         except NameError:
             pass  # _deferred_diamond_traces not defined (no measured overlay)
 
-        # -- stale reorder block kept as no-op safety comment --
-        # The correct z-order is now enforced by the add_trace() call
-        # sequence above.  No post-hoc fig.data reassignment needed.
+        # Add ALL traces in the user-specified z-order (first group = bottom)
+        # Use Plotly's per-trace zorder to enforce rendering order across axes.
+        # All traces WITHIN a group share the same zorder so that
+        # fill="tonexty" pairs stay on the same SVG layer.
+        _dbg("trace_order", _active_trace_order,
+             {k: len(v) for k, v in _deferred_groups.items() if v})
+        _z_group = 0
+        for _grp in _active_trace_order:
+            _grp_traces = _deferred_groups.get(_grp, [])
+            for _tr in _grp_traces:
+                _tr.zorder = _z_group
+                fig.add_trace(_tr)
+            if _grp_traces:
+                _z_group += 1
+        # Safety net: add any groups not listed in trace_order
+        _seen_grps = set(_active_trace_order)
+        for _grp in _TRACE_ORDER_DEFAULT:
+            if _grp not in _seen_grps:
+                _grp_traces = _deferred_groups.get(_grp, [])
+                for _tr in _grp_traces:
+                    _tr.zorder = _z_group
+                    fig.add_trace(_tr)
+                if _grp_traces:
+                    _z_group += 1
 
         # Save measured series for stats box
         if measured_present and cb_meas_on.value:
@@ -4204,6 +4549,15 @@ def fan_compare_simulations_dashboard(
             pass
     cb_show_ensemble.observe(_on_ensemble_toggle, names="value")
 
+    def _on_event_bg_change(_):
+        try:
+            _compute_and_plot()
+        except Exception:
+            pass
+    cb_show_event_bg.observe(_on_event_bg_change, names="value")
+    cp_event_color.observe(_on_event_bg_change, names="value")
+    cp_nonevent_color.observe(_on_event_bg_change, names="value")
+
     # Stats/dx toggles
     for _w in (dd_lag_metric, sl_max_lag, sel_local_K, cb_log_metrics, cb_show_diags, cb_ldc_sediment):
         try:
@@ -4223,7 +4577,8 @@ def fan_compare_simulations_dashboard(
 
     # Layout controls
     controls_left = widgets.VBox([num_sim, dd_var, tg_units, dd_method, dd_flow_source, lbl_units])
-    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider, cb_show_ensemble]
+    base_right_children = [dd_reach, dd_freq, sl_bin, cb_autoscale_y_live, cb_show_names_in_tooltip, cb_range_slider, cb_show_ensemble,
+                           cb_show_event_bg, widgets.HBox([cp_event_color, cp_nonevent_color])]
 
     if measured_present:
         cat_boxes = []
@@ -4654,6 +5009,9 @@ def _normalize_headless_dashboard_config(
         "show_erosion": bool(raw.get("show_erosion", False)),
         "show_diagnostics": bool(raw.get("show_diagnostics", True)),
         "show_ensemble": bool(raw.get("show_ensemble", True)),
+        "show_event_bg": bool(raw.get("show_event_bg", False)),
+        "event_bg_color": str(raw.get("event_bg_color", "#fdd0a2")),
+        "nonevent_bg_color": str(raw.get("nonevent_bg_color", "#c6dbef")),
         "lag_metric": raw.get("lag_metric", "r"),
         "max_lag": int(raw.get("max_lag", 2)),
         "local_window_ks": list(raw.get("local_window_ks", [1, 2])),
