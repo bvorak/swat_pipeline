@@ -1319,6 +1319,8 @@ def _calculate_data_usage(
 
     window: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None,
 
+    unfiltered_sim_days: Optional[int] = None,
+
 ) -> Dict[str, Union[int, float]]:
 
     """Calculate statistics on data usage/filtering for transparency.
@@ -1359,7 +1361,13 @@ def _calculate_data_usage(
 
     # Calculate simulation data availability
 
-    sim_total_days = len(q_df.index)
+    # When an event filter is active q_df only contains the selected days
+
+    # (resample may re-expand gaps with NaN).  Use the caller-supplied
+
+    # unfiltered day count so "sim coverage" = finite-selected / all-days.
+
+    sim_total_days = unfiltered_sim_days if unfiltered_sim_days and unfiltered_sim_days > 0 else len(q_df.index)
 
     sim_finite_days = q_df.notna().any(axis=1).sum()  # Days with any finite simulation data
 
@@ -1596,7 +1604,21 @@ def compute_stats_for_view(
 
     # Calculate data usage statistics
 
-    data_usage = _calculate_data_usage(q_df, measured_series, window=window)
+    # Derive the unfiltered day count from event_context when available so
+
+    # that sim_days_total reflects the full series, not the event-filtered q_df.
+
+    _unfiltered = None
+
+    if isinstance(event_context, dict):
+
+        _ad = event_context.get("all_days")
+
+        if _ad is not None:
+
+            _unfiltered = int(len(_ad)) if hasattr(_ad, "__len__") else None
+
+    data_usage = _calculate_data_usage(q_df, measured_series, window=window, unfiltered_sim_days=_unfiltered)
 
     stats["data_usage"] = data_usage
 
