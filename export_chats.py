@@ -144,23 +144,23 @@ def reconstruct_session(jsonl_path: Path) -> dict:
 
             elif kind == 2:
                 keys = entry.get("k", [])
+                has_i = "i" in entry
+                has_v = "v" in entry
+                splice_idx = entry.get("i")
+                value = entry.get("v")
 
-                if "i" in entry and "v" not in entry:
-                    # Splice / delete operation: remove item at index i
-                    container, last_key = _walk_to(state, keys + ["__placeholder"])
-                    # container should be the array pointed to by keys
+                if has_i and not has_v:
+                    # Pure delete: remove item at index i
                     target, tkey = _walk_to(state, keys)
                     if target is not None and tkey is not None:
                         arr = target[tkey] if isinstance(target, dict) else (
                             target[tkey] if isinstance(tkey, int) and isinstance(target, list) and tkey < len(target) else None
                         )
                         if isinstance(arr, list):
-                            idx = entry["i"]
-                            if 0 <= idx < len(arr):
-                                arr.pop(idx)
+                            if 0 <= splice_idx < len(arr):
+                                arr.pop(splice_idx)
                     continue
 
-                value = entry.get("v")
                 if value is None:
                     continue
 
@@ -172,21 +172,22 @@ def reconstruct_session(jsonl_path: Path) -> dict:
                     container, last_key = _walk_to(state, keys)
                     if container is not None and last_key is not None:
                         if isinstance(value, list):
-                            # Append to existing array
                             existing = None
                             if isinstance(container, dict):
                                 existing = container.get(last_key)
                             elif isinstance(container, list) and isinstance(last_key, int) and last_key < len(container):
                                 existing = container[last_key]
                             if isinstance(existing, list):
+                                if has_i and isinstance(splice_idx, int):
+                                    # Splice: truncate at index i, then append v
+                                    del existing[splice_idx:]
                                 existing.extend(value)
                             else:
-                                # Set directly
                                 _set_nested(state, keys, value)
                         else:
                             _set_nested(state, keys, value)
                 else:
-                    if "v" in entry:
+                    if has_v:
                         _set_nested(state, keys, value)
 
     return state
@@ -197,6 +198,7 @@ def reconstruct_session(jsonl_path: Path) -> dict:
 def _extract_text_from_response(response_items: list) -> str:
     """Convert response items into readable Markdown text."""
     parts: list[str] = []
+    seen_tool_labels: set[str] = set()
     for item in response_items:
         if isinstance(item, str):
             parts.append(item)
@@ -237,21 +239,35 @@ def _extract_text_from_response(response_items: list) -> str:
         elif kind == "toolInvocationSerialized":
             msg = item.get("pastTenseMessage") or item.get("invocationMessage") or {}
             label = msg.get("value", "") if isinstance(msg, dict) else str(msg)
-            if label.strip():
-                parts.append(f"\n> **Tool:** {label.strip()}\n")
+            label = label.strip()
+            if label and label not in seen_tool_labels:
+                seen_tool_labels.add(label)
+                parts.append(f"\n> **Tool:** {label}\n\n")
 
         elif kind == "textEditGroup":
             # File edits – just note them
             uri = item.get("uri", {})
             fpath = uri.get("path", "") if isinstance(uri, dict) else ""
             if fpath:
-                parts.append(f"\n> *Edited file:* `{fpath}`\n")
+                parts.append(f"\n> *Edited file:* `{fpath}`\n\n")
 
         elif kind == "codeblockUri":
             uri = item.get("uri", {})
             fpath = uri.get("path", "") if isinstance(uri, dict) else ""
             if fpath:
                 parts.append(f"\n> *Code block file:* `{fpath}`\n")
+
+        elif kind == "inlineReference":
+            ref = item.get("inlineReference", {})
+            if isinstance(ref, dict):
+                name = ref.get("name", "")
+                if not name:
+                    # URI-style reference – use last path segment
+                    path = ref.get("path", "") or ref.get("fsPath", "")
+                    if path:
+                        name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                if name:
+                    parts.append(f"`{name}`")
 
         elif kind == "progressMessage":
             content = item.get("content", {})
@@ -426,18 +442,15 @@ def export_workspace_chats(
     exported = 0
     skipped = 0
 
+    # ── Phase 1: parse all sessions and collect metadata ─────────────
+    parsed_sessions: list[dict] = []
+
     for sf in session_files:
         session_id = sf.stem
         file_hash = _file_hash(sf)
         mtime = sf.stat().st_mtime
 
-        if incremental and manifest.get(session_id, {}).get("hash") == file_hash:
-            skipped += 1
-            if verbose:
-                print(f"  SKIP (unchanged): {session_id}")
-            continue
-
-        # Reconstruct session
+        # Reconstruct session (needed for sorting even if unchanged)
         try:
             state = reconstruct_session(sf)
         except Exception as exc:
@@ -445,22 +458,59 @@ def export_workspace_chats(
             continue
 
         title = state.get("customTitle") or f"Chat {session_id[:8]}"
-        creation = state.get("creationDate")
-        n_turns = len(state.get("requests", []))
+        requests = state.get("requests", [])
+        n_turns = len(requests)
+
+        parsed_sessions.append({
+            "sf": sf,
+            "session_id": session_id,
+            "file_hash": file_hash,
+            "mtime": mtime,
+            "state": state,
+            "title": title,
+            "n_turns": n_turns,
+        })
+
+    # ── Phase 2: sort by source file mtime, newest first ──────────
+    parsed_sessions.sort(key=lambda s: s["mtime"], reverse=True)
+
+    # ── Phase 3: export with numeric prefix for filesystem ordering ──
+    n_digits = len(str(len(parsed_sessions))) if parsed_sessions else 1
+
+    for idx, sess in enumerate(parsed_sessions, start=1):
+        session_id = sess["session_id"]
+        file_hash = sess["file_hash"]
+        state = sess["state"]
+        title = sess["title"]
+        n_turns = sess["n_turns"]
 
         if list_only:
-            created_str = _ts_to_iso(creation)
-            size_kb = sf.stat().st_size / 1024
+            created_str = _ts_to_iso(state.get("creationDate"))
+            size_kb = sess["sf"].stat().st_size / 1024
             print(f"  {title}")
             print(f"    id={session_id}  turns={n_turns}  created={created_str}  size={size_kb:.0f}KB")
             continue
 
-        # Generate markdown
-        md = session_to_markdown(state, session_id, mtime)
+        if incremental and manifest.get(session_id, {}).get("hash") == file_hash:
+            skipped += 1
+            if verbose:
+                print(f"  SKIP (unchanged): {session_id}")
+            continue
 
-        # Filename: sanitized title + short hash to avoid collisions
+        # Remove old file if it exists under a different name
+        old_fname = manifest.get(session_id, {}).get("file")
+        if old_fname:
+            old_path = out / old_fname
+            if old_path.is_file():
+                old_path.unlink()
+
+        # Generate markdown
+        md = session_to_markdown(state, session_id, sess["mtime"])
+
+        # Filename: numeric prefix + sanitized title + short hash
         safe_name = _sanitize_filename(title)
-        fname = f"{safe_name}__{session_id[:8]}.md"
+        prefix = str(idx).zfill(n_digits)
+        fname = f"{prefix}_{safe_name}__{session_id[:8]}.md"
         out_path = out / fname
 
         out_path.write_text(md, encoding="utf-8")
