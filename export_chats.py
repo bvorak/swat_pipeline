@@ -433,8 +433,8 @@ def export_workspace_chats(
         out = ws_root / "chat_exports"
     out.mkdir(parents=True, exist_ok=True)
 
-    # Incremental manifest
-    manifest = load_manifest(out) if incremental else {}
+    # Always load manifest so we can clean up old files when timestamps change
+    manifest = load_manifest(out)
 
     if list_only:
         print(f"Found {len(session_files)} chat session(s) in workspace storage:\n")
@@ -474,9 +474,7 @@ def export_workspace_chats(
     # ── Phase 2: sort by source file mtime, newest first ──────────
     parsed_sessions.sort(key=lambda s: s["mtime"], reverse=True)
 
-    # ── Phase 3: export with numeric prefix for filesystem ordering ──
-    n_digits = len(str(len(parsed_sessions))) if parsed_sessions else 1
-
+    # ── Phase 3: export with date-stamp prefix for filesystem ordering ──
     for idx, sess in enumerate(parsed_sessions, start=1):
         session_id = sess["session_id"]
         file_hash = sess["file_hash"]
@@ -497,21 +495,27 @@ def export_workspace_chats(
                 print(f"  SKIP (unchanged): {session_id}")
             continue
 
-        # Remove old file if it exists under a different name
-        old_fname = manifest.get(session_id, {}).get("file")
-        if old_fname:
-            old_path = out / old_fname
-            if old_path.is_file():
-                old_path.unlink()
-
         # Generate markdown
         md = session_to_markdown(state, session_id, sess["mtime"])
 
-        # Filename: numeric prefix + sanitized title + short hash
+        # Filename: date-stamp prefix (from mtime) + sanitized title + short hash
+        # Date prefix gives stable, sort-friendly names even if sessions are deleted
+        mtime_dt = datetime.fromtimestamp(sess["mtime"], tz=timezone.utc)
+        date_prefix = mtime_dt.strftime("%Y%m%d_%H%M")
         safe_name = _sanitize_filename(title)
-        prefix = str(idx).zfill(n_digits)
-        fname = f"{prefix}_{safe_name}__{session_id[:8]}.md"
+        fname = f"{date_prefix}_{safe_name}__{session_id[:8]}.md"
         out_path = out / fname
+
+        # Remove old file if the name changed (e.g. mtime updated)
+        old_fname = manifest.get(session_id, {}).get("file")
+        if old_fname and old_fname != fname:
+            old_path = out / old_fname
+            if old_path.is_file():
+                old_path.unlink()
+                if verbose:
+                    print(f"  CLEANUP: removed {old_fname}")
+            elif verbose:
+                print(f"  CLEANUP: old file not found: {old_fname}")
 
         out_path.write_text(md, encoding="utf-8")
         exported += 1
@@ -529,6 +533,17 @@ def export_workspace_chats(
             print(f"  EXPORTED: {fname} ({n_turns} turns)")
 
     if not list_only:
+        # Clean up orphaned files (old timestamps for the same session)
+        current_files = {v["file"] for v in manifest.values() if "file" in v}
+        for md_file in out.glob("*.md"):
+            if md_file.name not in current_files:
+                # Check if the __hash suffix matches a known session
+                match = re.search(r"__([0-9a-f]{8})\.md$", md_file.name)
+                if match:
+                    md_file.unlink()
+                    if verbose:
+                        print(f"  CLEANUP: removed orphan {md_file.name}")
+
         save_manifest(out, manifest)
         print(f"\nExported {exported} session(s) to {out}")
         if skipped:
