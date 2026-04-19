@@ -59,3 +59,6 @@ trabajoFM/notebooks/04_sensitivity_stats.pre_python_cleanup_20260409_010053.ipyn
 trabajoFM/notebooks/04_sensitivity_stats.pre_python_cleanup_20260409_010102.ipynb
 trabajoFM/notebooks/04_sensitivity_stats.pre_reapply_20260408_210158.ipynb
 trabajoFM/notebooks/04_sensitivity_stats.pre_reapply_20260408_210232.ipynb
+chat_exports/.chat_export_manifest.json
+.vscode/tasks.json
+chat_exports/

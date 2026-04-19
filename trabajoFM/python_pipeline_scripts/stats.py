@@ -33,6 +33,18 @@ except ImportError:  # scipy optional for lightweight envs
 # -----------------------------
 
 
+def _lag1_autocorr(arr: np.ndarray) -> float:
+    """Lag-1 autocorrelation (ρ₁) of a 1-D array, tolerating NaN gaps.
+
+    Uses ``pd.Series.autocorr(lag=1)`` which skips NaN pairs internally,
+    so the input can contain NaN gaps without breaking temporal ordering.
+    Returns NaN when fewer than 3 finite consecutive-pair values exist.
+    """
+    if arr.size < 3:
+        return float("nan")
+    rho1 = pd.Series(arr).autocorr(lag=1)
+    return float(rho1) if np.isfinite(rho1) else float("nan")
+
 
 def _finite_pairs(y: np.ndarray, m: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -962,6 +974,7 @@ def _pairwise_metrics(
         if finite_resid.size:
             metrics["sd_bias"] = float(np.nanstd(finite_resid))
             metrics["n_bias"] = int(finite_resid.size)
+            metrics["rho1_bias"] = _lag1_autocorr(residuals)
         else:
             metrics["sd_bias"] = float("nan")
             metrics["n_bias"] = 0
@@ -2326,6 +2339,10 @@ def compute_stats_for_view(
     baseline_mean_W_nonevent = float("nan")
     baseline_p90_W_event = float("nan")
     baseline_p90_W_nonevent = float("nan")
+    # Full-range width (max-min) for internally-consistent W_full variant
+    baseline_median_W_full = float("nan")
+    baseline_median_W_full_event = float("nan")
+    baseline_median_W_full_nonevent = float("nan")
     baseline_event_pairs = 0
     baseline_nonevent_pairs = 0
     p05_series_full = _window_series(raw_ensemble.get("p05")) if isinstance(raw_ensemble, dict) else None
@@ -2360,6 +2377,7 @@ def compute_stats_for_view(
                     _ext_bl["n_relative_width"] = int(rel_vals_median.size)
                     _ext_bl["p25_relative_width"] = float(np.nanpercentile(rel_vals_median, 25))
                     _ext_bl["p75_relative_width"] = float(np.nanpercentile(rel_vals_median, 75))
+                    _ext_bl["rho1_relative_width"] = _lag1_autocorr(rel_vals_all)
             if extended_stats and width_vals.size:
                 finite_w = width_vals[np.isfinite(width_vals)]
                 if finite_w.size:
@@ -2367,6 +2385,7 @@ def compute_stats_for_view(
                     _ext_bl["n_W"] = int(finite_w.size)
                     _ext_bl["p25_W"] = float(np.nanpercentile(finite_w, 25))
                     _ext_bl["p75_W"] = float(np.nanpercentile(finite_w, 75))
+                    _ext_bl["rho1_W"] = _lag1_autocorr(width_vals)
             # Mean-based relative width (uses mean of base_subset for each day equivalently -> width/base)
             denom_mean = np.where(np.abs(base_subset) > 0, np.abs(base_subset), np.nan)
             rel_vals_mean = width_vals / denom_mean
@@ -2389,6 +2408,18 @@ def compute_stats_for_view(
                     _ext_bl["n_maxmin_over_median"] = int(maxmin_over_median.size)
                     _ext_bl["p25_maxmin_over_median"] = float(np.nanpercentile(maxmin_over_median, 25))
                     _ext_bl["p75_maxmin_over_median"] = float(np.nanpercentile(maxmin_over_median, 75))
+                    _ext_bl["rho1_maxmin_over_median"] = _lag1_autocorr(maxmin_over_median_all)
+
+            # Absolute full-range width: median(max - min) on intersected index
+            maxmin_finite = maxmin_width[np.isfinite(maxmin_width)]
+            if maxmin_finite.size:
+                baseline_median_W_full = float(np.nanmedian(maxmin_finite))
+                if extended_stats:
+                    _ext_bl["sd_W_full"] = float(np.nanstd(maxmin_finite))
+                    _ext_bl["n_W_full"] = int(maxmin_finite.size)
+                    _ext_bl["p25_W_full"] = float(np.nanpercentile(maxmin_finite, 25))
+                    _ext_bl["p75_W_full"] = float(np.nanpercentile(maxmin_finite, 75))
+                    _ext_bl["rho1_W_full"] = _lag1_autocorr(maxmin_width)
 
             # Event/non-event splits for (max-min)/median
             _bl_idx_days = None
@@ -2423,6 +2454,7 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_maxmin_over_median_event"] = float(np.nanstd(ev_maxmin))
                             _ext_bl["n_maxmin_over_median_event"] = int(ev_maxmin.size)
+                            _ext_bl["rho1_maxmin_over_median_event"] = _lag1_autocorr(maxmin_over_median_all[_bl_ev_mask])
                 if _bl_nev_mask is not None and np.any(_bl_nev_mask):
                     nev_maxmin = _bl_split(maxmin_over_median_all, _bl_nev_mask)
                     if nev_maxmin.size:
@@ -2431,6 +2463,7 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_maxmin_over_median_nonevent"] = float(np.nanstd(nev_maxmin))
                             _ext_bl["n_maxmin_over_median_nonevent"] = int(nev_maxmin.size)
+                            _ext_bl["rho1_maxmin_over_median_nonevent"] = _lag1_autocorr(maxmin_over_median_all[_bl_nev_mask])
 
             # ── Event / non-event splits of ensemble spread ──
             _bl_idx_days = None
@@ -2468,6 +2501,7 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_relative_width_event"] = float(np.nanstd(ev_rel))
                             _ext_bl["n_relative_width_event"] = int(ev_rel.size)
+                            _ext_bl["rho1_relative_width_event"] = _lag1_autocorr(rel_vals_all[_bl_ev_mask])
                     if ev_w.size:
                         baseline_median_W_event = float(np.nanmedian(ev_w))
                         baseline_mean_W_event = float(np.nanmean(ev_w))
@@ -2475,6 +2509,15 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_W_event"] = float(np.nanstd(ev_w))
                             _ext_bl["n_W_event"] = int(ev_w.size)
+                            _ext_bl["rho1_W_event"] = _lag1_autocorr(width_vals[_bl_ev_mask])
+                    # Full-range (max-min) event split
+                    ev_wf = _bl_split(maxmin_width, _bl_ev_mask)
+                    if ev_wf.size:
+                        baseline_median_W_full_event = float(np.nanmedian(ev_wf))
+                        if extended_stats:
+                            _ext_bl["sd_W_full_event"] = float(np.nanstd(ev_wf))
+                            _ext_bl["n_W_full_event"] = int(ev_wf.size)
+                            _ext_bl["rho1_W_full_event"] = _lag1_autocorr(maxmin_width[_bl_ev_mask])
 
                 if _bl_nev_mask is not None and np.any(_bl_nev_mask):
                     nev_rel = _bl_split(rel_vals_all, _bl_nev_mask)
@@ -2486,6 +2529,7 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_relative_width_nonevent"] = float(np.nanstd(nev_rel))
                             _ext_bl["n_relative_width_nonevent"] = int(nev_rel.size)
+                            _ext_bl["rho1_relative_width_nonevent"] = _lag1_autocorr(rel_vals_all[_bl_nev_mask])
                     if nev_w.size:
                         baseline_median_W_nonevent = float(np.nanmedian(nev_w))
                         baseline_mean_W_nonevent = float(np.nanmean(nev_w))
@@ -2493,6 +2537,15 @@ def compute_stats_for_view(
                         if extended_stats:
                             _ext_bl["sd_W_nonevent"] = float(np.nanstd(nev_w))
                             _ext_bl["n_W_nonevent"] = int(nev_w.size)
+                            _ext_bl["rho1_W_nonevent"] = _lag1_autocorr(width_vals[_bl_nev_mask])
+                    # Full-range (max-min) nonevent split
+                    nev_wf = _bl_split(maxmin_width, _bl_nev_mask)
+                    if nev_wf.size:
+                        baseline_median_W_full_nonevent = float(np.nanmedian(nev_wf))
+                        if extended_stats:
+                            _ext_bl["sd_W_full_nonevent"] = float(np.nanstd(nev_wf))
+                            _ext_bl["n_W_full_nonevent"] = int(nev_wf.size)
+                            _ext_bl["rho1_W_full_nonevent"] = _lag1_autocorr(maxmin_width[_bl_nev_mask])
 
                 if (np.isfinite(baseline_relative_width_event)
                         and np.isfinite(baseline_relative_width_nonevent)
@@ -2661,6 +2714,7 @@ def compute_stats_for_view(
                                     _ext_ov_ev = {
                                         "sd_delta_event": float(np.nanstd(_fe)),
                                         "n_delta_event": int(_fe.size),
+                                        "rho1_delta_event": _lag1_autocorr(ev_diff),
                                     }
             except Exception:
                 pass
@@ -2683,6 +2737,7 @@ def compute_stats_for_view(
                                     _ext_ov_nev = {
                                         "sd_delta_nonevent": float(np.nanstd(_fn)),
                                         "n_delta_nonevent": int(_fn.size),
+                                        "rho1_delta_nonevent": _lag1_autocorr(nev_diff),
                                     }
             except Exception:
                 pass
@@ -2785,12 +2840,14 @@ def compute_stats_for_view(
                         _ext_ov["n_delta"] = int(finite_diff.size)
                         _ext_ov["p25_delta"] = float(np.nanpercentile(finite_diff, 25))
                         _ext_ov["p75_delta"] = float(np.nanpercentile(finite_diff, 75))
+                        _ext_ov["rho1_delta"] = _lag1_autocorr(diff)
                 if percent_vals.size:
                     finite_pct = percent_vals[np.isfinite(percent_vals)]
                     if finite_pct.size:
                         _ext_ov["sd_delta_pct"] = float(np.nanstd(finite_pct))
                         _ext_ov["p25_delta_pct"] = float(np.nanpercentile(finite_pct, 25))
                         _ext_ov["p75_delta_pct"] = float(np.nanpercentile(finite_pct, 75))
+                        _ext_ov["rho1_delta_pct"] = _lag1_autocorr(percent_series.to_numpy(dtype=float))
                 if np.isfinite(r_pvalue_overlay):
                     _ext_ov["r_pvalue"] = r_pvalue_overlay
                 for _ek, _ev in _ext_ov.items():
@@ -2879,6 +2936,13 @@ def compute_stats_for_view(
         baseline_entry["p90_W_event"] = baseline_p90_W_event
     if np.isfinite(baseline_p90_W_nonevent):
         baseline_entry["p90_W_nonevent"] = baseline_p90_W_nonevent
+    # Full-range (max-min) width
+    if np.isfinite(baseline_median_W_full):
+        baseline_entry["median_W_full"] = baseline_median_W_full
+    if np.isfinite(baseline_median_W_full_event):
+        baseline_entry["median_W_full_event"] = baseline_median_W_full_event
+    if np.isfinite(baseline_median_W_full_nonevent):
+        baseline_entry["median_W_full_nonevent"] = baseline_median_W_full_nonevent
     if np.isfinite(baseline_coverage_fraction):
         baseline_entry["coverage_fraction"] = baseline_coverage_fraction
     if baseline_summary:
