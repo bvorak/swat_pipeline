@@ -46,6 +46,26 @@ def _lag1_autocorr(arr: np.ndarray) -> float:
     return float(rho1) if np.isfinite(rho1) else float("nan")
 
 
+def _cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
+    """Cliff's delta (δ) — distribution-free effect size for two groups.
+
+    δ = (#{x_i > y_j} − #{x_i < y_j}) / (n_x · n_y)
+
+    Ranges from −1 to +1.  |δ| < 0.147 negligible, < 0.33 small,
+    < 0.474 medium, ≥ 0.474 large  (Romano et al., 2006).
+
+    Uses a vectorised O(n·m) comparison.  Returns NaN when either array
+    has fewer than 1 finite value.
+    """
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+    if x.size < 1 or y.size < 1:
+        return float("nan")
+    # Broadcasting: compare each pair
+    diff = x[:, None] - y[None, :]
+    return float((np.sum(diff > 0) - np.sum(diff < 0)) / diff.size)
+
+
 def _finite_pairs(y: np.ndarray, m: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
     y = np.asarray(y, dtype=float)
@@ -2812,6 +2832,7 @@ def compute_stats_for_view(
                 "delta_event_pairs": delta_event_pairs,
                 "delta_non_event_pairs": delta_non_event_pairs,
                 "normalized_median_delta": normalized_median_delta,
+                "cliffs_delta": _cliffs_delta(base_vals, overlay_vals),
             }
             if SHIFT_AGG == 'both':
                 entry.update({
