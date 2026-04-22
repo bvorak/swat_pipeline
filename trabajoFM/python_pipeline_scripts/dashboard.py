@@ -288,6 +288,9 @@ def fan_compare_simulations_dashboard(
     template: str = "plotly_white",
     figure_width: Optional[int] = 1200,
     figure_height: int = 650,
+    # Optional nested figure layout overrides for the main chart and the
+    # lower duration / "vs flow percentile" chart.
+    dashboard_layout: Optional[Dict[str, Any]] = None,
     # Optional independent overlays (each plotted as its own line)
     extra_dfs: Optional[Dict[str, pd.DataFrame]] = None,
     # Measured overlay (optional)
@@ -312,6 +315,10 @@ def fan_compare_simulations_dashboard(
     # Method Detection Limit (mg/L) – halved when "half_MDL" policy is selected
     mdl_mg_L: float = 0.2,
     mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
+    # Optional styling for observations whose values were assigned via the
+    # half-MDL policy. Styling is opt-in to preserve current visuals.
+    style_half_mdl_observations: bool = False,
+    half_mdl_observation_style: Optional[Dict[str, Any]] = None,
     # Optional UI default selections/toggles
     ui_defaults: Optional[Dict[str, Any]] = None,
     # Optional erosion overlay toggle default
@@ -343,6 +350,14 @@ def fan_compare_simulations_dashboard(
     measured_var_map expected formats per SWAT variable key:
         - dict with keys 1/2/3 (or '1'/'2'/'3') -> list of NOMBRE strings
         - list/tuple of up to three lists of NOMBRE strings
+
+    Layout overrides:
+        - pass `dashboard_layout={...}` directly, or
+        - pass the same structure via `ui_defaults["dashboard_layout"]`
+
+    Expected layout sections:
+        - main_chart: top time-series figure size and margins
+        - duration_chart: lower duration / vs-flow-percentile figure size and margins
     """
     normalized_mdl_mg_L_by_name = normalize_measured_mdl_by_name(
         ui_defaults.get("mdl_mg_L_by_name") if isinstance(ui_defaults, dict) else None
@@ -355,6 +370,683 @@ def fan_compare_simulations_dashboard(
             "(analyte-specific overrides active; unmatched fallback MDL "
             f"{UNMATCHED_ANALYTE_MDL_MG_L:g} mg/L -> {UNMATCHED_ANALYTE_MDL_MG_L * 0.5:g} mg/L)"
         )
+
+    # Structured figure layout overrides for the main time-series chart and the
+    # lower duration / "vs flow percentile" chart. Users can pass the nested
+    # dict either through the dedicated `dashboard_layout` argument or via
+    # `ui_defaults["dashboard_layout"]`.
+    def _merge_nested_dicts(base: Dict[str, Any], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(overrides, dict):
+            return base
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                _merge_nested_dicts(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    def _coerce_optional_int(value: Any, default: Optional[int]) -> Optional[int]:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _coerce_optional_float(value: Any, default: Optional[float]) -> Optional[float]:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _coerce_float(value: Any, default: float) -> float:
+        coerced = _coerce_optional_float(value, default)
+        return default if coerced is None else float(coerced)
+
+    def _normalize_margin(value: Any) -> Dict[str, int]:
+        normalized: Dict[str, int] = {}
+        if not isinstance(value, dict):
+            return normalized
+        key_map = {
+            "left": "l",
+            "right": "r",
+            "top": "t",
+            "bottom": "b",
+            "l": "l",
+            "r": "r",
+            "t": "t",
+            "b": "b",
+        }
+        for raw_key, raw_value in value.items():
+            key = key_map.get(str(raw_key).lower())
+            if key is None or raw_value is None:
+                continue
+            try:
+                normalized[key] = int(raw_value)
+            except Exception:
+                continue
+        return normalized
+
+    def _normalize_font(
+        value: Any,
+        *,
+        default_size: Optional[int] = None,
+        default_color: Optional[str] = None,
+        default_family: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        return {
+            "size": _coerce_optional_int(cfg.get("size", cfg.get("font_size")), default_size),
+            "color": cfg.get("color", default_color),
+            "family": cfg.get("family", default_family),
+        }
+
+    def _normalize_title_style(
+        value: Any,
+        *,
+        default_x: Optional[float] = None,
+        default_xanchor: Optional[str] = None,
+        default_font_size: Optional[int] = None,
+        default_font_color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        title_x = _coerce_optional_float(cfg.get("x"), default_x)
+        if title_x is not None and not (0.0 <= title_x <= 1.0):
+            title_x = default_x
+        return {
+            "x": title_x,
+            "xanchor": cfg.get("xanchor", default_xanchor),
+            "font": _normalize_font(cfg.get("font"), default_size=default_font_size, default_color=default_font_color),
+        }
+
+    def _normalize_axis_style(
+        value: Any,
+        *,
+        default_title_font_size: Optional[int] = None,
+        default_tick_font_size: Optional[int] = None,
+        default_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        return {
+            "type": cfg.get("type", default_type),
+            "title_font": _normalize_font(cfg.get("title_font"), default_size=_coerce_optional_int(cfg.get("title_font_size"), default_title_font_size)),
+            "tick_font": _normalize_font(cfg.get("tick_font"), default_size=_coerce_optional_int(cfg.get("tick_font_size"), default_tick_font_size)),
+            "tickangle": _coerce_optional_int(cfg.get("tickangle"), None),
+            "automargin": cfg.get("automargin"),
+            "showgrid": cfg.get("showgrid"),
+            "zeroline": cfg.get("zeroline"),
+            "title_standoff": _coerce_optional_int(cfg.get("title_standoff"), None),
+        }
+
+    def _normalize_hoverlabel_style(
+        value: Any,
+        *,
+        default_namelength: Optional[int] = None,
+        default_align: Optional[str] = None,
+        default_font_size: Optional[int] = None,
+        default_bgcolor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        return {
+            "namelength": _coerce_optional_int(cfg.get("namelength"), default_namelength),
+            "align": cfg.get("align", default_align),
+            "font_size": _coerce_optional_int(cfg.get("font_size"), default_font_size),
+            "bgcolor": cfg.get("bgcolor", default_bgcolor),
+        }
+
+    def _normalize_legend_style(
+        value: Any,
+        *,
+        default_orientation: Optional[str] = None,
+        default_x: Optional[float] = None,
+        default_y: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        return {
+            "orientation": cfg.get("orientation", default_orientation),
+            "x": _coerce_optional_float(cfg.get("x"), default_x),
+            "y": _coerce_optional_float(cfg.get("y"), default_y),
+            "font": _normalize_font(cfg.get("font"), default_size=_coerce_optional_int(cfg.get("font_size"), None)),
+        }
+
+    def _normalize_rangeslider_style(value: Any) -> Dict[str, Any]:
+        cfg = value if isinstance(value, dict) else {}
+        return {
+            "thickness": _coerce_optional_float(cfg.get("thickness"), 0.08),
+            "bgcolor": cfg.get("bgcolor", "#f6f6f6"),
+            "bordercolor": cfg.get("bordercolor", "#ddd"),
+            "borderwidth": _coerce_optional_int(cfg.get("borderwidth"), 1),
+        }
+
+    def _compact_dict(value: Any) -> Any:
+        if isinstance(value, dict):
+            compacted: Dict[str, Any] = {}
+            for key, raw_val in value.items():
+                new_val = _compact_dict(raw_val)
+                if new_val is None:
+                    continue
+                if isinstance(new_val, dict) and not new_val:
+                    continue
+                if isinstance(new_val, list) and not new_val:
+                    continue
+                compacted[key] = new_val
+            return compacted
+        if isinstance(value, list):
+            return [item for item in (_compact_dict(v) for v in value) if item is not None]
+        return value
+
+    def _build_font_layout(font_style: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        style = font_style if isinstance(font_style, dict) else {}
+        return _compact_dict(
+            {
+                "size": style.get("size"),
+                "color": style.get("color"),
+                "family": style.get("family"),
+            }
+        )
+
+    def _build_title_layout(title_style: Optional[Dict[str, Any]], *, text: str) -> Dict[str, Any]:
+        style = title_style if isinstance(title_style, dict) else {}
+        title_cfg: Dict[str, Any] = {"text": text}
+        if style.get("x") is not None:
+            title_cfg["x"] = style.get("x")
+        if style.get("xanchor") is not None:
+            title_cfg["xanchor"] = style.get("xanchor")
+        font_cfg = _build_font_layout(style.get("font"))
+        if font_cfg:
+            title_cfg["font"] = font_cfg
+        return title_cfg
+
+    def _build_axis_layout(
+        axis_style: Optional[Dict[str, Any]],
+        *,
+        title_text: Optional[str] = None,
+        base: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        style = axis_style if isinstance(axis_style, dict) else {}
+        axis_cfg: Dict[str, Any] = dict(base or {})
+        if style.get("type") is not None and axis_cfg.get("type") is None:
+            axis_cfg["type"] = style.get("type")
+        if title_text is not None:
+            title_cfg: Dict[str, Any] = {"text": title_text}
+            title_font = _build_font_layout(style.get("title_font"))
+            if title_font:
+                title_cfg["font"] = title_font
+            if style.get("title_standoff") is not None:
+                title_cfg["standoff"] = style.get("title_standoff")
+            axis_cfg["title"] = title_cfg
+        tick_font = _build_font_layout(style.get("tick_font"))
+        if tick_font:
+            axis_cfg["tickfont"] = tick_font
+        for key in ("tickangle", "automargin", "showgrid", "zeroline"):
+            if style.get(key) is not None:
+                axis_cfg[key] = style.get(key)
+        return axis_cfg
+
+    def _build_hoverlabel_layout(style: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = style if isinstance(style, dict) else {}
+        return _compact_dict(
+            {
+                "namelength": cfg.get("namelength"),
+                "align": cfg.get("align"),
+                "font_size": cfg.get("font_size"),
+                "bgcolor": cfg.get("bgcolor"),
+            }
+        )
+
+    def _build_legend_layout(style: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = style if isinstance(style, dict) else {}
+        legend_cfg = _compact_dict(
+            {
+                "orientation": cfg.get("orientation"),
+                "x": cfg.get("x"),
+                "y": cfg.get("y"),
+                "font": _build_font_layout(cfg.get("font")),
+            }
+        )
+        return legend_cfg if isinstance(legend_cfg, dict) else {}
+
+    def _build_rangeslider_layout(style: Optional[Dict[str, Any]], *, visible: bool) -> Dict[str, Any]:
+        cfg = style if isinstance(style, dict) else {}
+        return _compact_dict(
+            {
+                "visible": visible,
+                "thickness": cfg.get("thickness"),
+                "bgcolor": cfg.get("bgcolor"),
+                "bordercolor": cfg.get("bordercolor"),
+                "borderwidth": cfg.get("borderwidth"),
+            }
+        )
+
+    def _apply_figure_size(fig_obj: Union[go.Figure, go.FigureWidget], chart_layout: Dict[str, Any]) -> None:
+        update_kwargs: Dict[str, Any] = {}
+        if chart_layout.get("width") is not None:
+            update_kwargs["width"] = int(chart_layout["width"])
+        if chart_layout.get("height") is not None:
+            update_kwargs["height"] = int(chart_layout["height"])
+        if update_kwargs:
+            fig_obj.update_layout(**update_kwargs)
+
+    def _resolve_dashboard_layout() -> Dict[str, Any]:
+        resolved: Dict[str, Any] = {
+            # Top time-series figure shown in the dashboard body.
+            "main_chart": {
+                "width": figure_width,
+                "height": figure_height,
+                "margin": {"l": 60, "r": 20, "t": 50},
+                "bottom_margin": {
+                    "with_range_slider": 150,
+                    "without_range_slider": 110,
+                },
+                "title_annotation": {
+                    "x": 0.5,
+                    "y_with_range_slider": -0.22,
+                    "y_without_range_slider": -0.16,
+                    "xref": "paper",
+                    "yref": "paper",
+                    "xanchor": "center",
+                    "yanchor": "top",
+                    "font": {"size": 22, "color": "black", "family": None},
+                },
+                "hovermode": "x unified",
+                "hoverlabel": {
+                    "namelength": -1,
+                    "align": "left",
+                    "font_size": 12,
+                    "bgcolor": "white",
+                },
+                "legend": {
+                    "orientation": "h",
+                    "x": 0.0,
+                    "y": 1.02,
+                    "font": {"size": None, "color": None, "family": None},
+                },
+                "xaxis": {
+                    "type": "date",
+                    "title_font": {"size": None, "color": None, "family": None},
+                    "tick_font": {"size": None, "color": None, "family": None},
+                    "tickangle": None,
+                    "automargin": None,
+                    "showgrid": None,
+                    "zeroline": None,
+                    "title_standoff": None,
+                    "rangeslider": {
+                        "thickness": 0.08,
+                        "bgcolor": "#f6f6f6",
+                        "bordercolor": "#ddd",
+                        "borderwidth": 1,
+                    },
+                },
+                "yaxis": {
+                    "title_font": {"size": None, "color": None, "family": None},
+                    "tick_font": {"size": None, "color": None, "family": None},
+                    "tickangle": None,
+                    "automargin": None,
+                    "showgrid": None,
+                    "zeroline": None,
+                    "title_standoff": None,
+                },
+            },
+            # Lower duration / "vs flow percentile" figures shown beneath the main chart.
+            "duration_chart": {
+                "width": None,
+                "height": None,
+                "hovermode": None,
+                "hoverlabel": {
+                    "namelength": None,
+                    "align": None,
+                    "font_size": None,
+                    "bgcolor": None,
+                },
+                "legend": {
+                    "orientation": None,
+                    "x": None,
+                    "y": None,
+                    "font": {"size": None, "color": None, "family": None},
+                },
+                "load_duration": {
+                    "margin": {"r": 40},
+                    "title": {
+                        "x": 0.35,
+                        "xanchor": "center",
+                        "font": {"size": 22, "color": None, "family": None},
+                    },
+                    "xaxis": {
+                        "title_font": {"size": 19, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                    "yaxis": {
+                        "title_font": {"size": 21, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                },
+                "flow_duration": {
+                    "margin": {},
+                    "title": {
+                        "x": None,
+                        "xanchor": None,
+                        "font": {"size": None, "color": None, "family": None},
+                    },
+                    "xaxis": {
+                        "title_font": {"size": None, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                    "yaxis": {
+                        "title_font": {"size": None, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                },
+                "flow_stratified": {
+                    "margin": {},
+                    "title": {
+                        "x": None,
+                        "xanchor": None,
+                        "font": {"size": None, "color": None, "family": None},
+                    },
+                    "xaxis": {
+                        "title_font": {"size": None, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                    "yaxis": {
+                        "title_font": {"size": None, "color": None, "family": None},
+                        "tick_font": {"size": None, "color": None, "family": None},
+                        "tickangle": None,
+                        "automargin": None,
+                        "showgrid": None,
+                        "zeroline": None,
+                        "title_standoff": None,
+                    },
+                },
+            },
+        }
+
+        if isinstance(ui_defaults, dict) and "ldc_title_x" in ui_defaults:
+            resolved["duration_chart"]["load_duration"]["title"]["x"] = ui_defaults.get("ldc_title_x")
+        if isinstance(ui_defaults, dict):
+            _merge_nested_dicts(resolved, ui_defaults.get("dashboard_layout"))
+            _merge_nested_dicts(resolved, ui_defaults.get("layout_config"))
+        _merge_nested_dicts(resolved, dashboard_layout)
+
+        main_chart = resolved.get("main_chart", {}) if isinstance(resolved.get("main_chart"), dict) else {}
+        duration_chart = resolved.get("duration_chart", {}) if isinstance(resolved.get("duration_chart"), dict) else {}
+
+        main_margin = {"l": 60, "r": 20, "t": 50}
+        raw_main_margin = _normalize_margin(main_chart.get("margin") or main_chart.get("margins"))
+        legacy_main_bottom = raw_main_margin.pop("b", None)
+        main_margin.update(raw_main_margin)
+
+        bottom_block = main_chart.get("bottom_margin", {}) if isinstance(main_chart.get("bottom_margin"), dict) else {}
+        title_block = main_chart.get("title_annotation", {}) if isinstance(main_chart.get("title_annotation"), dict) else {}
+        main_xaxis_block = main_chart.get("xaxis", {}) if isinstance(main_chart.get("xaxis"), dict) else {}
+        main_yaxis_block = main_chart.get("yaxis", {}) if isinstance(main_chart.get("yaxis"), dict) else {}
+
+        resolved["main_chart"] = {
+            "width": _coerce_optional_int(main_chart.get("width", main_chart.get("figure_width")), figure_width),
+            "height": _coerce_optional_int(main_chart.get("height", main_chart.get("figure_height")), int(figure_height)),
+            "margin": main_margin,
+            "bottom_margin": {
+                "with_range_slider": _coerce_optional_int(
+                    bottom_block.get("with_range_slider", bottom_block.get("with_rangeslider", legacy_main_bottom)),
+                    150,
+                ),
+                "without_range_slider": _coerce_optional_int(
+                    bottom_block.get("without_range_slider", bottom_block.get("without_rangeslider", legacy_main_bottom)),
+                    110,
+                ),
+            },
+            "title_annotation": {
+                "x": _coerce_float(title_block.get("x"), 0.5),
+                "y_with_range_slider": _coerce_float(
+                    title_block.get("y_with_range_slider", title_block.get("with_range_slider")),
+                    -0.22,
+                ),
+                "y_without_range_slider": _coerce_float(
+                    title_block.get("y_without_range_slider", title_block.get("without_range_slider")),
+                    -0.16,
+                ),
+                "xref": title_block.get("xref", "paper"),
+                "yref": title_block.get("yref", "paper"),
+                "xanchor": title_block.get("xanchor", "center"),
+                "yanchor": title_block.get("yanchor", "top"),
+                "font": _normalize_font(title_block.get("font"), default_size=_coerce_optional_int(title_block.get("font_size"), 22), default_color=title_block.get("font_color", "black")),
+            },
+            "hovermode": str(main_chart.get("hovermode", "x unified")),
+            "hoverlabel": _normalize_hoverlabel_style(
+                main_chart.get("hoverlabel"),
+                default_namelength=-1,
+                default_align="left",
+                default_font_size=12,
+                default_bgcolor="white",
+            ),
+            "legend": _normalize_legend_style(
+                main_chart.get("legend"),
+                default_orientation="h",
+                default_x=0.0,
+                default_y=1.02,
+            ),
+            "xaxis": {
+                **_normalize_axis_style(main_xaxis_block, default_type="date"),
+                "rangeslider": _normalize_rangeslider_style(main_xaxis_block.get("rangeslider")),
+            },
+            "yaxis": _normalize_axis_style(main_yaxis_block),
+        }
+
+        legacy_duration_title_x = duration_chart.get("title_x")
+        load_duration_block = duration_chart.get("load_duration", {}) if isinstance(duration_chart.get("load_duration"), dict) else {}
+        flow_duration_block = duration_chart.get("flow_duration", {}) if isinstance(duration_chart.get("flow_duration"), dict) else {}
+        flow_stratified_block = duration_chart.get("flow_stratified", {}) if isinstance(duration_chart.get("flow_stratified"), dict) else {}
+
+        def _resolve_variant_margin(default_margin: Dict[str, int], parent_block: Dict[str, Any], variant_block: Dict[str, Any]) -> Dict[str, int]:
+            merged = dict(default_margin)
+            merged.update(_normalize_margin(parent_block.get("margin") or parent_block.get("margins")))
+            merged.update(_normalize_margin(variant_block.get("margin") or variant_block.get("margins")))
+            return merged
+
+        load_duration_default_x = _coerce_optional_float(legacy_duration_title_x, 0.35)
+        if load_duration_default_x is None:
+            load_duration_default_x = 0.35
+
+        resolved["duration_chart"] = {
+            "width": _coerce_optional_int(duration_chart.get("width", duration_chart.get("figure_width")), None),
+            "height": _coerce_optional_int(duration_chart.get("height", duration_chart.get("figure_height")), None),
+            "hovermode": duration_chart.get("hovermode"),
+            "hoverlabel": _normalize_hoverlabel_style(duration_chart.get("hoverlabel")),
+            "legend": _normalize_legend_style(duration_chart.get("legend")),
+            "load_duration": {
+                "margin": _resolve_variant_margin({"r": 40}, duration_chart, load_duration_block),
+                "title": _normalize_title_style(
+                    load_duration_block.get("title"),
+                    default_x=load_duration_default_x,
+                    default_xanchor="center",
+                    default_font_size=22,
+                ),
+                "xaxis": _normalize_axis_style(load_duration_block.get("xaxis"), default_title_font_size=19),
+                "yaxis": _normalize_axis_style(load_duration_block.get("yaxis"), default_title_font_size=21),
+            },
+            "flow_duration": {
+                "margin": _resolve_variant_margin({}, {}, flow_duration_block),
+                "title": _normalize_title_style(flow_duration_block.get("title")),
+                "xaxis": _normalize_axis_style(flow_duration_block.get("xaxis")),
+                "yaxis": _normalize_axis_style(flow_duration_block.get("yaxis")),
+            },
+            "flow_stratified": {
+                "margin": _resolve_variant_margin({}, {}, flow_stratified_block),
+                "title": _normalize_title_style(flow_stratified_block.get("title")),
+                "xaxis": _normalize_axis_style(flow_stratified_block.get("xaxis")),
+                "yaxis": _normalize_axis_style(flow_stratified_block.get("yaxis")),
+            },
+        }
+        return resolved
+
+    resolved_dashboard_layout = _resolve_dashboard_layout()
+    main_chart_layout = resolved_dashboard_layout["main_chart"]
+    duration_chart_layout = resolved_dashboard_layout["duration_chart"]
+
+    def _build_duration_chart_layout_update(
+        variant_key: str,
+        *,
+        title_text: str,
+        xaxis_title_text: str,
+        yaxis_title_text: str,
+        base_xaxis: Optional[Dict[str, Any]] = None,
+        base_yaxis: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        variant_style = duration_chart_layout.get(variant_key, {}) if isinstance(duration_chart_layout.get(variant_key), dict) else {}
+        layout_update: Dict[str, Any] = {
+            "title": _build_title_layout(variant_style.get("title"), text=title_text),
+            "xaxis": _build_axis_layout(variant_style.get("xaxis"), title_text=xaxis_title_text, base=base_xaxis),
+            "yaxis": _build_axis_layout(variant_style.get("yaxis"), title_text=yaxis_title_text, base=base_yaxis),
+            "margin": dict(variant_style.get("margin", {})),
+        }
+        if duration_chart_layout.get("hovermode") is not None:
+            layout_update["hovermode"] = duration_chart_layout.get("hovermode")
+        hoverlabel_layout = _build_hoverlabel_layout(duration_chart_layout.get("hoverlabel"))
+        if hoverlabel_layout:
+            layout_update["hoverlabel"] = hoverlabel_layout
+        legend_layout = _build_legend_layout(duration_chart_layout.get("legend"))
+        if legend_layout:
+            layout_update["legend"] = legend_layout
+        return layout_update
+
+    def _resolve_half_mdl_observation_style() -> Dict[str, Any]:
+        resolved: Dict[str, Any] = {
+            "enabled": bool(style_half_mdl_observations),
+            "main_chart": {
+                "name_suffix": "half-MDL",
+                "marker": {
+                    "symbol": "diamond-open",
+                    "size": 13,
+                    "color": None,
+                    "opacity": 1.0,
+                    "line": {"color": "#111", "width": 1.6},
+                },
+            },
+            "duration_chart": {
+                "affected": {
+                    "name": "Measured (half-MDL)",
+                    "marker": {
+                        "symbol": "circle-open",
+                        "size": 9,
+                        "color": None,
+                        "opacity": 1.0,
+                        "line": {"color": "#111", "width": 1.4},
+                    },
+                },
+                "unaffected": {
+                    "name_paired": "Measured",
+                    "name_order_stats": "Measured (all)",
+                },
+            },
+        }
+        if isinstance(ui_defaults, dict):
+            if "style_half_mdl_observations" in ui_defaults:
+                resolved["enabled"] = bool(ui_defaults.get("style_half_mdl_observations"))
+            _merge_nested_dicts(resolved, ui_defaults.get("half_mdl_observation_style"))
+        _merge_nested_dicts(resolved, half_mdl_observation_style)
+
+        def _normalize_marker_style(
+            raw: Any,
+            *,
+            default_symbol: str,
+            default_size: int,
+            default_line_color: str,
+            default_line_width: float,
+        ) -> Dict[str, Any]:
+            cfg = raw if isinstance(raw, dict) else {}
+            line_cfg = cfg.get("line") if isinstance(cfg.get("line"), dict) else {}
+            return {
+                "symbol": cfg.get("symbol", default_symbol),
+                "size": _coerce_optional_int(cfg.get("size"), default_size),
+                "color": cfg.get("color"),
+                "opacity": _coerce_optional_float(cfg.get("opacity"), 1.0),
+                "line": {
+                    "color": line_cfg.get("color", default_line_color),
+                    "width": _coerce_optional_float(line_cfg.get("width"), default_line_width),
+                },
+            }
+
+        resolved["enabled"] = bool(resolved.get("enabled"))
+        main_cfg = resolved.get("main_chart") if isinstance(resolved.get("main_chart"), dict) else {}
+        duration_cfg = resolved.get("duration_chart") if isinstance(resolved.get("duration_chart"), dict) else {}
+        affected_cfg = duration_cfg.get("affected") if isinstance(duration_cfg.get("affected"), dict) else {}
+        unaffected_cfg = duration_cfg.get("unaffected") if isinstance(duration_cfg.get("unaffected"), dict) else {}
+        resolved["main_chart"] = {
+            "name_suffix": str(main_cfg.get("name_suffix") or "half-MDL"),
+            "marker": _normalize_marker_style(
+                main_cfg.get("marker"),
+                default_symbol="diamond-open",
+                default_size=13,
+                default_line_color="#111",
+                default_line_width=1.6,
+            ),
+        }
+        resolved["duration_chart"] = {
+            "affected": {
+                "name": str(affected_cfg.get("name") or "Measured (half-MDL)"),
+                "marker": _normalize_marker_style(
+                    affected_cfg.get("marker"),
+                    default_symbol="circle-open",
+                    default_size=9,
+                    default_line_color="#111",
+                    default_line_width=1.4,
+                ),
+            },
+            "unaffected": {
+                "name_paired": str(unaffected_cfg.get("name_paired") or "Measured"),
+                "name_order_stats": str(unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+            },
+        }
+        return resolved
+
+    resolved_half_mdl_observation_style = _resolve_half_mdl_observation_style()
+
+    def _build_marker_with_overrides(base_marker: Dict[str, Any], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        marker = dict(base_marker or {})
+        style_cfg = overrides if isinstance(overrides, dict) else {}
+        if style_cfg.get("symbol") is not None:
+            marker["symbol"] = style_cfg.get("symbol")
+        if style_cfg.get("size") is not None:
+            marker["size"] = style_cfg.get("size")
+        if style_cfg.get("color") is not None:
+            marker["color"] = style_cfg.get("color")
+        if style_cfg.get("opacity") is not None:
+            marker["opacity"] = style_cfg.get("opacity")
+        merged_line = dict(marker.get("line") or {})
+        line_cfg = style_cfg.get("line") if isinstance(style_cfg.get("line"), dict) else {}
+        if line_cfg.get("color") is not None:
+            merged_line["color"] = line_cfg.get("color")
+        if line_cfg.get("width") is not None:
+            merged_line["width"] = line_cfg.get("width")
+        if merged_line:
+            marker["line"] = merged_line
+        return marker
 
     def _coerce_external_overlay_df(
         data: Optional[Union[pd.DataFrame, str, Path]],
@@ -928,6 +1620,7 @@ def fan_compare_simulations_dashboard(
         "fig": None,
         "q_df": None,
         "meas_series": [],
+        "meas_series_half_mdl_flags": [],
         "flow_series": None,  # aggregated external water flow series for current settings (m3/day)
         "diversion_series": None,  # diversion overlay plotted below zero on the flow axis
         "measured_nonnum_audit": None,
@@ -1336,6 +2029,8 @@ def fan_compare_simulations_dashboard(
             "measured_negative_policy": dd_meas_negative.value,
             "mdl_mg_L": mdl_mg_L,
             "mdl_mg_L_by_name": dict(normalized_mdl_mg_L_by_name) or None,
+            "style_half_mdl_observations": bool(resolved_half_mdl_observation_style.get("enabled")),
+            "half_mdl_observation_style": resolved_half_mdl_observation_style,
             "flag_deviations": cb_flag_dev.value,
             "deviation_factor": sl_dev_factor.value,
             "start": start,
@@ -1349,8 +2044,9 @@ def fan_compare_simulations_dashboard(
                 "date_col": date_col,
                 "flow_col": flow_col,
                 "template": template,
-                "figure_width": figure_width,
-                "figure_height": figure_height,
+                "figure_width": main_chart_layout["width"],
+                "figure_height": main_chart_layout["height"],
+                "dashboard_layout": resolved_dashboard_layout,
                 "stats_export_dir": str(stats_export_dir),
             },
         }
@@ -1543,7 +2239,15 @@ def fan_compare_simulations_dashboard(
                 # Total mean
                 fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name="total mean", line=dict(color=colors["total"], width=3, dash="dot")))
             # Unified title to match event-context variant
-            fig.update_layout(title="Flow-stratified (event vs non-event)", xaxis_title="Flow exceedance (% of time exceeded)", yaxis_title="Load (units)")
+            fig.update_layout(
+                **_build_duration_chart_layout_update(
+                    "flow_stratified",
+                    title_text="Flow-stratified (event vs non-event)",
+                    xaxis_title_text="Flow exceedance (% of time exceeded)",
+                    yaxis_title_text="Load (units)",
+                )
+            )
+            _apply_figure_size(fig, duration_chart_layout)
             return go.FigureWidget(fig), {"threshold": thr, "flow_source": flow_src, "binned": agg, "raw_count": N, "total": bool(total_agg is not None), "total_only": total_only, "visible_regimes": list(visible_regimes)}
         except Exception as _e_fsc:
             _dbg("flow_strat_curve_fail", str(_e_fsc))
@@ -1901,83 +2605,151 @@ def fan_compare_simulations_dashboard(
             if ENABLE_MEASURED_DURATION_OVERLAY:
                 try:
                     meas_list = _last.get("meas_series") or []
+                    meas_half_mdl_flags = _last.get("meas_series_half_mdl_flags") or []
+                    half_mdl_duration_style_active = (
+                        bool(resolved_half_mdl_observation_style.get("enabled"))
+                        and str((_last.get("measured_nonnum_audit") or {}).get("policy")) == "half_MDL"
+                    )
+                    duration_half_mdl_cfg = resolved_half_mdl_observation_style.get("duration_chart", {}) if isinstance(resolved_half_mdl_observation_style.get("duration_chart"), dict) else {}
+                    duration_half_mdl_affected_cfg = duration_half_mdl_cfg.get("affected", {}) if isinstance(duration_half_mdl_cfg.get("affected"), dict) else {}
+                    duration_half_mdl_unaffected_cfg = duration_half_mdl_cfg.get("unaffected", {}) if isinstance(duration_half_mdl_cfg.get("unaffected"), dict) else {}
+
+                    def _duration_half_mdl_flags_for(idx: int, series_here: pd.Series) -> pd.Series:
+                        if idx < len(meas_half_mdl_flags) and isinstance(meas_half_mdl_flags[idx], pd.Series):
+                            return meas_half_mdl_flags[idx].reindex(series_here.index).fillna(False).astype(bool)
+                        return pd.Series(False, index=series_here.index, dtype=bool)
+
                     if BAND_MODE == "paired" and paired_index is not None and paired_x_rank is not None:
                         # Build a combined measured series (multiple categories) preserving dates
-                        combined: Dict[pd.Timestamp, list[float]] = {}
+                        combined: Dict[pd.Timestamp, list[Tuple[float, bool]]] = {}
                         if isinstance(meas_list, (list, tuple)):
-                            for ms in meas_list:
+                            for idx_ms, ms in enumerate(meas_list):
                                 if isinstance(ms, pd.Series) and not ms.empty:
-                                    for dt, val in ms.dropna().items():
+                                    ms_valid = ms.dropna()
+                                    if ms_valid.empty:
+                                        continue
+                                    half_mdl_flags_here = _duration_half_mdl_flags_for(idx_ms, ms_valid)
+                                    for dt, val in ms_valid.items():
                                         try:
                                             if not np.isfinite(val):
                                                 continue
                                         except Exception:
                                             continue
-                                        combined.setdefault(pd.Timestamp(dt), []).append(float(val))
+                                        combined.setdefault(pd.Timestamp(dt), []).append((float(val), bool(half_mdl_flags_here.loc[dt])))
                         # Iterate in paired order; each date gets the x position from its rank
                         if combined:
                             x_pts: List[float] = []
                             y_pts: List[float] = []
-                            dt_pts: List[pd.Timestamp] = []
+                            x_pts_half_mdl: List[float] = []
+                            y_pts_half_mdl: List[float] = []
                             for i, dt in enumerate(paired_index):
                                 if dt in combined:
                                     x_here = float(paired_x_rank[i])
-                                    for val in combined[dt]:
-                                        x_pts.append(x_here)
-                                        y_pts.append(val)
-                                        dt_pts.append(dt)
-                            if x_pts:
-                                arr_x = np.array(x_pts, dtype=float)
-                                arr_y = np.array(y_pts, dtype=float)
+                                    for val, was_half_mdl in combined[dt]:
+                                        if half_mdl_duration_style_active and was_half_mdl:
+                                            x_pts_half_mdl.append(x_here)
+                                            y_pts_half_mdl.append(val)
+                                        else:
+                                            x_pts.append(x_here)
+                                            y_pts.append(val)
+                            if x_pts or x_pts_half_mdl:
+                                arr_x_all = np.array(x_pts + x_pts_half_mdl, dtype=float)
                                 # measured extent is along the already-ranked axis
                                 try:
-                                    meas_x_extent = (float(np.nanmin(arr_x)), float(np.nanmax(arr_x)))  # type: ignore
+                                    meas_x_extent = (float(np.nanmin(arr_x_all)), float(np.nanmax(arr_x_all)))  # type: ignore
                                 except Exception:
                                     meas_x_extent = None  # type: ignore
-                                # Uniform measured markers (no symbol change for events;
-                                # event/non-event distinction is conveyed by background
-                                # shading + legend proxies).
-                                fig_ldc.add_trace(
-                                    go.Scatter(
-                                        x=arr_x,
-                                        y=arr_y,
-                                        mode="markers",
-                                        name="Measured",
-                                        marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
-                                        hovertemplate="Measured: %{y:.4g}<extra></extra>",
-                                        legendrank=600,
+                                base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
+                                if x_pts:
+                                    fig_ldc.add_trace(
+                                        go.Scatter(
+                                            x=np.array(x_pts, dtype=float),
+                                            y=np.array(y_pts, dtype=float),
+                                            mode="markers",
+                                            name=str(duration_half_mdl_unaffected_cfg.get("name_paired") or "Measured"),
+                                            marker=base_duration_marker,
+                                            hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                            legendrank=600,
+                                        )
                                     )
-                                )
+                                if half_mdl_duration_style_active and x_pts_half_mdl:
+                                    fig_ldc.add_trace(
+                                        go.Scatter(
+                                            x=np.array(x_pts_half_mdl, dtype=float),
+                                            y=np.array(y_pts_half_mdl, dtype=float),
+                                            mode="markers",
+                                            name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
+                                            marker=_build_marker_with_overrides(base_duration_marker, duration_half_mdl_affected_cfg.get("marker")),
+                                            hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
+                                            legendrank=610,
+                                        )
+                                    )
                                 added = True
-                                _dbg("duration measured overlay (paired)", dict(n_points=int(arr_y.size)))
+                                _dbg("duration measured overlay (paired)", dict(n_points=int(arr_x_all.size)))
                     else:
                         # Fallback to order-statistics orientation (value sorted)
-                        measured_vals: list[float] = []
+                        measured_entries: List[Tuple[float, bool]] = []
                         if isinstance(meas_list, (list, tuple)):
-                            for ms in meas_list:
+                            for idx_ms, ms in enumerate(meas_list):
                                 if isinstance(ms, pd.Series) and not ms.empty:
-                                    measured_vals.extend(ms.dropna().to_numpy(dtype=float).tolist())
-                        if measured_vals:
-                            arr_meas = np.array(measured_vals, dtype=float)
+                                    ms_valid = ms.dropna()
+                                    if ms_valid.empty:
+                                        continue
+                                    half_mdl_flags_here = _duration_half_mdl_flags_for(idx_ms, ms_valid)
+                                    for dt, val in ms_valid.items():
+                                        try:
+                                            if not np.isfinite(val):
+                                                continue
+                                        except Exception:
+                                            continue
+                                        measured_entries.append((float(val), bool(half_mdl_flags_here.loc[dt])))
+                        if measured_entries:
+                            measured_entries.sort(key=lambda item: item[0])
+                            arr_meas = np.array([val for val, _flag in measured_entries], dtype=float)
+                            arr_flags = np.array([flag for _val, flag in measured_entries], dtype=bool)
                             arr_meas = arr_meas[np.isfinite(arr_meas)]
                             if arr_meas.size:
-                                arr_meas.sort()  # ascending values -> low values left for order_stats mode
                                 n_meas = arr_meas.size
                                 x_meas = 100.0 * (np.arange(1, n_meas + 1) / (n_meas + 1))
                                 try:
                                     meas_x_extent = (float(np.nanmin(x_meas)), float(np.nanmax(x_meas)))  # type: ignore
                                 except Exception:
                                     meas_x_extent = None  # type: ignore
-                                fig_ldc.add_trace(
-                                    go.Scatter(
-                                        x=x_meas,
-                                        y=arr_meas,
-                                        mode="markers",
-                                        name="Measured (all)",
-                                        marker=dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"),
-                                        hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
+                                if not half_mdl_duration_style_active:
+                                    fig_ldc.add_trace(
+                                        go.Scatter(
+                                            x=x_meas,
+                                            y=arr_meas,
+                                            mode="markers",
+                                            name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+                                            marker=base_duration_marker,
+                                            hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                        )
                                     )
-                                )
+                                else:
+                                    if (~arr_flags).any():
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_meas[~arr_flags],
+                                                y=arr_meas[~arr_flags],
+                                                mode="markers",
+                                                name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+                                                marker=base_duration_marker,
+                                                hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                            )
+                                        )
+                                    if arr_flags.any():
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_meas[arr_flags],
+                                                y=arr_meas[arr_flags],
+                                                mode="markers",
+                                                name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
+                                                marker=_build_marker_with_overrides(base_duration_marker, duration_half_mdl_affected_cfg.get("marker")),
+                                                hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
+                                            )
+                                        )
                                 added = True
                                 _dbg("duration measured overlay", dict(n_points=int(n_meas)))
                 except Exception as _e_meas_dc:
@@ -2203,13 +2975,13 @@ def fan_compare_simulations_dashboard(
                                 need = 2.0 - (xmax_clip - xmin_clip)
                                 xmin_clip = max(0.0, xmin_clip - need/2)
                                 xmax_clip = min(100.0, xmax_clip + need/2)
-                            xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[xmin_clip, xmax_clip])
+                            xaxis_obj = dict(range=[xmin_clip, xmax_clip])
                         else:
-                            xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
+                            xaxis_obj = dict(range=[0,100])
                     except Exception:
-                        xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
+                        xaxis_obj = dict(range=[0,100])
                 else:
-                    xaxis_obj = dict(title=dict(text=_x_axis_label, font=dict(size=19)), range=[0,100])
+                    xaxis_obj = dict(range=[0,100])
 
                 # Optional y-axis clipping when x clipping is enabled to focus on visible measurement-driven subset
                 if clip_meas:
@@ -2251,14 +3023,6 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         pass
 
-                # Title horizontal shift (configurable). Use ui_defaults['ldc_title_x'] if provided.
-                try:
-                    _title_x_raw = (ui_defaults or {}).get('ldc_title_x', 0.35)  # default further right
-                    title_x = float(_title_x_raw)
-                    if not (0.0 <= title_x <= 1.0):
-                        title_x = 0.35
-                except Exception:
-                    title_x = 0.35
                 _ldc_var_name = dd_var.value if 'dd_var' in dir() else ""
                 try:
                     _is_conc = (tg_units.value == "conc")
@@ -2270,11 +3034,15 @@ def fan_compare_simulations_dashboard(
                     _ldc_suffix = "Simulation Duration Curve (" + ("Concentration" if _is_conc else "Load") + ")"
                 _ldc_title_text = f"{_ldc_var_name} \u2013 {_ldc_suffix}" if _ldc_var_name else _ldc_suffix
                 fig_ldc.update_layout(
-                    title=dict(text=_ldc_title_text, x=title_x, xanchor="center", font=dict(size=22)),
-                    xaxis=xaxis_obj,
-                    yaxis=dict(title=dict(text=y_axis_final, font=dict(size=21))),
-                    margin=dict(r=40),
+                    **_build_duration_chart_layout_update(
+                        "load_duration",
+                        title_text=_ldc_title_text,
+                        xaxis_title_text=_x_axis_label,
+                        yaxis_title_text=y_axis_final,
+                        base_xaxis=xaxis_obj,
+                    )
                 )
+                _apply_figure_size(fig_ldc, duration_chart_layout)
                 widgets_out.append(go.FigureWidget(fig_ldc))
         sim_flow_series = None
         if isinstance(flow_series, pd.Series) and not flow_series.empty:
@@ -2320,10 +3088,14 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         pass
                 fig_fdc.update_layout(
-                    title="Flow Duration Curve",
-                    xaxis_title=r"% of Time where flow is Exceeded",
-                    yaxis_title="Flow (m3/day)",
+                    **_build_duration_chart_layout_update(
+                        "flow_duration",
+                        title_text="Flow Duration Curve",
+                        xaxis_title_text=r"% of Time where flow is Exceeded",
+                        yaxis_title_text="Flow (m3/day)",
+                    )
                 )
+                _apply_figure_size(fig_fdc, duration_chart_layout)
                 widgets_out.append(go.FigureWidget(fig_fdc))
         return widgets_out
 
@@ -2883,9 +3655,7 @@ def fan_compare_simulations_dashboard(
 
         # Build figure (plotting uses UNFILTERED data arrays)
         fig = go.FigureWidget(layout=dict(template=template))
-        if figure_width is not None:
-            fig.layout.width = int(figure_width)
-        fig.layout.height = int(figure_height)
+        _apply_figure_size(fig, main_chart_layout)
         # Z-order control: traces are collected per group, then added in order
         _active_trace_order = list(trace_order) if trace_order else list(_TRACE_ORDER_DEFAULT)
         _deferred_groups: Dict[str, list] = {k: [] for k in _TRACE_ORDER_DEFAULT}
@@ -3539,6 +4309,7 @@ def fan_compare_simulations_dashboard(
         # Measured overlay: per category -> per station
         if measured_present and cb_meas_on.value and isinstance(measured_use_df, pd.DataFrame) and not measured_use_df.empty:
             _meas_for_stats: List[pd.Series] = []
+            _meas_half_mdl_flags: List[pd.Series] = []
             _deferred_diamond_traces: list = []  # added last for z-order
             # Color map for stations across categories (consistent colors per station)
             palette = [
@@ -3549,6 +4320,12 @@ def fan_compare_simulations_dashboard(
             color_idx = 0
             # Store resampled series per map per station (for later intersection)
             cat_resampled: Dict[int, Dict[str, pd.Series]] = {}
+            cat_resampled_half_mdl: Dict[int, Dict[str, pd.Series]] = {}
+            half_mdl_replaced_col = "__half_mdl_replaced__"
+            half_mdl_style_active = (
+                bool(resolved_half_mdl_observation_style.get("enabled"))
+                and str(current_nonnum_policy) == "half_MDL"
+            )
 
             # Prepare period day counts for sum-mode multiplication
             # Split measured data according to the selected event view (if any)
@@ -3652,6 +4429,28 @@ def fan_compare_simulations_dashboard(
                         )
                     except Exception:
                         per_station_daily_excl_union = {}
+                per_station_daily_half_mdl: Dict[str, pd.Series] = {}
+                if half_mdl_style_active and (half_mdl_replaced_col in measured_included_df.columns):
+                    try:
+                        per_station_daily_half_mdl_raw = _aggregate_measured(
+                            measured_included_df,
+                            date_col=measured_date_col,
+                            station_col=measured_station_col,
+                            name_col=measured_name_col,
+                            value_col=half_mdl_replaced_col,
+                            selected_name=chem_name,
+                            selected_stations=stations,
+                            start=start,
+                            end=end,
+                            season_months=season_months,
+                        )
+                        for st_flag, s_flag_daily in per_station_daily_half_mdl_raw.items():
+                            s_flag_bool = (s_flag_daily.fillna(0.0) > 0.0).astype(bool)
+                            s_flag_bool.index.name = None
+                            s_flag_bool.name = st_flag
+                            per_station_daily_half_mdl[st_flag] = s_flag_bool
+                    except Exception:
+                        per_station_daily_half_mdl = {}
                 # One trace per station (collected for later intersection logic)
                 for st, s_daily in per_station_daily.items():
                     _dbg_df_info(s_daily, f"measured {chem_name} st={st} daily")
@@ -3674,6 +4473,13 @@ def fan_compare_simulations_dashboard(
                     if s_plot.empty:
                         continue
                     cat_resampled.setdefault(cat, {})[st] = s_plot
+                    s_half_mdl_plot = pd.Series(False, index=s_plot.index, dtype=bool)
+                    if half_mdl_style_active:
+                        s_half_mdl_daily = per_station_daily_half_mdl.get(st)
+                        if isinstance(s_half_mdl_daily, pd.Series) and not s_half_mdl_daily.empty:
+                            s_half_mdl_daily = s_half_mdl_daily.reindex(s_daily.index).fillna(False).astype(bool)
+                            s_half_mdl_plot = s_half_mdl_daily.resample(freq_str).max().reindex(s_plot.index).fillna(False).astype(bool)
+                    cat_resampled_half_mdl.setdefault(cat, {})[st] = s_half_mdl_plot
                     if st not in station_colors:
                         station_colors[st] = palette[color_idx % len(palette)]
                         color_idx += 1
@@ -3707,7 +4513,18 @@ def fan_compare_simulations_dashboard(
                     combined_series = df_sum.sum(axis=1, min_count=len(aligned)).dropna().sort_index()
                     if combined_series.empty:
                         continue
+                    combined_half_mdl_flags = pd.Series(False, index=combined_series.index, dtype=bool)
+                    if half_mdl_style_active:
+                        aligned_half_mdl_flags: List[pd.Series] = []
+                        for c in active_for_intersection:
+                            s_flag = cat_resampled_half_mdl.get(c, {}).get(st)
+                            if not isinstance(s_flag, pd.Series):
+                                s_flag = pd.Series(False, index=intersection_idx, dtype=bool)
+                            aligned_half_mdl_flags.append(s_flag.reindex(intersection_idx).fillna(False).astype(bool))
+                        if aligned_half_mdl_flags:
+                            combined_half_mdl_flags = pd.concat(aligned_half_mdl_flags, axis=1).any(axis=1).reindex(combined_series.index).fillna(False).astype(bool)
                     _meas_for_stats.append(combined_series)
+                    _meas_half_mdl_flags.append(combined_half_mdl_flags)
                     label_parts = []
                     for c in active_for_intersection:
                         chem_val = dd_cat_name[c].value
@@ -3717,16 +4534,45 @@ def fan_compare_simulations_dashboard(
                         else:
                             label_parts.append(cat_label)
                     base_label = " + ".join(label_parts) + f" @ {st} (intersection sum)"
+                    def _append_measured_points(sel_index, color, name_suffix):
+                        if sel_index is None or len(sel_index) == 0:
+                            return
+                        ss = combined_series.loc[sel_index]
+                        if ss.empty:
+                            return
+                        base_marker = dict(symbol="diamond", size=11, color=color, line=dict(width=0.6, color="#333"))
+                        base_name = f"{base_label} ({name_suffix})"
+
+                        def _append_trace(series_here: pd.Series, marker_here: Dict[str, Any], trace_name: str) -> None:
+                            if series_here.empty:
+                                return
+                            _deferred_diamond_traces.append(go.Scatter(
+                                x=_to_plotly_x(series_here.index), y=series_here.values, mode="markers",
+                                name=trace_name,
+                                marker=marker_here,
+                                customdata=_make_customdata(series_here.values),
+                                hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
+                                showlegend=True,
+                            ))
+
+                        if not half_mdl_style_active:
+                            _append_trace(ss, base_marker, base_name)
+                            return
+
+                        half_mdl_mask_here = combined_half_mdl_flags.reindex(ss.index).fillna(False).astype(bool)
+                        _append_trace(ss.loc[~half_mdl_mask_here], base_marker, base_name)
+                        ss_half_mdl = ss.loc[half_mdl_mask_here]
+                        if not ss_half_mdl.empty:
+                            half_mdl_suffix = str(resolved_half_mdl_observation_style["main_chart"].get("name_suffix") or "half-MDL")
+                            _append_trace(
+                                ss_half_mdl,
+                                _build_marker_with_overrides(base_marker, resolved_half_mdl_observation_style["main_chart"].get("marker")),
+                                f"{base_label} ({name_suffix}, {half_mdl_suffix})",
+                            )
                     # Color-code measured points similar to prior logic
                     try:
                         idx_days = pd.to_datetime(combined_series.index, errors='coerce').floor('D')
-                        flow_excl_set: set = set()
-                        if (outlier_day_set is not None) or (buffer_only_set is not None):
-                            if outlier_day_set is not None:
-                                flow_excl_set |= set(outlier_day_set)
-                            if buffer_only_set is not None:
-                                flow_excl_set |= set(buffer_only_set)
-                        red_mask = idx_days.isin(list(flow_excl_set)) if flow_excl_set else pd.Series(False, index=combined_series.index)
+                        red_mask = pd.Series(False, index=combined_series.index)
                         dev_mask = pd.Series(False, index=combined_series.index)
                         if _last.get("q_df") is not None and bool(cb_flag_dev.value):
                             base = _last.get("q_df")["p90"].reindex(combined_series.index)
@@ -3746,31 +4592,12 @@ def fan_compare_simulations_dashboard(
                         red_idx = red_mask[red_mask].index
                         orange_idx = dev_mask[~dev_mask.index.isin(red_idx) & dev_mask].index
                         green_idx = combined_series.index.difference(red_idx.union(orange_idx))
-                        def _add_pts(sel_index, color, name_suffix):
-                            if sel_index is None or len(sel_index) == 0:
-                                return
-                            ss = combined_series.loc[sel_index]
-                            _deferred_diamond_traces.append(go.Scatter(
-                                x=_to_plotly_x(ss.index), y=ss.values, mode="markers",
-                                name=f"{base_label} ({name_suffix})",
-                                marker=dict(symbol="diamond", size=11, color=color, line=dict(width=0.6, color="#333")),
-                                customdata=_make_customdata(ss.values),
-                                hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
-                                showlegend=True,
-                            ))
                         color_use = station_colors.get(st, "#2ca02c")
-                        _add_pts(red_idx, "#d62728", "flow-outlier")
-                        _add_pts(orange_idx, "#ff7f0e", "deviation")
-                        _add_pts(green_idx, color_use, "kept")
+                        _append_measured_points(red_idx, "#d62728", "flow-outlier")
+                        _append_measured_points(orange_idx, "#ff7f0e", "deviation")
+                        _append_measured_points(green_idx, color_use, "kept")
                     except Exception:
-                        _deferred_diamond_traces.append(go.Scatter(
-                            x=_to_plotly_x(combined_series.index), y=combined_series.values, mode="markers",
-                            name=base_label,
-                            marker=dict(symbol="diamond", size=11, color=station_colors.get(st, "#2ca02c"), line=dict(width=0.6, color="#333")),
-                            customdata=_make_customdata(combined_series.values),
-                            hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
-                            showlegend=True,
-                        ))
+                        _append_measured_points(combined_series.index, station_colors.get(st, "#2ca02c"), "kept")
 
         # Water flow overlay (from independent water_flow_df if present)
         _last["flow_series"] = None
@@ -4151,8 +4978,10 @@ def fan_compare_simulations_dashboard(
         # Save measured series for stats box
         if measured_present and cb_meas_on.value:
             _last["meas_series"] = _meas_for_stats
+            _last["meas_series_half_mdl_flags"] = _meas_half_mdl_flags
         else:
             _last["meas_series"] = []
+            _last["meas_series_half_mdl_flags"] = []
         _last["measured_nonnum_audit"] = measured_nonnum_audit
 
         # Move title below chart to avoid collision with legend
@@ -4171,26 +5000,49 @@ def fan_compare_simulations_dashboard(
         mode_label = ("Conc mg/L" if is_conc_mode else "Load kg/day")
         title_text = f"{var} - Reach {dd_reach.value} ({freq_str}, {method}) [{mode_label}]" + ("  " + chem_labels[0] if chem_labels else "")
         slider_visible = bool(cb_range_slider.value)
-        bottom_margin = 150 if slider_visible else 110
-        title_y = -0.22 if slider_visible else -0.16
-        fig.update_layout(
-            title_text=None,
-            xaxis_title=None, yaxis_title=var,
-            hovermode="x unified",
-            hoverlabel=dict(namelength=-1, align="left", font_size=12, bgcolor="white"),
-            legend=dict(orientation="h", y=1.02, x=0),
-            xaxis=dict(
-                type="date",
-                rangeslider=dict(visible=slider_visible, thickness=0.08, bgcolor="#f6f6f6", bordercolor="#ddd", borderwidth=1),
-                tickformatstops=TICK_STOPS
-            ),
-            margin=dict(l=60, r=20, t=50, b=bottom_margin)
+        bottom_margin = int(
+            main_chart_layout["bottom_margin"]["with_range_slider"]
+            if slider_visible else
+            main_chart_layout["bottom_margin"]["without_range_slider"]
         )
+        title_y = float(
+            main_chart_layout["title_annotation"]["y_with_range_slider"]
+            if slider_visible else
+            main_chart_layout["title_annotation"]["y_without_range_slider"]
+        )
+        main_plot_margin = dict(main_chart_layout["margin"])
+        main_plot_margin["b"] = bottom_margin
+        main_chart_update: Dict[str, Any] = {
+            "title_text": None,
+            "xaxis_title": None,
+            "hovermode": main_chart_layout.get("hovermode") or "x unified",
+            "xaxis": _build_axis_layout(
+                main_chart_layout.get("xaxis"),
+                base={
+                    "type": main_chart_layout.get("xaxis", {}).get("type", "date"),
+                    "rangeslider": _build_rangeslider_layout(main_chart_layout.get("xaxis", {}).get("rangeslider"), visible=slider_visible),
+                    "tickformatstops": TICK_STOPS,
+                },
+            ),
+            "margin": main_plot_margin,
+        }
+        main_hoverlabel = _build_hoverlabel_layout(main_chart_layout.get("hoverlabel"))
+        if main_hoverlabel:
+            main_chart_update["hoverlabel"] = main_hoverlabel
+        main_legend = _build_legend_layout(main_chart_layout.get("legend"))
+        if main_legend:
+            main_chart_update["legend"] = main_legend
+        fig.update_layout(**main_chart_update)
+        main_title_annotation = main_chart_layout.get("title_annotation", {})
+        main_title_font = _build_font_layout(main_title_annotation.get("font"))
         fig.add_annotation(
-            x=0.5, y=title_y, xref='paper', yref='paper',
+            x=main_title_annotation.get("x", 0.5), y=title_y,
+            xref=main_title_annotation.get("xref", "paper"), yref=main_title_annotation.get("yref", "paper"),
             text=title_text,
-            showarrow=False, xanchor='center', yanchor='top',
-            font=dict(size=22, color='black')
+            showarrow=False,
+            xanchor=main_title_annotation.get("xanchor", "center"),
+            yanchor=main_title_annotation.get("yanchor", "top"),
+            font=main_title_font or {},
         )
 
         # Stats computation will populate the HTML block below the figure
@@ -4198,7 +5050,13 @@ def fan_compare_simulations_dashboard(
         # fixed Y; optional live update on zoom (apply only to primary y-axis)
         y_title = ("Concentration (mg/L)" if is_conc_mode else f"{var} (kg/day)")
         _last["y_axis_title"] = y_title
-        fig.update_layout(yaxis=dict(autorange=False, range=_last["y_fixed"], title_text=y_title))
+        fig.update_layout(
+            yaxis=_build_axis_layout(
+                main_chart_layout.get("yaxis"),
+                title_text=y_title,
+                base={"autorange": False, "range": _last["y_fixed"]},
+            )
+        )
 
         # Update conversion statement label
         try:
@@ -4807,7 +5665,15 @@ def fan_compare_simulations_dashboard(
                                                     alpha = 0.10 if (overlay_flag and not total_only_flag) else 0.18
                                                     fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name='total band', line=dict(color=colors['total'], width=0.6), fill='tonexty', fillcolor=f'rgba(85,85,85,{alpha})', hoverinfo='skip', showlegend=False))
                                                     fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name='total mean', line=dict(color=colors['total'], width=3, dash='dot')))
-                                                fig2.update_layout(title='Flow-stratified (event vs non-event)', xaxis_title='Flow exceedance (% of time exceeded)', yaxis_title=y_axis_title)
+                                                fig2.update_layout(
+                                                    **_build_duration_chart_layout_update(
+                                                        'flow_stratified',
+                                                        title_text='Flow-stratified (event vs non-event)',
+                                                        xaxis_title_text='Flow exceedance (% of time exceeded)',
+                                                        yaxis_title_text=y_axis_title,
+                                                    )
+                                                )
+                                                _apply_figure_size(fig2, duration_chart_layout)
                                                 fig_fsc = go.FigureWidget(fig2)
                                                 bundle = {
                                                     'source': 'event_context',
