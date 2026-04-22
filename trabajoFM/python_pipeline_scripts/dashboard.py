@@ -3,6 +3,7 @@
 from typing import Dict, Iterable, List, Optional, Union, Sequence, Tuple, Any
 from datetime import datetime, date
 from pathlib import Path
+import html
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,10 @@ from .dashboard_helper import (
     _chem_options_with_placeholder,
     _aggregate_measured,
     _period_day_counts,
+    normalize_measured_mdl_by_name,
+    UNMATCHED_ANALYTE_MDL_MG_L,
+    apply_measured_half_mdl_replacements,
+    build_selected_measured_nonnum_audit,
     convert_measured_mgL_to_kg_per_day,
 )
 DASHBOARD_VERSION = "2025-09-11-chem-ui-3"
@@ -150,6 +155,124 @@ def _pick_preferred_measured_option(
 
 # -----------------------------
 # Dashboard with measured overlay
+def _empty_measured_nonnum_audit(
+    *,
+    policy: str,
+    mdl_mg_L: float,
+    mdl_mg_L_by_name: Optional[Dict[str, float]],
+) -> Dict[str, Any]:
+    return {
+        "policy": str(policy),
+        "default_mdl_mg_L": float(mdl_mg_L),
+        "mdl_mg_L_by_name": dict(mdl_mg_L_by_name or {}) or None,
+        "unmatched_name_default_mdl_mg_L": (
+            float(UNMATCHED_ANALYTE_MDL_MG_L) if mdl_mg_L_by_name else float(mdl_mg_L)
+        ),
+        "selection_scope": "all_measured_rows",
+        "replaced_rows": 0,
+        "by_analyte_station": [],
+    }
+
+
+def _build_measured_nonnum_audit(
+    *,
+    measured_df: Optional[pd.DataFrame],
+    measured_selection: Optional[Dict[str, Dict[str, Any]]],
+    policy: str,
+    mdl_mg_L: float,
+    mdl_mg_L_by_name: Optional[Dict[str, float]],
+    measured_name_col: str,
+    measured_station_col: str,
+) -> Dict[str, Any]:
+    audit = _empty_measured_nonnum_audit(
+        policy=policy,
+        mdl_mg_L=mdl_mg_L,
+        mdl_mg_L_by_name=mdl_mg_L_by_name,
+    )
+    if str(policy) != "half_MDL" or not isinstance(measured_df, pd.DataFrame) or measured_df.empty:
+        return audit
+    audit.update(
+        build_selected_measured_nonnum_audit(
+            measured_df,
+            measured_selection=measured_selection,
+            sample_name_col=measured_name_col,
+            sample_station_col=measured_station_col,
+        )
+    )
+    return audit
+
+
+def _summarize_measured_nonnum_assignments(
+    audit: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str]]:
+    if not isinstance(audit, dict) or str(audit.get("policy")) != "half_MDL":
+        return None, None
+
+    grouped: Dict[Tuple[str, float, float], Dict[str, Any]] = {}
+    for entry in audit.get("by_analyte_station") or []:
+        chemical = entry.get("chemical")
+        if chemical is None:
+            continue
+        try:
+            mdl_value = float(entry.get("mdl_mg_L"))
+            replacement_value = float(entry.get("replacement_value_mg_L"))
+        except (TypeError, ValueError):
+            continue
+        key = (str(chemical), mdl_value, replacement_value)
+        bucket = grouped.setdefault(key, {"count": 0, "stations": set()})
+        try:
+            bucket["count"] += int(entry.get("count") or 0)
+        except (TypeError, ValueError):
+            pass
+        station = entry.get("station")
+        if station is not None and str(station).strip():
+            bucket["stations"].add(str(station))
+
+    lines: List[str] = []
+    for (chemical, mdl_value, replacement_value), bucket in sorted(grouped.items(), key=lambda item: item[0]):
+        count = int(bucket.get("count") or 0)
+        row_word = "row" if count == 1 else "rows"
+        stations = sorted(bucket.get("stations") or [])
+        station_suffix = f"; stations: {', '.join(stations)}" if stations else ""
+        lines.append(
+            f"{chemical}: MDL {mdl_value:g} mg/L -> half MDL {replacement_value:g} mg/L "
+            f"({count} replaced {row_word}{station_suffix})"
+        )
+
+    if not lines:
+        lines.append("No half-MDL replacements were needed in the current view.")
+
+    if audit.get("mdl_mg_L_by_name"):
+        try:
+            fallback_mdl = float(audit.get("unmatched_name_default_mdl_mg_L", UNMATCHED_ANALYTE_MDL_MG_L))
+        except (TypeError, ValueError):
+            fallback_mdl = float(UNMATCHED_ANALYTE_MDL_MG_L)
+        lines.append(f"Names without an analyte-specific override use fallback MDL {fallback_mdl:g} mg/L.")
+
+    text = "Measured half-MDL assignments:\n" + "\n".join(f"- {line}" for line in lines)
+    html_lines = "<br>".join(html.escape(line) for line in lines)
+    html_text = (
+        "<div style='margin-top:6px'>"
+        "<b>Assigned half-MDL values</b><br>"
+        f"{html_lines}"
+        "</div>"
+    )
+    return text, html_text
+
+
+def _print_measured_nonnum_assignments(
+    audit: Optional[Dict[str, Any]],
+    *,
+    previous_text: Optional[str] = None,
+    prefix: str = "[half_MDL]",
+) -> Optional[str]:
+    text, _ = _summarize_measured_nonnum_assignments(audit)
+    if text and text != previous_text:
+        for line in text.splitlines():
+            print(f"{prefix} {line}")
+    return text
+
+
 def fan_compare_simulations_dashboard(
     sim_dfs: Dict[str, pd.DataFrame],
     variables: List[str],
@@ -184,6 +307,7 @@ def fan_compare_simulations_dashboard(
     measured_negative_policy_default: str = "zero",  # "keep" | "drop" | "zero"
     # Method Detection Limit (mg/L) – halved when "half_MDL" policy is selected
     mdl_mg_L: float = 0.2,
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
     # Optional UI default selections/toggles
     ui_defaults: Optional[Dict[str, Any]] = None,
     # Optional erosion overlay toggle default
@@ -216,6 +340,17 @@ def fan_compare_simulations_dashboard(
         - dict with keys 1/2/3 (or '1'/'2'/'3') -> list of NOMBRE strings
         - list/tuple of up to three lists of NOMBRE strings
     """
+    normalized_mdl_mg_L_by_name = normalize_measured_mdl_by_name(
+        ui_defaults.get("mdl_mg_L_by_name") if isinstance(ui_defaults, dict) else None
+    )
+    normalized_mdl_mg_L_by_name.update(normalize_measured_mdl_by_name(mdl_mg_L_by_name))
+    half_mdl_label = f"Non-numeric handling: set to half MDL ({mdl_mg_L * 0.5:g})"
+    if normalized_mdl_mg_L_by_name:
+        half_mdl_label = (
+            "Non-numeric handling: set to half MDL "
+            "(analyte-specific overrides active; unmatched fallback MDL "
+            f"{UNMATCHED_ANALYTE_MDL_MG_L:g} mg/L -> {UNMATCHED_ANALYTE_MDL_MG_L * 0.5:g} mg/L)"
+        )
     if how_map_defaults is None:
         how_map_defaults = {}
 
@@ -240,7 +375,6 @@ def fan_compare_simulations_dashboard(
             reach = preferred_default_reach if preferred_default_reach in reach_choices else reach_choices[0]
         if reach not in reach_choices:
             reach = preferred_default_reach if preferred_default_reach in reach_choices else reach_choices[0]
-
     # Extract run number from first sim key (e.g., run000091_real000364_1 -> run 91)
     _first_key = next(iter(sim_dfs.keys()), None)
     _run_label: Optional[str] = None
@@ -490,7 +624,7 @@ def fan_compare_simulations_dashboard(
             ("Non-numeric handling: keep as NA (recommended)", "as_na"),
             ("Non-numeric handling: set to 0", "zero"),
             ("Non-numeric handling: drop rows", "drop"),
-            (f"Non-numeric handling: set to half MDL ({mdl_mg_L * 0.5:g})", "half_MDL"),
+            (half_mdl_label, "half_MDL"),
         ],
         value=(measured_nonnum_policy_default if measured_nonnum_policy_default in {"as_na", "drop", "zero"} else "as_na"),
         description="Non-numeric:",
@@ -671,6 +805,8 @@ def fan_compare_simulations_dashboard(
         "q_df": None,
         "meas_series": [],
         "flow_series": None,  # aggregated external water flow series for current settings (m3/day)
+        "measured_nonnum_audit": None,
+        "last_measured_nonnum_summary": None,
         "swat_flow_series": None,  # mean across runs of SWAT FLOW_OUT * 86400 (m3/day)
         "flow_y_range": None, # last y2 range
         "extra_series": {},   # name -> pd.Series for extra overlays (current settings)
@@ -1071,6 +1207,7 @@ def fan_compare_simulations_dashboard(
             "measured_nonnum_policy": dd_meas_nonnum.value,
             "measured_negative_policy": dd_meas_negative.value,
             "mdl_mg_L": mdl_mg_L,
+            "mdl_mg_L_by_name": dict(normalized_mdl_mg_L_by_name) or None,
             "flag_deviations": cb_flag_dev.value,
             "deviation_factor": sl_dev_factor.value,
             "start": start,
@@ -3139,6 +3276,15 @@ def fan_compare_simulations_dashboard(
 
         # Prepare measured DataFrame (apply cleaning policies and compute kg/day when possible)
         measured_use_df = measured_df if measured_present else None
+        try:
+            current_nonnum_policy = str(dd_meas_nonnum.value)
+        except Exception:
+            current_nonnum_policy = "as_na"
+        measured_nonnum_audit = _empty_measured_nonnum_audit(
+            policy=current_nonnum_policy,
+            mdl_mg_L=mdl_mg_L,
+            mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+        )
         use_measured_load_col = None
         use_measured_conc_col = None
         if measured_present:
@@ -3181,7 +3327,14 @@ def fan_compare_simulations_dashboard(
                 elif policy_nonnum == "zero":
                     df_loc.loc[nonnum_mask, value_col] = 0.0
                 elif policy_nonnum == "half_MDL" and is_conc:
-                    df_loc.loc[nonnum_mask, value_col] = mdl_mg_L * 0.5
+                    df_loc = apply_measured_half_mdl_replacements(
+                        df_loc,
+                        nonnum_mask=nonnum_mask,
+                        sample_value_col=value_col,
+                        sample_name_col=measured_name_col,
+                        mdl_mg_L=mdl_mg_L,
+                        mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+                    )
                 # else: as_na -> leave NaN
                 if is_conc:
                     # Negative policy only meaningful for concentration
@@ -3221,6 +3374,8 @@ def fan_compare_simulations_dashboard(
                             nonnum_policy=str(dd_meas_nonnum.value),
                             negative_policy=str(dd_meas_negative.value),
                             mdl_mg_L=mdl_mg_L,
+                            sample_name_col=measured_name_col,
+                            mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
                         )
                         use_measured_load_col = measured_kg_col_name if measured_kg_col_name in measured_use_df.columns else use_measured_load_col
                     elif str(dd_flow_source.value) == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
@@ -3240,6 +3395,8 @@ def fan_compare_simulations_dashboard(
                             nonnum_policy=str(dd_meas_nonnum.value),
                             negative_policy=str(dd_meas_negative.value),
                             mdl_mg_L=mdl_mg_L,
+                            sample_name_col=measured_name_col,
+                            mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
                         )
                         use_measured_load_col = measured_kg_col_name if measured_kg_col_name in measured_use_df.columns else use_measured_load_col
                     else:
@@ -3277,6 +3434,31 @@ def fan_compare_simulations_dashboard(
                     measured_excluded_df = measured_use_df.loc[~keep_mask].copy()
                 except Exception:
                     measured_excluded_df = None
+            audit_source_df = measured_included_df.copy()
+            if not audit_source_df.empty:
+                audit_dates = pd.to_datetime(audit_source_df[measured_date_col], errors='coerce')
+                audit_mask = audit_dates.notna()
+                if start is not None:
+                    audit_mask &= audit_dates >= pd.to_datetime(start)
+                if end is not None:
+                    audit_mask &= audit_dates <= pd.to_datetime(end)
+                if season_months:
+                    months = set(int(month) for month in season_months)
+                    audit_mask &= audit_dates.dt.month.isin(months)
+                audit_source_df = audit_source_df.loc[audit_mask].copy()
+            measured_nonnum_audit = _build_measured_nonnum_audit(
+                measured_df=audit_source_df,
+                measured_selection=_selected_measured_state(),
+                policy=current_nonnum_policy,
+                mdl_mg_L=mdl_mg_L,
+                mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+                measured_name_col=measured_name_col,
+                measured_station_col=measured_station_col,
+            )
+            _last["last_measured_nonnum_summary"] = _print_measured_nonnum_assignments(
+                measured_nonnum_audit,
+                previous_text=_last.get("last_measured_nonnum_summary"),
+            )
             df_dates = measured_included_df[[measured_date_col]].copy()
             df_dates[measured_date_col] = pd.to_datetime(df_dates[measured_date_col])
             if start is not None:
@@ -3790,6 +3972,7 @@ def fan_compare_simulations_dashboard(
             _last["meas_series"] = _meas_for_stats
         else:
             _last["meas_series"] = []
+        _last["measured_nonnum_audit"] = measured_nonnum_audit
 
         # Move title below chart to avoid collision with legend
         chem_labels = []
@@ -3971,6 +4154,7 @@ def fan_compare_simulations_dashboard(
                             "filename_stem": _build_stats_filename_stem(view_window),
                             "view_window": {"x0": view_window[0], "x1": view_window[1]},
                             "dashboard_state": dashboard_state,
+                            "measured_preprocessing": _last.get("measured_nonnum_audit"),
                             "stats_function": {
                                 "name": "compute_stats_for_view",
                                 "arguments": {
@@ -4095,6 +4279,9 @@ def fan_compare_simulations_dashboard(
                             )
                             children.append(widgets.HTML("<b>Reproduce diagnostics</b>"))
                             children.append(widgets.HTML(f"<pre style='white-space:pre-wrap'>{call_str}</pre>"))
+                            _, assignment_html = _summarize_measured_nonnum_assignments(_last.get("measured_nonnum_audit"))
+                            if assignment_html:
+                                children.append(widgets.HTML(assignment_html))
                             diag_box.children = children
                         else:
                             diag_box.children = [widgets.HTML("No diagnostics to display (no measured points in view)." )]
@@ -4933,6 +5120,7 @@ def _build_dashboard_stats_export_payload(
     stats: Dict[str, Any],
     view_window: Tuple[pd.Timestamp, pd.Timestamp],
     dashboard_state: Dict[str, Any],
+    measured_preprocessing: Optional[Dict[str, Any]],
     run_label: Optional[str],
     filename_stem: str,
     source_function: str,
@@ -4953,6 +5141,7 @@ def _build_dashboard_stats_export_payload(
             "filename_stem": filename_stem,
             "view_window": {"x0": view_window[0], "x1": view_window[1]},
             "dashboard_state": dashboard_state,
+            "measured_preprocessing": measured_preprocessing,
             "stats_function": {
                 "name": "compute_stats_for_view",
                 "arguments": {
@@ -5137,6 +5326,7 @@ def _normalize_headless_dashboard_config(
         "measured_nonnum_policy": raw.get("measured_nonnum_policy", "as_na"),
         "measured_negative_policy": raw.get("measured_negative_policy", "zero"),
         "mdl_mg_L": float(raw.get("mdl_mg_L", 0.2)),
+        "mdl_mg_L_by_name": normalize_measured_mdl_by_name(raw.get("mdl_mg_L_by_name")),
         "flag_deviations": bool(raw.get("flag_deviations", True)),
         "deviation_factor": float(raw.get("deviation_factor", 10.0)),
         "start": raw.get("start"),
@@ -5225,6 +5415,7 @@ def export_dashboard_stats_from_config(
     water_flow_value_col: Optional[str] = None,
     how_map_defaults: Optional[Dict[str, str]] = None,
     mdl_mg_L: float = 0.2,
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
     debug: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     if not sim_dfs:
@@ -5262,6 +5453,9 @@ def export_dashboard_stats_from_config(
     is_conc_mode = str(cfg["compare_mode"]) == "conc"
     season_months = cfg.get("season_months")
     run_label = _dashboard_extract_run_label(sim_dfs)
+    normalized_mdl_mg_L_by_name = normalize_measured_mdl_by_name(
+        cfg.get("mdl_mg_L_by_name") if cfg.get("mdl_mg_L_by_name") is not None else mdl_mg_L_by_name
+    )
 
     def _dbg(*args: Any) -> None:
         if debug:
@@ -5683,6 +5877,11 @@ def export_dashboard_stats_from_config(
     measured_use_df = measured_df.copy() if measured_present else None
     use_measured_load_col = measured_load_col
     use_measured_conc_col = measured_conc_col
+    measured_nonnum_audit = _empty_measured_nonnum_audit(
+        policy=str(cfg.get("measured_nonnum_policy", "as_na")),
+        mdl_mg_L=float(cfg.get("mdl_mg_L", mdl_mg_L)),
+        mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+    )
     if measured_present and isinstance(measured_use_df, pd.DataFrame):
         conc_col = use_measured_conc_col
         policy_nonnum = str(cfg.get("measured_nonnum_policy", "as_na"))
@@ -5700,7 +5899,14 @@ def export_dashboard_stats_from_config(
             elif policy_nonnum == "zero":
                 df_loc.loc[nonnum_mask, value_col_name] = 0.0
             elif policy_nonnum == "half_MDL" and is_conc:
-                df_loc.loc[nonnum_mask, value_col_name] = headless_mdl * 0.5
+                df_loc = apply_measured_half_mdl_replacements(
+                    df_loc,
+                    nonnum_mask=nonnum_mask,
+                    sample_value_col=value_col_name,
+                    sample_name_col=measured_name_col,
+                    mdl_mg_L=headless_mdl,
+                    mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+                )
             if is_conc:
                 if policy_neg == "drop":
                     df_loc = df_loc.loc[(df_loc[value_col_name].isna()) | (df_loc[value_col_name] >= 0)].copy()
@@ -5733,6 +5939,8 @@ def export_dashboard_stats_from_config(
                         nonnum_policy=policy_nonnum,
                         negative_policy=policy_neg,
                         mdl_mg_L=headless_mdl,
+                        sample_name_col=measured_name_col,
+                        mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
                     )
                     if measured_kg_col_name in measured_use_df.columns:
                         use_measured_load_col = measured_kg_col_name
@@ -5752,6 +5960,8 @@ def export_dashboard_stats_from_config(
                         nonnum_policy=policy_nonnum,
                         negative_policy=policy_neg,
                         mdl_mg_L=headless_mdl,
+                        sample_name_col=measured_name_col,
+                        mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
                     )
                     if measured_kg_col_name in measured_use_df.columns:
                         use_measured_load_col = measured_kg_col_name
@@ -5767,6 +5977,28 @@ def export_dashboard_stats_from_config(
         if selected_days_set is not None:
             md = pd.to_datetime(measured_use_df[measured_date_col], errors="coerce").dt.floor("D")
             measured_included_df = measured_use_df.loc[md.isin(list(selected_days_set))].copy()
+        audit_source_df = measured_included_df.copy()
+        if not audit_source_df.empty:
+            audit_dates = pd.to_datetime(audit_source_df[measured_date_col], errors="coerce")
+            audit_mask = audit_dates.notna()
+            if cfg.get("start") is not None:
+                audit_mask &= audit_dates >= pd.to_datetime(cfg["start"])
+            if cfg.get("end") is not None:
+                audit_mask &= audit_dates <= pd.to_datetime(cfg["end"])
+            if season_months:
+                months = set(int(month) for month in season_months)
+                audit_mask &= audit_dates.dt.month.isin(months)
+            audit_source_df = audit_source_df.loc[audit_mask].copy()
+        measured_nonnum_audit = _build_measured_nonnum_audit(
+            measured_df=audit_source_df,
+            measured_selection=cfg.get("measured_selection") or {},
+            policy=str(cfg.get("measured_nonnum_policy", "as_na")),
+            mdl_mg_L=float(cfg.get("mdl_mg_L", mdl_mg_L)),
+            mdl_mg_L_by_name=normalized_mdl_mg_L_by_name,
+            measured_name_col=measured_name_col,
+            measured_station_col=measured_station_col,
+        )
+        _print_measured_nonnum_assignments(measured_nonnum_audit, prefix="[dash-headless][half_MDL]")
         df_dates = measured_included_df[[measured_date_col]].copy()
         df_dates[measured_date_col] = pd.to_datetime(df_dates[measured_date_col])
         if cfg.get("start") is not None:
@@ -5910,6 +6142,8 @@ def export_dashboard_stats_from_config(
         "log_metrics": cfg.get("log_metrics"),
         "measured_nonnum_policy": cfg.get("measured_nonnum_policy"),
         "measured_negative_policy": cfg.get("measured_negative_policy"),
+        "mdl_mg_L": float(cfg.get("mdl_mg_L", mdl_mg_L)),
+        "mdl_mg_L_by_name": dict(normalized_mdl_mg_L_by_name) or None,
         "flag_deviations": cfg.get("flag_deviations"),
         "deviation_factor": cfg.get("deviation_factor"),
         "start": cfg.get("start"),
@@ -5943,6 +6177,7 @@ def export_dashboard_stats_from_config(
         stats=stats,
         view_window=view_window,
         dashboard_state=dashboard_state,
+        measured_preprocessing=measured_nonnum_audit,
         run_label=run_label,
         filename_stem=filename_stem,
         source_function="export_dashboard_stats_from_config",
@@ -5980,6 +6215,7 @@ def batch_export_dashboard_stats(
     measured_kg_col_name: str = "kg_per_day",
     water_flow_date_col: str = "date",
     water_flow_value_col: Optional[str] = None,
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
     include_variables_in_folder_name: bool = False,
     debug: bool = False,
 ) -> Dict[int, Dict[str, Tuple[Dict[str, Any], str]]]:
@@ -6182,6 +6418,7 @@ def batch_export_dashboard_stats(
                         water_flow_date_col=water_flow_date_col,
                         water_flow_value_col=water_flow_value_col,
                         how_map_defaults=how_map_defaults,
+                        mdl_mg_L_by_name=mdl_mg_L_by_name,
                         debug=debug,
                     )
                     results[run_id][variable] = (payload, export_path)
