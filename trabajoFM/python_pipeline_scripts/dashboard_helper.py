@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Union, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Union, Sequence, Tuple, Any
 from datetime import datetime, date
 
 import numpy as np
@@ -280,6 +280,205 @@ def _period_day_counts(
 # Measured cleaning + conversion helpers
 # -----------------------------
 
+UNMATCHED_ANALYTE_MDL_MG_L = 0.1
+
+def normalize_measured_mdl_by_name(
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    normalized: Dict[str, float] = {}
+    if not isinstance(mdl_mg_L_by_name, dict):
+        return normalized
+    for raw_name, raw_value in mdl_mg_L_by_name.items():
+        if raw_name is None:
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(value) or value < 0.0:
+            continue
+        normalized[str(raw_name)] = value
+    return normalized
+
+
+def resolve_measured_mdl_series(
+    df_samples: pd.DataFrame,
+    *,
+    sample_name_col: str = "NOMBRE",
+    mdl_mg_L: float = 0.2,
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
+    unmatched_name_mdl_mg_L: float = UNMATCHED_ANALYTE_MDL_MG_L,
+) -> pd.Series:
+    try:
+        default_mdl = float(mdl_mg_L)
+    except (TypeError, ValueError):
+        default_mdl = 0.0
+    if not np.isfinite(default_mdl) or default_mdl < 0.0:
+        default_mdl = 0.0
+
+    try:
+        unmatched_default_mdl = float(unmatched_name_mdl_mg_L)
+    except (TypeError, ValueError):
+        unmatched_default_mdl = UNMATCHED_ANALYTE_MDL_MG_L
+    if not np.isfinite(unmatched_default_mdl) or unmatched_default_mdl < 0.0:
+        unmatched_default_mdl = UNMATCHED_ANALYTE_MDL_MG_L
+
+    normalized_map = normalize_measured_mdl_by_name(mdl_mg_L_by_name)
+    if not normalized_map or sample_name_col not in df_samples.columns:
+        return pd.Series(default_mdl, index=df_samples.index, dtype=float)
+
+    mdl_series = pd.Series(unmatched_default_mdl, index=df_samples.index, dtype=float)
+
+    mapped = df_samples[sample_name_col].map(normalized_map)
+    mapped = pd.to_numeric(mapped, errors="coerce")
+    hit_mask = mapped.notna()
+    if hit_mask.any():
+        mdl_series.loc[hit_mask] = mapped.loc[hit_mask].astype(float)
+    return mdl_series
+
+
+def apply_measured_half_mdl_replacements(
+    df_samples: pd.DataFrame,
+    *,
+    nonnum_mask: Union[pd.Series, Sequence[bool]],
+    sample_value_col: str,
+    sample_name_col: str = "NOMBRE",
+    mdl_mg_L: float = 0.2,
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
+    replaced_flag_col: str = "__half_mdl_replaced__",
+    mdl_used_col: str = "__mdl_mg_L_used__",
+    replacement_value_col: str = "__half_mdl_value__",
+) -> pd.DataFrame:
+    if sample_value_col not in df_samples.columns:
+        return df_samples
+
+    if isinstance(nonnum_mask, pd.Series):
+        mask_series = nonnum_mask.reindex(df_samples.index, fill_value=False)
+    else:
+        mask_series = pd.Series(nonnum_mask, index=df_samples.index)
+    mask_series = mask_series.fillna(False).astype(bool)
+
+    if replaced_flag_col not in df_samples.columns:
+        df_samples[replaced_flag_col] = False
+    else:
+        df_samples[replaced_flag_col] = df_samples[replaced_flag_col].fillna(False).astype(bool)
+    if mdl_used_col not in df_samples.columns:
+        df_samples[mdl_used_col] = np.nan
+    if replacement_value_col not in df_samples.columns:
+        df_samples[replacement_value_col] = np.nan
+
+    if not mask_series.any():
+        return df_samples
+
+    mdl_series = resolve_measured_mdl_series(
+        df_samples,
+        sample_name_col=sample_name_col,
+        mdl_mg_L=mdl_mg_L,
+        mdl_mg_L_by_name=mdl_mg_L_by_name,
+    )
+    replacement_series = mdl_series * 0.5
+    df_samples.loc[mask_series, sample_value_col] = replacement_series.loc[mask_series]
+    df_samples.loc[mask_series, replaced_flag_col] = True
+    df_samples.loc[mask_series, mdl_used_col] = mdl_series.loc[mask_series].to_numpy(dtype=float)
+    df_samples.loc[mask_series, replacement_value_col] = replacement_series.loc[mask_series].to_numpy(dtype=float)
+    return df_samples
+
+
+def build_selected_measured_nonnum_audit(
+    df_samples: Optional[pd.DataFrame],
+    *,
+    measured_selection: Optional[Dict[str, Dict[str, Any]]] = None,
+    sample_name_col: str = "NOMBRE",
+    sample_station_col: str = "est_estaci",
+    replaced_flag_col: str = "__half_mdl_replaced__",
+    mdl_used_col: str = "__mdl_mg_L_used__",
+    replacement_value_col: str = "__half_mdl_value__",
+) -> Dict[str, Any]:
+    audit: Dict[str, Any] = {
+        "selection_scope": "all_measured_rows",
+        "replaced_rows": 0,
+        "by_analyte_station": [],
+    }
+    if not isinstance(df_samples, pd.DataFrame) or df_samples.empty or replaced_flag_col not in df_samples.columns:
+        return audit
+
+    scoped_df = df_samples
+    enabled_entries: List[Tuple[str, set[str]]] = []
+    if isinstance(measured_selection, dict) and sample_name_col in df_samples.columns and sample_station_col in df_samples.columns:
+        for cat in (1, 2, 3):
+            selected = measured_selection.get(str(cat)) or measured_selection.get(cat) or {}
+            if not selected.get("enabled"):
+                continue
+            chemical = selected.get("chemical")
+            if not chemical:
+                continue
+            stations = {
+                str(station)
+                for station in (selected.get("stations") or [])
+                if station is not None and str(station).strip()
+            }
+            enabled_entries.append((str(chemical), stations))
+        if enabled_entries:
+            selection_mask = pd.Series(False, index=df_samples.index)
+            station_series = df_samples[sample_station_col].astype(str)
+            chemical_series = df_samples[sample_name_col].astype(str)
+            for chemical, stations in enabled_entries:
+                chemical_mask = chemical_series == chemical
+                if stations:
+                    selection_mask |= chemical_mask & station_series.isin(list(stations))
+                else:
+                    selection_mask |= chemical_mask
+            scoped_df = df_samples.loc[selection_mask].copy()
+            audit["selection_scope"] = "measured_selection"
+
+    replaced_mask = scoped_df[replaced_flag_col].fillna(False).astype(bool)
+    scoped_df = scoped_df.loc[replaced_mask].copy()
+    audit["replaced_rows"] = int(len(scoped_df))
+    if scoped_df.empty:
+        return audit
+
+    if sample_name_col in scoped_df.columns:
+        chemical_values = scoped_df[sample_name_col].astype(object)
+        chemical_values = chemical_values.where(pd.notna(chemical_values), None)
+    else:
+        chemical_values = pd.Series([None] * len(scoped_df), index=scoped_df.index, dtype=object)
+
+    if sample_station_col in scoped_df.columns:
+        station_values = scoped_df[sample_station_col].astype(object)
+        station_values = station_values.where(pd.notna(station_values), None)
+    else:
+        station_values = pd.Series([None] * len(scoped_df), index=scoped_df.index, dtype=object)
+
+    detail_df = pd.DataFrame(
+        {
+            "chemical": chemical_values,
+            "station": station_values,
+            "mdl_mg_L": pd.to_numeric(scoped_df.get(mdl_used_col), errors="coerce").astype(float),
+            "replacement_value_mg_L": pd.to_numeric(scoped_df.get(replacement_value_col), errors="coerce").astype(float),
+        },
+        index=scoped_df.index,
+    )
+    grouped = (
+        detail_df.groupby(
+            ["chemical", "station", "mdl_mg_L", "replacement_value_mg_L"],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="count")
+        .sort_values(["chemical", "station", "mdl_mg_L", "replacement_value_mg_L"], kind="stable")
+    )
+    audit["by_analyte_station"] = [
+        {
+            "chemical": None if pd.isna(row["chemical"]) else str(row["chemical"]),
+            "station": None if pd.isna(row["station"]) else str(row["station"]),
+            "count": int(row["count"]),
+            "mdl_mg_L": float(row["mdl_mg_L"]),
+            "replacement_value_mg_L": float(row["replacement_value_mg_L"]),
+        }
+        for _, row in grouped.iterrows()
+    ]
+    return audit
+
 def convert_measured_mgL_to_kg_per_day(
     df_samples: pd.DataFrame,
     df_flow: pd.DataFrame,
@@ -292,6 +491,8 @@ def convert_measured_mgL_to_kg_per_day(
     nonnum_policy: str = "as_na",   # "as_na" | "drop" | "zero" | "half_MDL"
     negative_policy: str = "zero",   # "keep" | "drop" | "zero"
     mdl_mg_L: float = 0.2,
+    sample_name_col: str = "NOMBRE",
+    mdl_mg_L_by_name: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     """
     Create/overwrite a kg/day load column on measured samples from mg/L concentrations
@@ -306,6 +507,9 @@ def convert_measured_mgL_to_kg_per_day(
         * "drop":  drop rows where coercion produced NaN (for sample or flow)
         * "zero": set non-numeric values to 0
         * "half_MDL": set non-numeric sample values to half the Method Detection Limit (mdl_mg_L / 2)
+                    with optional analyte-specific overrides keyed by sample_name_col.
+                    When an override map is provided but a sample analyte is not in that map,
+                    the fallback MDL is 0.1 mg/L.
     - negative_policy: how to handle negative mg/L sample values
         * "keep": keep negatives as-is
         * "drop": drop rows with negative sample values
@@ -365,9 +569,18 @@ def convert_measured_mgL_to_kg_per_day(
         merged.loc[nonnum_mask, sample_value_col] = 0.0
         print(f"[INFO] Set {nonnum_count} non-numeric sample values to 0.")
     elif nonnum_policy == "half_MDL":
-        half_mdl = mdl_mg_L * 0.5
-        merged.loc[nonnum_mask, sample_value_col] = half_mdl
-        print(f"[INFO] Set {nonnum_count} non-numeric sample values to half MDL ({half_mdl}).")
+        merged = apply_measured_half_mdl_replacements(
+            merged,
+            nonnum_mask=nonnum_mask,
+            sample_value_col=sample_value_col,
+            sample_name_col=sample_name_col,
+            mdl_mg_L=mdl_mg_L,
+            mdl_mg_L_by_name=mdl_mg_L_by_name,
+        )
+        print(
+            "[INFO] Set non-numeric sample values to half MDL using analyte-specific overrides where provided "
+            f"(fallback MDL for unmatched analytes: {UNMATCHED_ANALYTE_MDL_MG_L:g} mg/L)."
+        )
     # else keep as NaN
     # else keep as NaN
 

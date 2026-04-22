@@ -302,6 +302,10 @@ def fan_compare_simulations_dashboard(
     water_flow_df: Optional[pd.DataFrame] = None,
     water_flow_date_col: str = "date",
     water_flow_value_col: Optional[str] = None,
+    # Diversion overlay from CSV or dataframe (optional; plotted below zero on flow axis)
+    diversion_df: Optional[Union[pd.DataFrame, str, Path]] = None,
+    diversion_date_col: Optional[str] = None,
+    diversion_value_col: Optional[str] = None,
     # Measured cleaning policies (defaults; also controllable via UI dropdowns)
     measured_nonnum_policy_default: str = "as_na",  # "as_na" | "drop"
     measured_negative_policy_default: str = "zero",  # "keep" | "drop" | "zero"
@@ -351,6 +355,107 @@ def fan_compare_simulations_dashboard(
             "(analyte-specific overrides active; unmatched fallback MDL "
             f"{UNMATCHED_ANALYTE_MDL_MG_L:g} mg/L -> {UNMATCHED_ANALYTE_MDL_MG_L * 0.5:g} mg/L)"
         )
+
+    def _coerce_external_overlay_df(
+        data: Optional[Union[pd.DataFrame, str, Path]],
+        *,
+        label: str,
+    ) -> Optional[pd.DataFrame]:
+        if data is None:
+            return None
+        if isinstance(data, pd.DataFrame):
+            return data.copy()
+        if isinstance(data, (str, Path)):
+            path = Path(data)
+            if not path.exists():
+                raise FileNotFoundError(f"{label} path not found: {path}")
+            suffix = path.suffix.lower()
+            if suffix == ".csv":
+                return pd.read_csv(path, encoding="utf-8")
+            if suffix in {".xlsx", ".xls"}:
+                return pd.read_excel(path)
+            raise ValueError(f"{label} must be a DataFrame, CSV, or Excel file. Got: {path}")
+        raise TypeError(f"{label} must be a DataFrame, CSV path, or Excel path.")
+
+    def _pick_best_date_col(df: pd.DataFrame, explicit: Optional[str] = None) -> Optional[str]:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return None
+        if explicit and explicit in df.columns:
+            return explicit
+        patterns = ["fecha", "date", "día", "dia", "day"]
+        cols = list(df.columns)
+        for col in cols:
+            name = str(col).lower()
+            if any(pat in name for pat in patterns):
+                return col
+        for col in cols:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                return col
+        return cols[0] if cols else None
+
+    def _pick_best_diversion_col(df: pd.DataFrame, explicit: Optional[str] = None) -> Optional[str]:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return None
+        if explicit and explicit in df.columns:
+            return explicit
+        cols = list(df.columns)
+        candidates = [c for c in cols if pd.api.types.is_numeric_dtype(df[c]) and df[c].dtype != bool]
+        if not candidates:
+            return None
+
+        def _score(col: str) -> tuple[int, int]:
+            name = str(col).lower()
+            score = 0
+            if "diversion" in name:
+                score += 100
+            if "m³/day" in name or "m3/day" in name or "m3_d" in name:
+                score += 10
+            return (score, int(df[col].notna().sum()))
+
+        return max(candidates, key=_score)
+
+    def _aligned_overlay_axis_range(
+        values: Union[pd.Series, np.ndarray, Sequence[float]],
+        *,
+        primary_range: Optional[Sequence[float]] = None,
+        default_range: Tuple[float, float] = (0.0, 1.0),
+        pad_scale: float = 1.05,
+    ) -> List[float]:
+        arr = np.asarray(values, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size:
+            raw_min = float(np.nanmin(arr))
+            raw_max = float(np.nanmax(arr))
+            if raw_min == raw_max:
+                raw_max = raw_min + 1.0
+        else:
+            raw_min, raw_max = float(default_range[0]), float(default_range[1])
+
+        zero_frac = 0.5
+        try:
+            if primary_range is not None and len(primary_range) == 2:
+                y0, y1 = float(primary_range[0]), float(primary_range[1])
+                if y1 != y0:
+                    if y0 < 0.0 < y1:
+                        zero_frac = (0.0 - y0) / (y1 - y0)
+                    elif 0.0 <= y0:
+                        zero_frac = 0.0
+                    elif 0.0 >= y1:
+                        zero_frac = 1.0
+        except Exception:
+            pass
+
+        pos_max = max(0.0, raw_max)
+        neg_min = min(0.0, raw_min)
+        scale_req_pos = (pos_max / (1.0 - zero_frac)) if (1.0 - zero_frac) > 1e-9 else (np.inf if pos_max > 0 else 0.0)
+        scale_req_neg = ((-neg_min) / zero_frac) if zero_frac > 1e-9 else (np.inf if neg_min < 0 else 0.0)
+        scale = max(scale_req_pos, scale_req_neg)
+        if not np.isfinite(scale) or scale == 0.0:
+            scale = max(abs(raw_min), abs(raw_max)) or 1.0
+        scale *= pad_scale
+        return [-zero_frac * scale, (1.0 - zero_frac) * scale]
+
+    diversion_source_df = _coerce_external_overlay_df(diversion_df, label="diversion_df")
     if how_map_defaults is None:
         how_map_defaults = {}
 
@@ -513,6 +618,8 @@ def fan_compare_simulations_dashboard(
 
     # Water flow overlay config
     flow_meas_col: Optional[str] = None
+    diversion_meas_col: Optional[str] = None
+    diversion_source_date_col: Optional[str] = None
 
     # Per-category: enable, chem-name dropdown, station selector
     cat_symbols = {1: "star", 2: "circle", 3: "square"}
@@ -521,6 +628,10 @@ def fan_compare_simulations_dashboard(
     cb_meas_on = widgets.Checkbox(value=measured_present, description="Show measured")
     # Default ON when a water_flow_df is provided; we will auto-pick the column later
     cb_flow_on = widgets.Checkbox(value=(isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty), description="Show Measured water flow (m3/d)")
+    cb_diversion_on = widgets.Checkbox(
+        value=(isinstance(diversion_source_df, pd.DataFrame) and not diversion_source_df.empty),
+        description="Show diversion below 0 (m3/d)",
+    )
     # SWAT avg flow availability and toggle (FLOW_OUT * 86400)
     def _has_swat_flow(_df: pd.DataFrame) -> bool:
         if not isinstance(_df, pd.DataFrame):
@@ -666,6 +777,19 @@ def fan_compare_simulations_dashboard(
                 print("Detected water flow series in water_flow_df - will also map water flow.")
             except Exception:
                 pass
+    if isinstance(diversion_source_df, pd.DataFrame) and not diversion_source_df.empty:
+        diversion_source_date_col = _pick_best_date_col(diversion_source_df, explicit=diversion_date_col)
+        diversion_meas_col = _pick_best_diversion_col(diversion_source_df, explicit=diversion_value_col)
+        if diversion_source_date_col is None or diversion_meas_col is None:
+            raise ValueError("Unable to detect diversion date/value columns. Please pass diversion_date_col and diversion_value_col.")
+        cb_diversion_on.value = True
+        try:
+            print(
+                f"Detected diversion series in diversion_df: date='{diversion_source_date_col}', "
+                f"value='{diversion_meas_col}' - will plot below zero."
+            )
+        except Exception:
+            pass
     # Extra overlays toggles
     extra_present = isinstance(extra_dfs, dict) and bool(extra_dfs)
     cb_extra: Dict[str, widgets.Checkbox] = {}
@@ -805,6 +929,7 @@ def fan_compare_simulations_dashboard(
         "q_df": None,
         "meas_series": [],
         "flow_series": None,  # aggregated external water flow series for current settings (m3/day)
+        "diversion_series": None,  # diversion overlay plotted below zero on the flow axis
         "measured_nonnum_audit": None,
         "last_measured_nonnum_summary": None,
         "swat_flow_series": None,  # mean across runs of SWAT FLOW_OUT * 86400 (m3/day)
@@ -1057,6 +1182,8 @@ def fan_compare_simulations_dashboard(
             cb_meas_on.value = bool(ui_defaults.get("measured_on"))
         if isinstance(ui_defaults.get("flow_on"), bool):
             cb_flow_on.value = bool(ui_defaults.get("flow_on"))
+        if isinstance(ui_defaults.get("diversion_on"), bool):
+            cb_diversion_on.value = bool(ui_defaults.get("diversion_on"))
         if isinstance(ui_defaults.get("swat_flow_on"), bool):
             cb_swat_flow_on.value = bool(ui_defaults.get("swat_flow_on"))
         # Cleaning policies
@@ -1192,6 +1319,7 @@ def fan_compare_simulations_dashboard(
             "show_diagnostics": cb_show_diags.value,
             "show_measured": cb_meas_on.value,
             "show_water_flow": cb_flow_on.value,
+            "show_diversion": cb_diversion_on.value,
             "show_swat_flow": cb_swat_flow_on.value,
             "show_erosion": cb_erosion_on.value,
             "show_flow_strat": cb_flow_strat.value,
@@ -3697,7 +3825,7 @@ def fan_compare_simulations_dashboard(
                     # Single dotted blue line, with legend label requested
                     _deferred_groups["measured_flow"].append(go.Scatter(
                         x=_to_plotly_x(s_flow.index), y=s_flow.values, mode="lines",
-                        name="Water flow (m3/d)", yaxis='y2',
+                        name="Measured Water flow (m3/d, SAIH_corrected)", yaxis='y2',
                         line=dict(color="#1f77b4", width=1.2, dash="dot"),
                         customdata=_make_customdata(s_flow.values),
                         hovertemplate="Water flow: %{customdata[0]:.4g}%{customdata[1]} m3/d<extra></extra>",
@@ -3705,6 +3833,55 @@ def fan_compare_simulations_dashboard(
                     ))
             except Exception:
                 _last["flow_series"] = None
+
+        # Diversion overlay (from CSV/DataFrame; plotted below zero on the flow axis)
+        _last["diversion_series"] = None
+        if cb_diversion_on.value and isinstance(diversion_source_df, pd.DataFrame) and not diversion_source_df.empty:
+            try:
+                use_diversion_col = diversion_meas_col if (diversion_meas_col in diversion_source_df.columns) else None
+                if use_diversion_col is None:
+                    explicit = diversion_value_col if (diversion_value_col and diversion_value_col in diversion_source_df.columns) else None
+                    use_diversion_col = _pick_best_diversion_col(diversion_source_df, explicit=explicit)
+                use_diversion_date_col = (
+                    diversion_source_date_col if (diversion_source_date_col in diversion_source_df.columns)
+                    else _pick_best_date_col(diversion_source_df, explicit=diversion_date_col)
+                )
+                if use_diversion_col is None or use_diversion_date_col is None:
+                    raise ValueError("No usable diversion date/value columns found in diversion_df")
+                diversion_plot_df = diversion_source_df[[use_diversion_date_col, use_diversion_col]].copy()
+                diversion_plot_df[use_diversion_date_col] = pd.to_datetime(diversion_plot_df[use_diversion_date_col], errors='coerce')
+                diversion_plot_df[use_diversion_col] = pd.to_numeric(diversion_plot_df[use_diversion_col], errors='coerce').astype(float)
+                diversion_plot_df = diversion_plot_df.dropna(subset=[use_diversion_date_col, use_diversion_col])
+                diversion_plot_df["_date"] = diversion_plot_df[use_diversion_date_col].dt.floor('D')
+                s_daily_diversion = diversion_plot_df.groupby("_date")[use_diversion_col].sum(min_count=1)
+                s_daily_diversion.index.name = None
+                if start is not None:
+                    s_daily_diversion = s_daily_diversion.loc[s_daily_diversion.index >= pd.to_datetime(start).floor('D')]
+                if end is not None:
+                    s_daily_diversion = s_daily_diversion.loc[s_daily_diversion.index <= pd.to_datetime(end).floor('D')]
+                if season_months:
+                    months = set(int(m) for m in season_months)
+                    s_daily_diversion = s_daily_diversion.loc[s_daily_diversion.index.month.isin(months)]
+                if dd_method.value == "sum":
+                    s_diversion = s_daily_diversion.resample(freq_str).sum(min_count=1)
+                else:
+                    s_diversion = s_daily_diversion.resample(freq_str).mean()
+                s_diversion = s_diversion.dropna()
+                if _plot_end_ts is not None and not s_diversion.empty:
+                    s_diversion = s_diversion.loc[s_diversion.index <= _plot_end_ts]
+                if not s_diversion.empty:
+                    s_diversion_plot = -s_diversion.abs()
+                    _last["diversion_series"] = s_diversion_plot
+                    _deferred_groups["measured_flow"].append(go.Scatter(
+                        x=_to_plotly_x(s_diversion_plot.index), y=s_diversion_plot.values, mode="lines",
+                        name="Diversion (m3/d, delta btw. SAIH corrected and uncorrected)", yaxis='y2',
+                        line=dict(color="#d62728", width=1.3, dash="dash"),
+                        customdata=_make_customdata(np.abs(s_diversion.values)),
+                        hovertemplate="Diversion magnitude: %{customdata[0]:.4g}%{customdata[1]} m3/d (plotted below zero)<extra></extra>",
+                        visible=True,
+                    ))
+            except Exception:
+                _last["diversion_series"] = None
 
         # SWAT average flow overlay (from simulation DataFrames; FLOW_OUT * 86400)
         # Always compute when flow checkbox is on OR ldc_sort_by == "flow"
@@ -3768,7 +3945,7 @@ def fan_compare_simulations_dashboard(
                     if bool(cb_swat_flow_on.value):
                         # Ensure y2 axis exists and add SWAT flow trace
                         fig.update_layout(yaxis2=dict(
-                            title="Water flow (m3/d)", overlaying='y', side='right', showgrid=False,
+                            title="Water flow (m3/d, SAIH_corrected)", overlaying='y', side='right', showgrid=False,
                             autorange=False, title_standoff=20, automargin=True,
                             title_font_color="#1f77b4"
                         ))
@@ -3788,21 +3965,25 @@ def fan_compare_simulations_dashboard(
             y2_values = []
             if isinstance(_last.get("flow_series"), pd.Series) and not _last["flow_series"].empty:
                 y2_values.append(_last["flow_series"].to_numpy(dtype=float))
+            if isinstance(_last.get("diversion_series"), pd.Series) and not _last["diversion_series"].empty:
+                y2_values.append(_last["diversion_series"].to_numpy(dtype=float))
             if isinstance(_last.get("swat_flow_series"), pd.Series) and not _last["swat_flow_series"].empty:
                 y2_values.append(_last["swat_flow_series"].to_numpy(dtype=float))
             if y2_values:
                 fv = np.concatenate([v[np.isfinite(v)] for v in y2_values if v.size > 0])
-                if fv.size == 0:
-                    fmin, fmax = 0.0, 1.0
-                else:
-                    fmin = float(np.nanmin(fv)); fmax = float(np.nanmax(fv))
-                    if fmin == fmax:
-                        fmax = fmin + 1.0
-                fpad = (fmax - fmin) * 0.05
-                y2_range = [fmin - fpad, fmax + fpad]
+                try:
+                    main_rng = list(fig.layout.yaxis.range) if fig.layout.yaxis.range else list(_last.get('y_fixed') or [])
+                except Exception:
+                    main_rng = list(_last.get('y_fixed') or [])
+                y2_range = _aligned_overlay_axis_range(fv, primary_range=main_rng, default_range=(0.0, 1.0))
                 _last["flow_y_range"] = y2_range
+                flow_axis_title = (
+                    "Water flow / diversion (m3/d)"
+                    if isinstance(_last.get("diversion_series"), pd.Series) and not _last["diversion_series"].empty
+                    else "Water flow (m3/d)"
+                )
                 fig.update_layout(yaxis2=dict(
-                    title="Water flow (m3/d)", overlaying='y', side='right', showgrid=False,
+                    title=flow_axis_title, overlaying='y', side='right', showgrid=False,
                     autorange=False, range=y2_range, title_standoff=20, automargin=True,
                     title_font_color="#1f77b4"
                 ))
@@ -4053,6 +4234,24 @@ def fan_compare_simulations_dashboard(
             lbl_units.value = "<br>".join(conv_lines)
         except Exception:
             lbl_units.value = ""
+        # After locking primary y-axis, if water-flow axis exists, recompute its range to align zero
+        if hasattr(fig.layout, 'yaxis2'):
+            try:
+                flow_vals = []
+                for key in ("flow_series", "diversion_series", "swat_flow_series"):
+                    s_any = _last.get(key)
+                    if isinstance(s_any, pd.Series) and not s_any.empty:
+                        vv = s_any.to_numpy(dtype=float)
+                        vv = vv[np.isfinite(vv)]
+                        if vv.size:
+                            flow_vals.append(vv)
+                if flow_vals:
+                    main_rng = list(fig.layout.yaxis.range) if fig.layout.yaxis.range else list(_last.get('y_fixed') or [])
+                    y2_range = _aligned_overlay_axis_range(np.concatenate(flow_vals), primary_range=main_rng, default_range=(0.0, 1.0))
+                    _last["flow_y_range"] = y2_range
+                    fig.layout.yaxis2.update(autorange=False, range=y2_range)
+            except Exception:
+                pass
         # After locking primary y-axis, if erosion axis exists, recompute its range to align zero
         if _last.get("erosion_series") is not None and hasattr(fig.layout, 'yaxis3'):
             try:
@@ -4359,7 +4558,7 @@ def fan_compare_simulations_dashboard(
             # Update water flow axis (y2) to align with visible window using all flow overlays present
             if hasattr(fig.layout, 'yaxis2'):
                 vals_list = []
-                for key in ("flow_series", "swat_flow_series"):
+                for key in ("flow_series", "diversion_series", "swat_flow_series"):
                     s_any = _last.get(key)
                     if isinstance(s_any, pd.Series):
                         sf = s_any.loc[(s_any.index >= x0) & (s_any.index <= x1)]
@@ -4368,14 +4567,15 @@ def fan_compare_simulations_dashboard(
                             vv = vv[np.isfinite(vv)]
                             if vv.size:
                                 vals_list.append(vv)
-                if vals_list:
-                    cc = np.concatenate(vals_list)
-                    fmin = float(np.nanmin(cc)); fmax = float(np.nanmax(cc))
-                    if fmin == fmax: fmax = fmin + 1.0
-                else:
-                    fmin, fmax = 0.0, 1.0
-                fpad = (fmax - fmin) * 0.05
-                fig.layout.yaxis2.update(autorange=False, range=[fmin - fpad, fmax + fpad])
+                cc = np.concatenate(vals_list) if vals_list else np.array([], dtype=float)
+                try:
+                    main_rng = list(fig.layout.yaxis.range) if fig.layout.yaxis.range else list(_last.get('y_fixed') or [])
+                except Exception:
+                    main_rng = list(_last.get('y_fixed') or [])
+                fig.layout.yaxis2.update(
+                    autorange=False,
+                    range=_aligned_overlay_axis_range(cc, primary_range=main_rng, default_range=(0.0, 1.0))
+                )
             # Update erosion axis (y3) to keep zero aligned with primary y zero
             if _last.get("erosion_series") is not None and hasattr(fig.layout, 'yaxis3'):
                 s_er = _last["erosion_series"]
@@ -4899,6 +5099,8 @@ def fan_compare_simulations_dashboard(
         flow_toggles = []
         if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty:
             flow_toggles.append(cb_flow_on)
+        if isinstance(diversion_source_df, pd.DataFrame) and not diversion_source_df.empty:
+            flow_toggles.append(cb_diversion_on)
         if swat_flow_available:
             flow_toggles.append(cb_swat_flow_on)
         flow_row = widgets.HBox(flow_toggles) if flow_toggles else widgets.HBox([])
@@ -4932,6 +5134,8 @@ def fan_compare_simulations_dashboard(
         flow_toggles = []
         if isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty:
             flow_toggles.append(cb_flow_on)
+        if isinstance(diversion_source_df, pd.DataFrame) and not diversion_source_df.empty:
+            flow_toggles.append(cb_diversion_on)
         if swat_flow_available:
             flow_toggles.append(cb_swat_flow_on)
         flow_row = widgets.HBox(flow_toggles) if flow_toggles else widgets.HBox([])
@@ -5249,6 +5453,7 @@ def _normalize_headless_dashboard_config(
         "freq": "frequency",
         "measured_on": "show_measured",
         "flow_on": "show_water_flow",
+        "diversion_on": "show_diversion",
         "swat_flow_on": "show_swat_flow",
         "erosion_on": "show_erosion",
         "show_diags": "show_diagnostics",
@@ -5312,6 +5517,7 @@ def _normalize_headless_dashboard_config(
         "event_view": raw.get("event_view", "all"),
         "show_measured": bool(raw.get("show_measured", measured_present)),
         "show_water_flow": bool(raw.get("show_water_flow", isinstance(water_flow_df, pd.DataFrame) and not water_flow_df.empty)),
+        "show_diversion": bool(raw.get("show_diversion", False)),
         "show_swat_flow": bool(raw.get("show_swat_flow", False)),
         "show_erosion": bool(raw.get("show_erosion", False)),
         "show_diagnostics": bool(raw.get("show_diagnostics", True)),
@@ -6128,6 +6334,7 @@ def export_dashboard_stats_from_config(
         "show_diagnostics": cfg.get("show_diagnostics"),
         "show_measured": cfg.get("show_measured"),
         "show_water_flow": cfg.get("show_water_flow"),
+        "show_diversion": cfg.get("show_diversion"),
         "show_swat_flow": cfg.get("show_swat_flow"),
         "show_erosion": cfg.get("show_erosion"),
         "show_flow_strat": False,
