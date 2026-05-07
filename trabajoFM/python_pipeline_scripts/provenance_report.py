@@ -272,6 +272,20 @@ def realization_report(realization_id: int | str, ledger_path: Optional[Path] = 
     if rec.get("outputs_summary"):
         lines.append(f"Outputs: {rec['outputs_summary']}")
 
+    # --- fig.fig / point sources warning --------------------------------
+    fig_status = rec.get("fig_fig_status")
+    fig_message = rec.get("fig_fig_message")
+    if fig_status and fig_status != "ok":
+        _banner = "=" * 72
+        lines.append("")
+        lines.append(_banner)
+        lines.append("!!! POINT SOURCE WARNING !!!")
+        lines.append(f"fig_fig_status : {fig_status}")
+        lines.append(f"fig_fig_message: {fig_message}")
+        lines.append(_banner)
+    elif fig_status == "ok":
+        lines.append(f"\nfig.fig point sources: OK — {rec.get('fig_fig_src_path', '')}")
+
     return "\n".join(lines)
 
 def realization_report_assets(
@@ -304,6 +318,14 @@ def realization_report_assets(
     # 2) Markdown table (ready to copy)
     rows = _collect_summary_rows(rec)
     md_table = _markdown_table_from_rows(rows) if rows else "| (no summary rows) |\n|---|"
+    # Append fig.fig warning to summary_table.md when point sources are missing
+    fig_status = rec.get("fig_fig_status")
+    fig_message = rec.get("fig_fig_message")
+    if fig_status and fig_status != "ok":
+        md_table += (
+            f"\n\n> **POINT SOURCE WARNING** — `fig_fig_status: {fig_status}`\n"
+            f"> {fig_message}"
+        )
     (out_dir / md_filename).write_text(md_table, encoding="utf-8")
 
     # 3) Word document with formatted table + the rest of the summary
@@ -365,6 +387,17 @@ def realization_report_assets(
         if rec.get("outputs_summary"):
             doc.add_heading("Outputs", level=2)
             doc.add_paragraph(str(rec["outputs_summary"]))
+
+        # fig.fig / point sources warning
+        fig_status = rec.get("fig_fig_status")
+        fig_message = rec.get("fig_fig_message")
+        if fig_status and fig_status != "ok":
+            doc.add_heading("!!! POINT SOURCE WARNING !!!", level=2)
+            p = doc.add_paragraph()
+            p.add_run(f"fig_fig_status: {fig_status}\n").bold = True
+            p.add_run(str(fig_message))
+        elif fig_status == "ok":
+            doc.add_paragraph(f"fig.fig point sources: OK — {rec.get('fig_fig_src_path', '')}")
 
         doc.save(out_dir / docx_filename)
     except ImportError as e:

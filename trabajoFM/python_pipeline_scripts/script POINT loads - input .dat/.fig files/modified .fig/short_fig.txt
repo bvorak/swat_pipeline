@@ -1,0 +1,23 @@
+subbasin       1     1     1                              Subbasin: 1
+          000010000.sub
+subbasin       1     2     2                              Subbasin: 2
+          000020000.sub
+...[ommiting 29 lines]...
+recyear        8   901     1            
+pnt.source   rcyr_1.dat
+recyear        8   902     2            
+pnt.source   rcyr_2.dat
+...[ommiting 29 lines]...
+add            5  2002     1   901
+route          2    18     1  2002
+          000010000.rte000010000.swq
+add            5  1008     4   904
+add            5    19  1008    18
+route          2    20     4    19
+          000040000.rte000040000.swq
+...[ommiting 59 lines]...
+saveconc      14    50     1     0
+          watout.dat
+finish         0
+
+

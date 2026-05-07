@@ -585,16 +585,19 @@ def _calculate_uncertainty_measures_from_csv(
     value_col: str = "Measured",
     pred_col: str = "Predicted",
     filter_zeros: bool = True,
+    min_measured_value: Optional[float] = None,
     epsilon: float = 1e-10,
 ) -> Dict[str, float]:
     """Calculate summary uncertainty measures from a cross-validation CSV."""
     df = pd.read_csv(csv_path)
 
-    if filter_zeros:
+    if min_measured_value is not None:
+        df = df[df[value_col] > float(min_measured_value)].copy()
+    elif filter_zeros:
         df = df[df[value_col] != 0].copy()
 
     if df.empty:
-        raise ValueError("No valid rows remain after filtering zeros.")
+        raise ValueError("No valid rows remain after applying the measured-value filter.")
 
     rel_error = (df[pred_col] - df[value_col]) / (df[value_col] + epsilon)
     abs_rel_error = np.abs(rel_error)
@@ -697,6 +700,7 @@ def derive_global_uncertainty(
     csv_value_col: str = "Measured",
     csv_pred_col: str = "Predicted",
     csv_filter_zeros: bool = True,
+    csv_min_measured_value: Optional[float] = None,
     csv_epsilon: float = 1e-10,
     # HRU options:
     hru_path: Optional[str] = None,   # path to polygons (any format geopandas can read)
@@ -760,6 +764,7 @@ def derive_global_uncertainty(
             value_col=csv_value_col,
             pred_col=csv_pred_col,
             filter_zeros=csv_filter_zeros,
+            min_measured_value=csv_min_measured_value,
             epsilon=csv_epsilon,
         )
         metric_name, calculation_details = _CSV_UNCERTAINTY_METHODS[method]

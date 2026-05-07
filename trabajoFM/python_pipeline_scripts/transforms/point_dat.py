@@ -463,7 +463,7 @@ def transform_write_point_dat_from_df(
         else:
             _fig_fig_status = "MISSING_NO_POINT_SOURCES"
             _fig_fig_message = (
-                "NO POINT SOURCES INTRODUCED — the ready-made fig.fig (with point sources enabled) "
+                "NO POINT SOURCES INTRODUCED - the ready-made fig.fig (with point sources enabled) "
                 "was NOT found at the specified path or the default location. "
                 f"Specified: {src_fig}  |  Default: {_DEFAULT_FIG_FIG}. "
                 "The original fig.fig from base TxtInOut will be used, which does NOT have point sources enabled."

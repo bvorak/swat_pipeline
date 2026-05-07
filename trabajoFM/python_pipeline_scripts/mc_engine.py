@@ -191,11 +191,13 @@ def run_monte_carlo(
         # chance of losing records due to later interruptions and to make
         # provenance visible incrementally in the ledger.
         if not run_model:
+            _extra = {"returncode": 0}
+            _extra.update(getattr(rp, "_fig_fig_warning", {}))
             rp.finalize(
                 success=True,
                 error=None,
                 outputs_summary={"note": "model run skipped"},
-                additional_fields={"returncode": 0},
+                additional_fields=_extra,
                 write_copy_to=Path(r_folder) / "provenance.json",
             )
             log.info("Provenance appended | id=%s | name=%s | ledger=%s", rp.id, realization_name, ledger_path)
@@ -239,11 +241,13 @@ def run_monte_carlo(
         for br in batch_results:
             rp = rps.get(br.name)
             if rp:
+                _extra = {"returncode": br.returncode}
+                _extra.update(getattr(rp, "_fig_fig_warning", {}))
                 rp.finalize(
                     success=br.success,
                     error=None if br.success else br.message,
                     outputs_summary={"outputs_dir": str(br.outputs_dir) if br.outputs_dir else None},
-                    additional_fields={"returncode": br.returncode},
+                    additional_fields=_extra,
                     write_copy_to=Path(rp.realization_folder) / "provenance.json",
                 )
                 log.info("Provenance appended | id=%s | name=%s | ledger=%s", rp.id, br.name, ledger_path)

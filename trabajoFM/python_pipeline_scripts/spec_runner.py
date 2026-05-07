@@ -155,6 +155,7 @@ def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optiona
                     "columns_order": t.get("columns_order"),
                     "start_year": t.get("start_year"),
                     "end_year": t.get("end_year"),
+                    "fig_fig_path": t.get("fig_fig_path"),  # None = use hardcoded default
                 }
             )
         else:
