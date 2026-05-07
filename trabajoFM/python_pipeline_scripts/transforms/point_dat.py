@@ -430,19 +430,63 @@ def transform_write_point_dat_from_df(
       areas_df: Optional[pd.DataFrame] with columns [id_col, 'Area'] in ha
     """
 
-    # pause this for
-    copy_ready_fig_fig = True
-    if copy_ready_fig_fig:
-        # Copy ready made fig.fig to output directory if fig.fig exists at scr_fig, overwriting any existing one
-        # later we should generate fig.fig properly like here: "C:\Users\Usuario\OneDrive - UNIVERSIDAD DE HUELVA\Granada\TrabajoFM\scripts\script POINT loads - input .dat\swat_ready_recyear_files\.fig files\visualize_fig_configs.ipynb"
-        import shutil
-        src_fig = "C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\scripts\\script POINT loads - input .dat\\swat_ready_recyear_files\\.fig files\\modified .fig\\fig.fig"
-        dest_fig = dest_dir / "fig.fig"
-        if Path(src_fig).exists():
-            shutil.copy2(src_fig, dest_fig)
-            print(f"WARNING: For simplicity, copied ready-made fig.fig to realization directory from this path: {src_fig}")
+    import shutil
+
+    _DEFAULT_FIG_FIG = (
+        "C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM"
+        "\\scripts\\Python_Pipeline_SWAT_Pascal\\swat_pipeline\\trabajoFM"
+        "\\python_pipeline_scripts\\script POINT loads - input .dat\\.fig files"
+        "\\modified .fig\\fig.fig"
+    )
+
+    # Resolve fig.fig source: params > hardcoded default
+    _fig_fig_path_param = params.get("fig_fig_path") or None
+    src_fig = str(_fig_fig_path_param) if _fig_fig_path_param else _DEFAULT_FIG_FIG
+    dest_fig = dest_dir / "fig.fig"
+
+    if Path(src_fig).exists():
+        shutil.copy2(src_fig, dest_fig)
+        _fig_fig_status = "ok"
+        _fig_fig_message = f"fig.fig with point sources copied from: {src_fig}"
+        print(f"[point_dat] fig.fig copied from: {src_fig}")
+    else:
+        # Try the other path (param failed → try default, or default failed → no fallback)
+        _fallback = _DEFAULT_FIG_FIG if src_fig != _DEFAULT_FIG_FIG else None
+        if _fallback and Path(_fallback).exists():
+            shutil.copy2(_fallback, dest_fig)
+            _fig_fig_status = "ok_fallback"
+            _fig_fig_message = (
+                f"fig.fig with point sources copied from DEFAULT path (specified path not found). "
+                f"Specified: {src_fig}  |  Default used: {_fallback}"
+            )
+            print(f"[point_dat] WARNING: Specified fig.fig path not found. Fell back to default: {_fallback}")
         else:
-            print(f"ERROR: Source fig.fig not found at {src_fig}, skipping copy.")
+            _fig_fig_status = "MISSING_NO_POINT_SOURCES"
+            _fig_fig_message = (
+                "NO POINT SOURCES INTRODUCED — the ready-made fig.fig (with point sources enabled) "
+                "was NOT found at the specified path or the default location. "
+                f"Specified: {src_fig}  |  Default: {_DEFAULT_FIG_FIG}. "
+                "The original fig.fig from base TxtInOut will be used, which does NOT have point sources enabled."
+            )
+            _banner = "=" * 80
+            print(_banner)
+            print("!!! CRITICAL WARNING: NO POINT SOURCES INTRODUCED !!!")
+            print(_fig_fig_message)
+            print(_banner)
+
+    if rp is not None:
+        rp.record_input(
+            Path(src_fig) if Path(src_fig).exists() else Path(_DEFAULT_FIG_FIG),
+            compute_hash=False,
+            kind="fig_fig_source",
+        )
+        # Surface warning in provenance additional_fields via a side-channel dict on rp
+        # (will be picked up by finalize if caller merges it)
+        if not hasattr(rp, "_fig_fig_warning"):
+            rp._fig_fig_warning = {}
+        rp._fig_fig_warning["fig_fig_status"] = _fig_fig_status
+        rp._fig_fig_warning["fig_fig_message"] = _fig_fig_message
+        rp._fig_fig_warning["fig_fig_src_path"] = src_fig
         
 
     log = get_logger(__name__)
