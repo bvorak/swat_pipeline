@@ -3219,16 +3219,21 @@ def fan_compare_simulations_dashboard(
         event_day_set = None
         buffered_event_days = None
         full_days_set = None
+        _threshold_display = None
+        _threshold_unit = None
         try:
             candidate_modes = {"events", "non_events", "all"}
             if event_mode in candidate_modes:
                 ev_source = str(dd_event_source.value)
                 if ev_source == "external" and isinstance(s_external_flow_daily, pd.Series) and not s_external_flow_daily.empty:
                     s_events_flow = s_external_flow_daily.copy()
+                    _threshold_unit = None  # external unit unknown
                 elif ev_source == "swat_avg" and isinstance(s_swat_avg_daily, pd.Series) and not s_swat_avg_daily.empty:
                     s_events_flow = s_swat_avg_daily.copy()
+                    _threshold_unit = "m³/day"  # standard SWAT daily flow unit
                 else:
                     s_events_flow = None
+                    _threshold_unit = None
                 if s_events_flow is not None and not s_events_flow.empty:
                     df_ev = pd.DataFrame({"date": pd.to_datetime(s_events_flow.index).floor('D'), "Q": s_events_flow.values})
                     token = str(dd_event_threshold.value)
@@ -3240,6 +3245,28 @@ def fan_compare_simulations_dashboard(
                     if thr_def is not None:
                         from .dashboard_helper import add_event_flags
                         etmin = float(fl_event_min_days.value) if isinstance(fl_event_min_days.value, (int, float)) else 1.0
+                        # Calculate actual numeric threshold value for display
+                        _threshold_display = None
+                        try:
+                            if isinstance(thr_def, (int, float, np.floating, np.integer)) and not np.isnan(thr_def):
+                                _threshold_display = float(thr_def)
+                            elif isinstance(thr_def, str):
+                                # Resolve percentile strings like 'p75', 'q3', etc.
+                                import re
+                                s = thr_def.strip().lower()
+                                if s in ('q1', 'q25'):
+                                    _threshold_display = float(np.nanpercentile(s_events_flow.values, 25.0))
+                                elif s in ('q2', 'q50'):
+                                    _threshold_display = float(np.nanpercentile(s_events_flow.values, 50.0))
+                                elif s in ('q3', 'q75'):
+                                    _threshold_display = float(np.nanpercentile(s_events_flow.values, 75.0))
+                                else:
+                                    m = re.match(r'^(p|)(\d{1,2}|100)(pct|)$', s)
+                                    if m:
+                                        pct = float(m.group(2))
+                                        _threshold_display = float(np.nanpercentile(s_events_flow.values, pct))
+                        except Exception:
+                            _threshold_display = None
                         df_flags = add_event_flags(df_ev, thresholds={"main": thr_def}, intervals={"main": etmin}, time_col="date", flow_col="Q")
                         if "main_event" in df_flags.columns:
                             event_days = pd.to_datetime(df_flags.loc[df_flags["main_event"], :].index).floor('D').unique()
@@ -3301,6 +3328,8 @@ def fan_compare_simulations_dashboard(
             "non_events": idx_non_events,
             "selected": idx_selected,
             "all_days": idx_all_days,
+            "threshold_value": _threshold_display,
+            "threshold_unit": _threshold_unit,
         }
         # Preserve daily SWAT flow for LDC threshold (immune to aggregation)
         _last["swat_flow_daily"] = s_swat_avg_daily
@@ -5243,6 +5272,18 @@ def fan_compare_simulations_dashboard(
                     lbl_save_stats.value = f"<span style='color:#b94a48;'>Export payload error: {export_payload_error}</span>"
                     _update_save_stats_tooltip()
                 try:
+                    # Append buffered flow statistics if available
+                    if 'buffered_flow_stats' in _last:
+                        try:
+                            buffered_stats = _last['buffered_flow_stats']
+                            if isinstance(buffered_stats, dict):
+                                min_flow = buffered_stats.get('min_flow')
+                                pct = buffered_stats.get('percentile')
+                                if isinstance(min_flow, (int, float)) and isinstance(pct, (int, float)):
+                                    buffered_info = f"<br/><b>Buffer zone flow:</b><br/>min buffered flow = {min_flow:.2f} m³/day @ {pct:.1f}th percentile"
+                                    html_text = html_text + buffered_info
+                        except Exception as _e_buffer_append:
+                            _dbg('buffered_stats_append_fail', str(_e_buffer_append))
                     stats_html.value = html_text
                 except Exception:
                     pass  # avoid printing into the figure output widget from a background thread
@@ -5558,6 +5599,7 @@ def fan_compare_simulations_dashboard(
                             idx_events = event_ctx.get("buffered_events")
                             if idx_events is None:
                                 idx_events = event_ctx.get("events")
+                            idx_buffered = event_ctx.get("buffered_events")  # separate reference for min buffered flow calc
                             idx_non_events = event_ctx.get("non_events")
                             fig_fsc = None
                             bundle = None
@@ -5673,6 +5715,30 @@ def fan_compare_simulations_dashboard(
                                                         yaxis_title_text=y_axis_title,
                                                     )
                                                 )
+                                                # Add vertical line for minimum buffered event day flow percentile
+                                                try:
+                                                    if isinstance(idx_buffered, pd.DatetimeIndex) and len(idx_buffered) > 0:
+                                                        # Get flows for buffered event days
+                                                        buffered_set = set(pd.to_datetime(idx_buffered).floor('D').tolist())
+                                                        buffered_flows = df_sorted[df_sorted.index.floor('D').isin(buffered_set)]['flow']
+                                                        if len(buffered_flows) > 0:
+                                                            min_buffered_flow = float(buffered_flows.min())
+                                                            # Find percentile of this flow in the exceedance distribution
+                                                            all_flows = df_sorted['flow'].values
+                                                            percentile_pos = (all_flows >= min_buffered_flow).sum() / len(all_flows)
+                                                            exceedance_pct = percentile_pos * 100.0
+                                                            # Add vertical line
+                                                            fig2.add_vline(x=exceedance_pct, line_dash="dash", line_color="green", 
+                                                                          annotation_text=f"Min buffered: {min_buffered_flow:.1f} ({percentile_pos*100:.1f}%)",
+                                                                          annotation_position="top right")
+                                                            # Store for stats display
+                                                            _last['buffered_flow_stats'] = {
+                                                                'min_flow': min_buffered_flow,
+                                                                'percentile': percentile_pos * 100.0,
+                                                                'exceedance_pct': exceedance_pct
+                                                            }
+                                                except Exception as _e_buffered:
+                                                    _dbg('buffered_flow_line_fail', str(_e_buffered))
                                                 _apply_figure_size(fig2, duration_chart_layout)
                                                 fig_fsc = go.FigureWidget(fig2)
                                                 bundle = {

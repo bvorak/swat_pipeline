@@ -2334,6 +2334,14 @@ def compute_stats_for_view(
         "selected_days": int(event_idx_selected.size) if event_idx_selected is not None else 0,
         "all_days": int(event_idx_all.size) if event_idx_all is not None else 0,
     }
+    # Add threshold value and unit if available from event_context
+    if isinstance(event_context, dict) and "threshold_value" in event_context:
+        threshold_val = event_context.get("threshold_value")
+        if isinstance(threshold_val, (int, float)) and np.isfinite(threshold_val):
+            event_stats_summary["threshold_value"] = float(threshold_val)
+            threshold_unit = event_context.get("threshold_unit")
+            if isinstance(threshold_unit, str) and threshold_unit.strip():
+                event_stats_summary["threshold_unit"] = threshold_unit
 
     baseline_relative_width = float("nan")  # median-based relative width (p95-p05/median)
     baseline_mean_relative_width = float("nan")  # mean-based relative width (p95-p05/mean)
@@ -3043,11 +3051,22 @@ def format_stats_text(stats: Dict[str, object]) -> str:
                 f"{data_usage.get('sim_days_total', 0)} days)"
             )
         if data_usage.get("measured_days_total", 0) > 0:
-            lines.append(
+            meas_line = (
                 f"measured coverage = {meas_pct:.1f}% ("
                 f"{data_usage.get('measured_days_windowed_finite', 0)}/"
                 f"{data_usage.get('measured_days_total', 0)} days)"
             )
+            # Add threshold value and unit if available
+            event_ctx = stats.get("event_context", {}) or {}
+            if isinstance(event_ctx, dict) and "threshold_value" in event_ctx:
+                threshold_val = event_ctx.get("threshold_value")
+                if isinstance(threshold_val, (int, float)) and np.isfinite(threshold_val):
+                    threshold_unit = event_ctx.get("threshold_unit")
+                    if isinstance(threshold_unit, str) and threshold_unit.strip():
+                        meas_line += f" [event threshold = {threshold_val:.2f} {threshold_unit}]"
+                    else:
+                        meas_line += f" [event threshold = {threshold_val:.2f}]"
+            lines.append(meas_line)
 
     same = stats.get("same_day", {}) or {}
     if same:
