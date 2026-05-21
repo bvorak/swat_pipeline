@@ -1575,6 +1575,7 @@ def fan_compare_simulations_dashboard(
     # New checkbox: when enabled, add sediment net (SED_IN - SED_OUT) overlay to load duration curve diagnostics
     cb_ldc_sediment = widgets.Checkbox(value=False, description="LDC sediment overlay")
     cb_flow_strat = widgets.Checkbox(value=False, description="Flow-strat curve")
+    cb_flow_strat_point_color = widgets.Checkbox(value=False, description="Color points")
     ms_flow_regimes = widgets.SelectMultiple(
         options=["event", "non-event"],
         value=("event", "non-event"),
@@ -1636,6 +1637,7 @@ def fan_compare_simulations_dashboard(
         "flow_total_only": False,
         "flow_overlay": True,
         "flow_total_mode": "median",  # 'median' | 'extents'
+        "flow_strat_point_color": False,  # new: use point coloring instead of background shading
         "latest_stats_export_payload": None,
         "latest_stats_export_path": None,
         "trace_order": None,
@@ -1825,6 +1827,8 @@ def fan_compare_simulations_dashboard(
             cb_show_diags.value = bool(ui_defaults.get("show_diags"))
         if isinstance(ui_defaults.get("flow_strat_curve"), bool):
             cb_flow_strat.value = bool(ui_defaults.get("flow_strat_curve"))
+        if isinstance(ui_defaults.get("flow_strat_point_color"), bool):
+            cb_flow_strat_point_color.value = bool(ui_defaults.get("flow_strat_point_color"))
         # Flow strat additional presets
         if isinstance(ui_defaults.get("flow_total_band"), bool):
             cb_flow_total_band.value = bool(ui_defaults.get("flow_total_band"))
@@ -1928,6 +1932,7 @@ def fan_compare_simulations_dashboard(
             _last["flow_total_only"] = bool(cb_flow_total_only.value)
             _last["flow_overlay"] = bool(cb_flow_overlay.value)
             _last["flow_total_mode"] = dd_flow_total_mode.value
+            _last["flow_strat_point_color"] = bool(cb_flow_strat_point_color.value)
         except Exception:
             pass
 
@@ -2016,6 +2021,7 @@ def fan_compare_simulations_dashboard(
             "show_swat_flow": cb_swat_flow_on.value,
             "show_erosion": cb_erosion_on.value,
             "show_flow_strat": cb_flow_strat.value,
+            "flow_strat_point_color": cb_flow_strat_point_color.value,
             "flow_regimes": list(ms_flow_regimes.value),
             "flow_total_band": cb_flow_total_band.value,
             "flow_total_only": cb_flow_total_only.value,
@@ -4598,33 +4604,63 @@ def fan_compare_simulations_dashboard(
                                 _build_marker_with_overrides(base_marker, resolved_half_mdl_observation_style["main_chart"].get("marker")),
                                 f"{base_label} ({name_suffix}, {half_mdl_suffix})",
                             )
-                    # Color-code measured points similar to prior logic
+                    # Color-code measured points by event/non-event status if enabled, else by deviation
                     try:
                         idx_days = pd.to_datetime(combined_series.index, errors='coerce').floor('D')
-                        red_mask = pd.Series(False, index=combined_series.index)
-                        dev_mask = pd.Series(False, index=combined_series.index)
-                        if _last.get("q_df") is not None and bool(cb_flag_dev.value):
-                            base = _last.get("q_df")["p90"].reindex(combined_series.index)
-                            if base.isna().all() and ("p50" in _last.get("q_df").columns):
-                                base = _last.get("q_df")["p50"].reindex(combined_series.index)
-                            if base.isna().all() and (_last.get("aligned_df") is not None):
-                                base = _last.get("aligned_df").mean(axis=1, skipna=True).reindex(combined_series.index)
-                            factor = float(sl_dev_factor.value)
-                            with np.errstate(divide='ignore', invalid='ignore'):
-                                mvals = combined_series.to_numpy(dtype=float)
-                                bvals = base.to_numpy(dtype=float)
-                                denom = np.abs(bvals)
-                                denom[~np.isfinite(denom) | (denom == 0.0)] = np.nan
-                                ratio = np.abs(mvals) / denom
-                            arr_mask = np.isfinite(ratio) & ((ratio >= factor) | (ratio <= (1.0 / factor)))
-                            dev_mask = pd.Series(arr_mask, index=combined_series.index)
-                        red_idx = red_mask[red_mask].index
-                        orange_idx = dev_mask[~dev_mask.index.isin(red_idx) & dev_mask].index
-                        green_idx = combined_series.index.difference(red_idx.union(orange_idx))
-                        color_use = station_colors.get(st, "#2ca02c")
-                        _append_measured_points(red_idx, "#d62728", "flow-outlier")
-                        _append_measured_points(orange_idx, "#ff7f0e", "deviation")
-                        _append_measured_points(green_idx, color_use, "kept")
+                        
+                        # Check if point coloring by event status is enabled
+                        use_event_coloring = bool(_last.get("flow_strat_point_color", False))
+                        
+                        if use_event_coloring:
+                            # Color by event/non-event status
+                            event_ctx = _last.get("event_context") or {}
+                            idx_events = event_ctx.get("events")
+                            idx_non_events = event_ctx.get("non_events")
+                            
+                            event_mask = pd.Series(False, index=combined_series.index)
+                            non_event_mask = pd.Series(False, index=combined_series.index)
+                            
+                            if isinstance(idx_events, pd.DatetimeIndex) and len(idx_events) > 0:
+                                event_set = set(pd.to_datetime(idx_events).floor('D').tolist())
+                                event_mask = pd.Series([d in event_set for d in idx_days], index=combined_series.index)
+                            
+                            if isinstance(idx_non_events, pd.DatetimeIndex) and len(idx_non_events) > 0:
+                                non_event_set = set(pd.to_datetime(idx_non_events).floor('D').tolist())
+                                non_event_mask = pd.Series([d in non_event_set for d in idx_days], index=combined_series.index)
+                            
+                            event_idx = event_mask[event_mask].index
+                            non_event_idx = non_event_mask[non_event_mask].index
+                            unclassified_idx = combined_series.index.difference(event_idx.union(non_event_idx))
+                            
+                            _append_measured_points(event_idx, "#d62728", "event")
+                            _append_measured_points(non_event_idx, "#1f77b4", "non-event")
+                            _append_measured_points(unclassified_idx, "#2ca02c", "unclassified")
+                        else:
+                            # Original: color by deviation status
+                            red_mask = pd.Series(False, index=combined_series.index)
+                            dev_mask = pd.Series(False, index=combined_series.index)
+                            if _last.get("q_df") is not None and bool(cb_flag_dev.value):
+                                base = _last.get("q_df")["p90"].reindex(combined_series.index)
+                                if base.isna().all() and ("p50" in _last.get("q_df").columns):
+                                    base = _last.get("q_df")["p50"].reindex(combined_series.index)
+                                if base.isna().all() and (_last.get("aligned_df") is not None):
+                                    base = _last.get("aligned_df").mean(axis=1, skipna=True).reindex(combined_series.index)
+                                factor = float(sl_dev_factor.value)
+                                with np.errstate(divide='ignore', invalid='ignore'):
+                                    mvals = combined_series.to_numpy(dtype=float)
+                                    bvals = base.to_numpy(dtype=float)
+                                    denom = np.abs(bvals)
+                                    denom[~np.isfinite(denom) | (denom == 0.0)] = np.nan
+                                    ratio = np.abs(mvals) / denom
+                                arr_mask = np.isfinite(ratio) & ((ratio >= factor) | (ratio <= (1.0 / factor)))
+                                dev_mask = pd.Series(arr_mask, index=combined_series.index)
+                            red_idx = red_mask[red_mask].index
+                            orange_idx = dev_mask[~dev_mask.index.isin(red_idx) & dev_mask].index
+                            green_idx = combined_series.index.difference(red_idx.union(orange_idx))
+                            color_use = station_colors.get(st, "#2ca02c")
+                            _append_measured_points(red_idx, "#d62728", "flow-outlier")
+                            _append_measured_points(orange_idx, "#ff7f0e", "deviation")
+                            _append_measured_points(green_idx, color_use, "kept")
                     except Exception:
                         _append_measured_points(combined_series.index, station_colors.get(st, "#2ca02c"), "kept")
 
@@ -5680,23 +5716,59 @@ def fan_compare_simulations_dashboard(
                                                         }).sort_values('x_mid')
                                                     total_agg = tmp
                                                 fig2 = go.Figure(layout=dict(template=template))
-                                                if not total_only:
-                                                    for rg in ['non-event','event']:
-                                                        if rg not in visible_regimes:
-                                                            continue
-                                                        sub = agg[agg['regime'] == rg].sort_values('x_mid')
-                                                        if sub.empty:
-                                                            continue
-                                                        x_pct = sub['x_mid'].to_numpy()*100.0
-                                                        y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
-                                                        fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name=f"{rg} max", line=dict(color=colors[rg], width=0.6), showlegend=False))
-                                                        if colors[rg].startswith('#') and len(colors[rg])==7:
-                                                            r=int(colors[rg][1:3],16); g=int(colors[rg][3:5],16); b=int(colors[rg][5:7],16)
-                                                            fill_col=f"rgba({r},{g},{b},0.20)"
-                                                        else:
-                                                            fill_col='rgba(0,0,0,0.15)'
-                                                        fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name=f"{rg} band", line=dict(color=colors[rg], width=0.6), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
-                                                        fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean", line=dict(color=colors[rg], width=2)))
+                                                # Check if point coloring mode is enabled
+                                                use_point_color = bool(_last.get("flow_strat_point_color", False))
+                                                if use_point_color:
+                                                    # Point coloring mode: scatter individual points by event/non-event
+                                                    if not total_only:
+                                                        for rg in ['non-event','event']:
+                                                            if rg not in visible_regimes:
+                                                                continue
+                                                            sub = df_sorted[df_sorted['regime'] == rg]
+                                                            if sub.empty:
+                                                                continue
+                                                            x_pct = ((sub['exceedance'].to_numpy())*100.0) if 'exceedance' in sub.columns else np.arange(len(sub))*100.0/len(sub)
+                                                            y_vals = sub['L_mean'].to_numpy()
+                                                            fig2.add_trace(go.Scatter(
+                                                                x=x_pct, y=y_vals, 
+                                                                mode='markers', 
+                                                                name=f"{rg}", 
+                                                                marker=dict(color=colors[rg], size=5, opacity=0.6),
+                                                                hovertemplate=f"<b>{rg}</b><br>Exceedance: %{{x:.1f}}%<br>Load: %{{y:.2f}}<extra></extra>"
+                                                            ))
+                                                        # Add mean lines for reference (overlay on top)
+                                                        for rg in ['non-event','event']:
+                                                            if rg not in visible_regimes:
+                                                                continue
+                                                            bin_means = agg[agg['regime'] == rg].sort_values('x_mid')
+                                                            if not bin_means.empty:
+                                                                x_pct = bin_means['x_mid'].to_numpy()*100.0
+                                                                fig2.add_trace(go.Scatter(
+                                                                    x=x_pct, y=bin_means['y_mean'].to_numpy(), 
+                                                                    mode='lines', 
+                                                                    name=f"{rg} mean", 
+                                                                    line=dict(color=colors[rg], width=3, dash='solid'),
+                                                                    showlegend=True
+                                                                ))
+                                                else:
+                                                    # Band shading mode (original): show min/mean/max envelopes
+                                                    if not total_only:
+                                                        for rg in ['non-event','event']:
+                                                            if rg not in visible_regimes:
+                                                                continue
+                                                            sub = agg[agg['regime'] == rg].sort_values('x_mid')
+                                                            if sub.empty:
+                                                                continue
+                                                            x_pct = sub['x_mid'].to_numpy()*100.0
+                                                            y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
+                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name=f"{rg} max", line=dict(color=colors[rg], width=0.6), showlegend=False))
+                                                            if colors[rg].startswith('#') and len(colors[rg])==7:
+                                                                r=int(colors[rg][1:3],16); g=int(colors[rg][3:5],16); b=int(colors[rg][5:7],16)
+                                                                fill_col=f"rgba({r},{g},{b},0.20)"
+                                                            else:
+                                                                fill_col='rgba(0,0,0,0.15)'
+                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name=f"{rg} band", line=dict(color=colors[rg], width=0.6), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
+                                                            fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean", line=dict(color=colors[rg], width=2)))
                                                 if total_agg is not None:
                                                     sub = total_agg
                                                     x_pct = sub['x_mid'].to_numpy()*100.0
@@ -6009,6 +6081,7 @@ def fan_compare_simulations_dashboard(
         cb_flow_total_only.observe(_mark_stale, names="value")
         cb_flow_overlay.observe(_mark_stale, names="value")
         dd_flow_total_mode.observe(_mark_stale, names="value")
+        cb_flow_strat_point_color.observe(_mark_stale, names="value")
     except Exception:
         pass
 
@@ -6088,6 +6161,7 @@ def fan_compare_simulations_dashboard(
         cb_show_diags,
         cb_ldc_sediment,
         cb_flow_strat,
+        cb_flow_strat_point_color,
         ms_flow_regimes,
         cb_flow_total_band,
         cb_flow_total_only,
@@ -6140,6 +6214,7 @@ def fan_compare_simulations_dashboard(
         _last["flow_total_only"] = bool(cb_flow_total_only.value)
         _last["flow_overlay"] = bool(cb_flow_overlay.value)
         _last["flow_total_mode"] = dd_flow_total_mode.value
+        _last["flow_strat_point_color"] = bool(cb_flow_strat_point_color.value)
     except Exception:
         pass
 
