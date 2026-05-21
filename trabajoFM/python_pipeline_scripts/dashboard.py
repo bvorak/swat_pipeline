@@ -2115,8 +2115,12 @@ def fan_compare_simulations_dashboard(
         load_min: Optional[pd.Series], load_mean: Optional[pd.Series], load_max: Optional[pd.Series],
         flow_external: Optional[pd.Series], flow_swat: Optional[pd.Series], *,
         threshold_spec: Union[str, float] = "p75", bin_step: float = 0.05,
-        prefer: str = "auto", template_name: str = "plotly_white"
+        prefer: str = "auto", template_name: str = "plotly_white",
+        measured_series: Optional[List[pd.Series]] = None,
+        measured_half_mdl_flags: Optional[List[pd.Series]] = None,
+        event_context: Optional[Dict[str, Any]] = None
     ) -> Optional[Tuple[go.FigureWidget, Dict[str, Any]]]:
+
         try:
             if not (isinstance(load_min, pd.Series) and isinstance(load_mean, pd.Series) and isinstance(load_max, pd.Series)):
                 return None
@@ -2230,6 +2234,149 @@ def fan_compare_simulations_dashboard(
                     fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color=colors[reg], width=0.6), fill="tonexty", fillcolor=fill_col, hoverinfo="skip", showlegend=False))
                     # Mean line
                     fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name=f"{reg} mean", line=dict(color=colors[reg], width=2)))
+            
+            # Add measured points colored by event/non-event status if enabled
+            try:
+                use_event_coloring = bool(_last.get("flow_strat_point_color", False))
+                if use_event_coloring and isinstance(measured_series, list) and len(measured_series) > 0 and isinstance(event_context, dict):
+                    # Combine all measured series and half-MDL flags into one dataframe for plotting
+                    combined_rows = []
+                    if isinstance(measured_series, list):
+                        for idx_ms, ms in enumerate(measured_series):
+                            if isinstance(ms, pd.Series) and not ms.empty:
+                                ms_valid = ms.dropna()
+                                if ms_valid.empty:
+                                    continue
+                                if isinstance(measured_half_mdl_flags, list) and idx_ms < len(measured_half_mdl_flags) and isinstance(measured_half_mdl_flags[idx_ms], pd.Series):
+                                    flags = measured_half_mdl_flags[idx_ms].reindex(ms_valid.index).fillna(False).astype(bool)
+                                else:
+                                    flags = pd.Series(False, index=ms_valid.index, dtype=bool)
+                                for dt, val in ms_valid.items():
+                                    is_half = flags.get(dt, False)
+                                    combined_rows.append({
+                                        "date": pd.to_datetime(dt),
+                                        "value": float(val),
+                                        "half_mdl": bool(is_half),
+                                    })
+                    if combined_rows:
+                        combined_meas = pd.DataFrame(combined_rows)
+                        if not combined_meas.empty:
+                            # Get event/non-event indices from event_context
+                            idx_events = event_context.get("events")
+                            idx_non_events = event_context.get("non_events")
+
+                            if isinstance(idx_events, pd.DatetimeIndex):
+                                event_set = set(pd.to_datetime(idx_events).floor('D').tolist())
+                            else:
+                                event_set = set()
+                            if isinstance(idx_non_events, pd.DatetimeIndex):
+                                non_event_set = set(pd.to_datetime(idx_non_events).floor('D').tolist())
+                            else:
+                                non_event_set = set()
+
+                            df_sorted_floored = df_sorted.copy()
+                            df_sorted_floored.index = pd.to_datetime(df_sorted_floored.index).floor('D')
+
+                            event_meas_x = []
+                            event_meas_y = []
+                            non_event_meas_x = []
+                            non_event_meas_y = []
+                            unclass_meas_x = []
+                            unclass_meas_y = []
+                            event_meas_x_half = []
+                            event_meas_y_half = []
+                            non_event_meas_x_half = []
+                            non_event_meas_y_half = []
+                            unclass_meas_x_half = []
+                            unclass_meas_y_half = []
+
+                            for _, row in combined_meas.iterrows():
+                                meas_date = row["date"].floor('D')
+                                matching = df_sorted_floored.loc[[meas_date]] if meas_date in df_sorted_floored.index else None
+                                if matching is not None and not matching.empty:
+                                    exc_pct = float(matching["exceedance"].iloc[0]) * 100.0
+                                    is_half = bool(row["half_mdl"])
+                                    if meas_date in event_set:
+                                        if is_half:
+                                            event_meas_x_half.append(exc_pct)
+                                            event_meas_y_half.append(row["value"])
+                                        else:
+                                            event_meas_x.append(exc_pct)
+                                            event_meas_y.append(row["value"])
+                                    elif meas_date in non_event_set:
+                                        if is_half:
+                                            non_event_meas_x_half.append(exc_pct)
+                                            non_event_meas_y_half.append(row["value"])
+                                        else:
+                                            non_event_meas_x.append(exc_pct)
+                                            non_event_meas_y.append(row["value"])
+                                    else:
+                                        if is_half:
+                                            unclass_meas_x_half.append(exc_pct)
+                                            unclass_meas_y_half.append(row["value"])
+                                        else:
+                                            unclass_meas_x.append(exc_pct)
+                                            unclass_meas_y.append(row["value"])
+
+                            if event_meas_x:
+                                fig.add_trace(go.Scatter(
+                                    x=event_meas_x, y=event_meas_y,
+                                    mode='markers',
+                                    name='Measured (event)',
+                                    marker=dict(color=colors["event"], size=6, opacity=0.7, symbol='circle'),
+                                    hovertemplate='<b>Measured (event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            if non_event_meas_x:
+                                fig.add_trace(go.Scatter(
+                                    x=non_event_meas_x, y=non_event_meas_y,
+                                    mode='markers',
+                                    name='Measured (non-event)',
+                                    marker=dict(color=colors["non-event"], size=6, opacity=0.7, symbol='circle'),
+                                    hovertemplate='<b>Measured (non-event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            if unclass_meas_x:
+                                fig.add_trace(go.Scatter(
+                                    x=unclass_meas_x, y=unclass_meas_y,
+                                    mode='markers',
+                                    name='Measured (unclassified)',
+                                    marker=dict(color='#2ca02c', size=6, opacity=0.7, symbol='circle'),
+                                    hovertemplate='<b>Measured (unclassified)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            if event_meas_x_half:
+                                fig.add_trace(go.Scatter(
+                                    x=event_meas_x_half, y=event_meas_y_half,
+                                    mode='markers',
+                                    name='Measured (half-MDL, event)',
+                                    marker=dict(color=colors["event"], size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkred', width=1.5)),
+                                    hovertemplate='<b>Measured (half-MDL, event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            if non_event_meas_x_half:
+                                fig.add_trace(go.Scatter(
+                                    x=non_event_meas_x_half, y=non_event_meas_y_half,
+                                    mode='markers',
+                                    name='Measured (half-MDL, non-event)',
+                                    marker=dict(color=colors["non-event"], size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkblue', width=1.5)),
+                                    hovertemplate='<b>Measured (half-MDL, non-event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            if unclass_meas_x_half:
+                                fig.add_trace(go.Scatter(
+                                    x=unclass_meas_x_half, y=unclass_meas_y_half,
+                                    mode='markers',
+                                    name='Measured (half-MDL, unclassified)',
+                                    marker=dict(color='#2ca02c', size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkgreen', width=1.5)),
+                                    hovertemplate='<b>Measured (half-MDL, unclassified)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                ))
+                            
+                            n_half = len(event_meas_x_half) + len(non_event_meas_x_half) + len(unclass_meas_x_half)
+                            n_full = len(event_meas_x) + len(non_event_meas_x) + len(unclass_meas_x)
+                            fig.add_annotation(
+                                x=0.5, y=1.05, xref='paper', yref='paper',
+                                text=f"DEBUG: Found {n_full} full, {n_half} half-MDL",
+                                showarrow=False, font=dict(color='red')
+                            )
+            except Exception as _e_meas:
+                _dbg('flow_strat_measured_fail', str(_e_meas))
+            
             if total_agg is not None:
                 sub = total_agg
                 x_pct = sub.x_mid.to_numpy()*100.0
@@ -2619,6 +2766,20 @@ def fan_compare_simulations_dashboard(
                     duration_half_mdl_cfg = resolved_half_mdl_observation_style.get("duration_chart", {}) if isinstance(resolved_half_mdl_observation_style.get("duration_chart"), dict) else {}
                     duration_half_mdl_affected_cfg = duration_half_mdl_cfg.get("affected", {}) if isinstance(duration_half_mdl_cfg.get("affected"), dict) else {}
                     duration_half_mdl_unaffected_cfg = duration_half_mdl_cfg.get("unaffected", {}) if isinstance(duration_half_mdl_cfg.get("unaffected"), dict) else {}
+                    
+                    # Check if event/non-event coloring is enabled for measured points
+                    use_event_coloring_ldc = bool(_last.get("flow_strat_point_color", False))
+                    event_context_ldc = _last.get("event_context") or {}
+                    idx_events_ldc = event_context_ldc.get("events") if use_event_coloring_ldc else None
+                    idx_non_events_ldc = event_context_ldc.get("non_events") if use_event_coloring_ldc else None
+                    # Build event/non-event date sets for fast lookup
+                    event_set_ldc = set()
+                    non_event_set_ldc = set()
+                    if use_event_coloring_ldc:
+                        if isinstance(idx_events_ldc, pd.DatetimeIndex):
+                            event_set_ldc = set(pd.to_datetime(idx_events_ldc).floor('D').tolist())
+                        if isinstance(idx_non_events_ldc, pd.DatetimeIndex):
+                            non_event_set_ldc = set(pd.to_datetime(idx_non_events_ldc).floor('D').tolist())
 
                     def _duration_half_mdl_flags_for(idx: int, series_here: pd.Series) -> pd.Series:
                         if idx < len(meas_half_mdl_flags) and isinstance(meas_half_mdl_flags[idx], pd.Series):
@@ -2648,36 +2809,121 @@ def fan_compare_simulations_dashboard(
                             y_pts: List[float] = []
                             x_pts_half_mdl: List[float] = []
                             y_pts_half_mdl: List[float] = []
+                            # Event/non-event coloring: separate points into categories
+                            x_pts_event: List[float] = []
+                            y_pts_event: List[float] = []
+                            x_pts_non_event: List[float] = []
+                            y_pts_non_event: List[float] = []
+                            x_pts_unclass: List[float] = []
+                            y_pts_unclass: List[float] = []
+                            # Half-MDL event-separated lists (used when event coloring is active)
+                            x_pts_event_half: List[float] = []
+                            y_pts_event_half: List[float] = []
+                            x_pts_non_event_half: List[float] = []
+                            y_pts_non_event_half: List[float] = []
+                            x_pts_unclass_half: List[float] = []
+                            y_pts_unclass_half: List[float] = []
                             for i, dt in enumerate(paired_index):
                                 if dt in combined:
                                     x_here = float(paired_x_rank[i])
                                     for val, was_half_mdl in combined[dt]:
                                         if half_mdl_duration_style_active and was_half_mdl:
-                                            x_pts_half_mdl.append(x_here)
-                                            y_pts_half_mdl.append(val)
+                                            # If event-coloring is enabled, classify half-MDL points by event status
+                                            if use_event_coloring_ldc:
+                                                dt_floored = pd.Timestamp(dt).normalize()
+                                                if dt_floored in event_set_ldc:
+                                                    x_pts_event_half.append(x_here)
+                                                    y_pts_event_half.append(val)
+                                                elif dt_floored in non_event_set_ldc:
+                                                    x_pts_non_event_half.append(x_here)
+                                                    y_pts_non_event_half.append(val)
+                                                else:
+                                                    x_pts_unclass_half.append(x_here)
+                                                    y_pts_unclass_half.append(val)
+                                            else:
+                                                x_pts_half_mdl.append(x_here)
+                                                y_pts_half_mdl.append(val)
                                         else:
-                                            x_pts.append(x_here)
-                                            y_pts.append(val)
-                            if x_pts or x_pts_half_mdl:
-                                arr_x_all = np.array(x_pts + x_pts_half_mdl, dtype=float)
+                                            # Classify by event status if coloring is enabled
+                                            if use_event_coloring_ldc:
+                                                dt_floored = pd.Timestamp(dt).normalize()
+                                                if dt_floored in event_set_ldc:
+                                                    x_pts_event.append(x_here)
+                                                    y_pts_event.append(val)
+                                                elif dt_floored in non_event_set_ldc:
+                                                    x_pts_non_event.append(x_here)
+                                                    y_pts_non_event.append(val)
+                                                else:
+                                                    x_pts_unclass.append(x_here)
+                                                    y_pts_unclass.append(val)
+                                            else:
+                                                x_pts.append(x_here)
+                                                y_pts.append(val)
+                            if x_pts or x_pts_half_mdl or x_pts_event or x_pts_non_event or x_pts_unclass:
+                                # Determine measured extent for x-axis clipping
+                                all_x = x_pts + x_pts_half_mdl + x_pts_event + x_pts_non_event + x_pts_unclass
+                                arr_x_all = np.array(all_x, dtype=float) if all_x else np.array([], dtype=float)
                                 # measured extent is along the already-ranked axis
                                 try:
                                     meas_x_extent = (float(np.nanmin(arr_x_all)), float(np.nanmax(arr_x_all)))  # type: ignore
                                 except Exception:
                                     meas_x_extent = None  # type: ignore
-                                base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
-                                if x_pts:
-                                    fig_ldc.add_trace(
-                                        go.Scatter(
-                                            x=np.array(x_pts, dtype=float),
-                                            y=np.array(y_pts, dtype=float),
-                                            mode="markers",
-                                            name=str(duration_half_mdl_unaffected_cfg.get("name_paired") or "Measured"),
-                                            marker=base_duration_marker,
-                                            hovertemplate="Measured: %{y:.4g}<extra></extra>",
-                                            legendrank=600,
+                                
+                                # Add traces with appropriate coloring
+                                if use_event_coloring_ldc:
+                                    # Event/non-event coloring mode
+                                    if x_pts_event:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=np.array(x_pts_event, dtype=float),
+                                                y=np.array(y_pts_event, dtype=float),
+                                                mode="markers",
+                                                name="Measured (event)",
+                                                marker=dict(color="#d62728", size=7, line=dict(color="darkred", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (event): %{y:.4g}<extra></extra>",
+                                                legendrank=600,
+                                            )
                                         )
-                                    )
+                                    if x_pts_non_event:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=np.array(x_pts_non_event, dtype=float),
+                                                y=np.array(y_pts_non_event, dtype=float),
+                                                mode="markers",
+                                                name="Measured (non-event)",
+                                                marker=dict(color="#1f77b4", size=7, line=dict(color="darkblue", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (non-event): %{y:.4g}<extra></extra>",
+                                                legendrank=605,
+                                            )
+                                        )
+                                    if x_pts_unclass:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=np.array(x_pts_unclass, dtype=float),
+                                                y=np.array(y_pts_unclass, dtype=float),
+                                                mode="markers",
+                                                name="Measured (unclassified)",
+                                                marker=dict(color="#2ca02c", size=7, line=dict(color="darkgreen", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (unclassified): %{y:.4g}<extra></extra>",
+                                                legendrank=610,
+                                            )
+                                        )
+                                else:
+                                    # Default single-color mode
+                                    base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
+                                    if x_pts:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=np.array(x_pts, dtype=float),
+                                                y=np.array(y_pts, dtype=float),
+                                                mode="markers",
+                                                name=str(duration_half_mdl_unaffected_cfg.get("name_paired") or "Measured"),
+                                                marker=base_duration_marker,
+                                                hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                                legendrank=600,
+                                            )
+                                        )
+                                # Half-MDL points (always separate)
                                 if half_mdl_duration_style_active and x_pts_half_mdl:
                                     fig_ldc.add_trace(
                                         go.Scatter(
@@ -2685,16 +2931,16 @@ def fan_compare_simulations_dashboard(
                                             y=np.array(y_pts_half_mdl, dtype=float),
                                             mode="markers",
                                             name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
-                                            marker=_build_marker_with_overrides(base_duration_marker, duration_half_mdl_affected_cfg.get("marker")),
+                                            marker=_build_marker_with_overrides(dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"), duration_half_mdl_affected_cfg.get("marker")),
                                             hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
-                                            legendrank=610,
+                                            legendrank=650,
                                         )
                                     )
                                 added = True
-                                _dbg("duration measured overlay (paired)", dict(n_points=int(arr_x_all.size)))
+                                _dbg("duration measured overlay (paired)", dict(n_points=int(arr_x_all.size), event_coloring=use_event_coloring_ldc))
                     else:
                         # Fallback to order-statistics orientation (value sorted)
-                        measured_entries: List[Tuple[float, bool]] = []
+                        measured_entries: List[Tuple[float, bool, pd.Timestamp]] = []
                         if isinstance(meas_list, (list, tuple)):
                             for idx_ms, ms in enumerate(meas_list):
                                 if isinstance(ms, pd.Series) and not ms.empty:
@@ -2708,11 +2954,12 @@ def fan_compare_simulations_dashboard(
                                                 continue
                                         except Exception:
                                             continue
-                                        measured_entries.append((float(val), bool(half_mdl_flags_here.loc[dt])))
+                                        measured_entries.append((float(val), bool(half_mdl_flags_here.loc[dt]), pd.Timestamp(dt)))
                         if measured_entries:
                             measured_entries.sort(key=lambda item: item[0])
-                            arr_meas = np.array([val for val, _flag in measured_entries], dtype=float)
-                            arr_flags = np.array([flag for _val, flag in measured_entries], dtype=bool)
+                            arr_meas = np.array([val for val, _flag, _dt in measured_entries], dtype=float)
+                            arr_flags = np.array([flag for _val, flag, _dt in measured_entries], dtype=bool)
+                            arr_dates = np.array([dt for _val, _flag, dt in measured_entries], dtype=object)
                             arr_meas = arr_meas[np.isfinite(arr_meas)]
                             if arr_meas.size:
                                 n_meas = arr_meas.size
@@ -2721,43 +2968,184 @@ def fan_compare_simulations_dashboard(
                                     meas_x_extent = (float(np.nanmin(x_meas)), float(np.nanmax(x_meas)))  # type: ignore
                                 except Exception:
                                     meas_x_extent = None  # type: ignore
-                                base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
-                                if not half_mdl_duration_style_active:
-                                    fig_ldc.add_trace(
-                                        go.Scatter(
-                                            x=x_meas,
-                                            y=arr_meas,
-                                            mode="markers",
-                                            name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
-                                            marker=base_duration_marker,
-                                            hovertemplate="Measured: %{y:.4g}<extra></extra>",
-                                        )
-                                    )
-                                else:
-                                    if (~arr_flags).any():
+                                
+                                if use_event_coloring_ldc:
+                                    # Event/non-event coloring mode for order-stats
+                                    # Separate regular vs half-MDL points for proper styling
+                                    x_meas_event = []
+                                    y_meas_event = []
+                                    x_meas_non_event = []
+                                    y_meas_non_event = []
+                                    x_meas_unclass = []
+                                    y_meas_unclass = []
+                                    x_meas_event_half = []
+                                    y_meas_event_half = []
+                                    x_meas_non_event_half = []
+                                    y_meas_non_event_half = []
+                                    x_meas_unclass_half = []
+                                    y_meas_unclass_half = []
+                                    
+                                    for idx, (val, flag, dt) in enumerate(measured_entries):
+                                        if np.isfinite(val):
+                                            x_val = 100.0 * ((idx + 1) / (n_meas + 1))
+                                            dt_floored = pd.Timestamp(dt).normalize()
+                                            # Classify by event status
+                                            is_event = dt_floored in event_set_ldc
+                                            is_non_event = dt_floored in non_event_set_ldc
+                                            # Classify by half-MDL status
+                                            is_half_mdl = bool(flag) and half_mdl_duration_style_active
+                                            
+                                            if is_half_mdl:
+                                                if is_event:
+                                                    x_meas_event_half.append(x_val)
+                                                    y_meas_event_half.append(val)
+                                                elif is_non_event:
+                                                    x_meas_non_event_half.append(x_val)
+                                                    y_meas_non_event_half.append(val)
+                                                else:
+                                                    x_meas_unclass_half.append(x_val)
+                                                    y_meas_unclass_half.append(val)
+                                            else:
+                                                if is_event:
+                                                    x_meas_event.append(x_val)
+                                                    y_meas_event.append(val)
+                                                elif is_non_event:
+                                                    x_meas_non_event.append(x_val)
+                                                    y_meas_non_event.append(val)
+                                                else:
+                                                    x_meas_unclass.append(x_val)
+                                                    y_meas_unclass.append(val)
+                                    
+                                    # Add regular measured point traces (colored by event status)
+                                    if x_meas_event:
                                         fig_ldc.add_trace(
                                             go.Scatter(
-                                                x=x_meas[~arr_flags],
-                                                y=arr_meas[~arr_flags],
+                                                x=x_meas_event,
+                                                y=y_meas_event,
+                                                mode="markers",
+                                                name="Measured (event)",
+                                                marker=dict(color="#d62728", size=7, line=dict(color="darkred", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (event): %{y:.4g}<extra></extra>",
+                                                legendrank=600,
+                                            )
+                                        )
+                                    if x_meas_non_event:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_meas_non_event,
+                                                y=y_meas_non_event,
+                                                mode="markers",
+                                                name="Measured (non-event)",
+                                                marker=dict(color="#1f77b4", size=7, line=dict(color="darkblue", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (non-event): %{y:.4g}<extra></extra>",
+                                                legendrank=605,
+                                            )
+                                        )
+                                    if x_meas_unclass:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_meas_unclass,
+                                                y=y_meas_unclass,
+                                                mode="markers",
+                                                name="Measured (unclassified)",
+                                                marker=dict(color="#2ca02c", size=7, line=dict(color="darkgreen", width=0.8), symbol="circle"),
+                                                hovertemplate="Measured (unclassified): %{y:.4g}<extra></extra>",
+                                                legendrank=610,
+                                            )
+                                        )
+                                    
+                                    # Add half-MDL traces with event coloring if enabled and present
+                                    if half_mdl_duration_style_active and (x_pts_event_half or x_pts_non_event_half or x_pts_unclass_half):
+                                        # Get the half-MDL marker style
+                                        half_mdl_base_marker = _build_marker_with_overrides(dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle"), duration_half_mdl_affected_cfg.get("marker"))
+
+                                        if x_pts_event_half:
+                                            half_mdl_event_marker = dict(half_mdl_base_marker)
+                                            half_mdl_event_marker['color'] = "#d62728"
+                                            if 'line' in half_mdl_event_marker:
+                                                half_mdl_event_marker['line'] = dict(color="darkred", width=0.8)
+                                            fig_ldc.add_trace(
+                                                go.Scatter(
+                                                    x=np.array(x_pts_event_half, dtype=float),
+                                                    y=np.array(y_pts_event_half, dtype=float),
+                                                    mode="markers",
+                                                    name="Measured (half-MDL, event)",
+                                                    marker=half_mdl_event_marker,
+                                                    hovertemplate="Measured (half-MDL, event): %{y:.4g}<extra></extra>",
+                                                    legendrank=660,
+                                                )
+                                            )
+                                        if x_pts_non_event_half:
+                                            half_mdl_non_event_marker = dict(half_mdl_base_marker)
+                                            half_mdl_non_event_marker['color'] = "#1f77b4"
+                                            if 'line' in half_mdl_non_event_marker:
+                                                half_mdl_non_event_marker['line'] = dict(color="darkblue", width=0.8)
+                                            fig_ldc.add_trace(
+                                                go.Scatter(
+                                                    x=np.array(x_pts_non_event_half, dtype=float),
+                                                    y=np.array(y_pts_non_event_half, dtype=float),
+                                                    mode="markers",
+                                                    name="Measured (half-MDL, non-event)",
+                                                    marker=half_mdl_non_event_marker,
+                                                    hovertemplate="Measured (half-MDL, non-event): %{y:.4g}<extra></extra>",
+                                                    legendrank=665,
+                                                )
+                                            )
+                                        if x_pts_unclass_half:
+                                            half_mdl_unclass_marker = dict(half_mdl_base_marker)
+                                            half_mdl_unclass_marker['color'] = "#2ca02c"
+                                            if 'line' in half_mdl_unclass_marker:
+                                                half_mdl_unclass_marker['line'] = dict(color="darkgreen", width=0.8)
+                                            fig_ldc.add_trace(
+                                                go.Scatter(
+                                                    x=np.array(x_pts_unclass_half, dtype=float),
+                                                    y=np.array(y_pts_unclass_half, dtype=float),
+                                                    mode="markers",
+                                                    name="Measured (half-MDL, unclassified)",
+                                                    marker=half_mdl_unclass_marker,
+                                                    hovertemplate="Measured (half-MDL, unclassified): %{y:.4g}<extra></extra>",
+                                                    legendrank=670,
+                                                )
+                                            )
+                                else:
+                                    # Default single-color mode
+                                    base_duration_marker = dict(color="#d62728", size=7, line=dict(color="#333", width=0.6), symbol="circle")
+                                    if not half_mdl_duration_style_active:
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_meas,
+                                                y=arr_meas,
                                                 mode="markers",
                                                 name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
                                                 marker=base_duration_marker,
                                                 hovertemplate="Measured: %{y:.4g}<extra></extra>",
                                             )
                                         )
-                                    if arr_flags.any():
-                                        fig_ldc.add_trace(
-                                            go.Scatter(
-                                                x=x_meas[arr_flags],
-                                                y=arr_meas[arr_flags],
-                                                mode="markers",
-                                                name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
-                                                marker=_build_marker_with_overrides(base_duration_marker, duration_half_mdl_affected_cfg.get("marker")),
-                                                hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
+                                    else:
+                                        if (~arr_flags).any():
+                                            fig_ldc.add_trace(
+                                                go.Scatter(
+                                                    x=x_meas[~arr_flags],
+                                                    y=arr_meas[~arr_flags],
+                                                    mode="markers",
+                                                    name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+                                                    marker=base_duration_marker,
+                                                    hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                                )
                                             )
-                                        )
+                                        if arr_flags.any():
+                                            fig_ldc.add_trace(
+                                                go.Scatter(
+                                                    x=x_meas[arr_flags],
+                                                    y=arr_meas[arr_flags],
+                                                    mode="markers",
+                                                    name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
+                                                    marker=_build_marker_with_overrides(base_duration_marker, duration_half_mdl_affected_cfg.get("marker")),
+                                                    hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
+                                                )
+                                            )
                                 added = True
-                                _dbg("duration measured overlay", dict(n_points=int(n_meas)))
+                                _dbg("duration measured overlay", dict(n_points=int(n_meas), event_coloring=use_event_coloring_ldc))
                 except Exception as _e_meas_dc:
                     _dbg("duration measured overlay failed", str(_e_meas_dc))
             if added:
@@ -5750,6 +6138,146 @@ def fan_compare_simulations_dashboard(
                                                                     line=dict(color=colors[rg], width=3, dash='solid'),
                                                                     showlegend=True
                                                                 ))
+                                                        # Add measured data points colored by event/non-event
+                                                        try:
+                                                            measured_series_local = _last.get("meas_series")
+                                                            measured_half_flags_local = _last.get("meas_series_half_mdl_flags")
+                                                            event_ctx_local = _last.get("event_context")
+                                                            
+                                                            if measured_series_local and event_ctx_local:
+                                                                # Build combined measured rows with half-MDL flags preserved
+                                                                combined_rows_local = []
+                                                                if isinstance(measured_series_local, list):
+                                                                    for idx_ms, ms in enumerate(measured_series_local):
+                                                                        if isinstance(ms, pd.Series) and not ms.empty:
+                                                                            ms_valid = ms.dropna()
+                                                                            if ms_valid.empty:
+                                                                                continue
+                                                                            if isinstance(measured_half_local, list) and idx_ms < len(measured_half_local) and isinstance(measured_half_local[idx_ms], pd.Series):
+                                                                                flags = measured_half_local[idx_ms].reindex(ms_valid.index).fillna(False).astype(bool)
+                                                                            else:
+                                                                                flags = pd.Series(False, index=ms_valid.index, dtype=bool)
+                                                                            for dt, val in ms_valid.items():
+                                                                                is_half = flags.get(dt, False)
+                                                                                combined_rows_m.append({
+                                                                                    "date": pd.to_datetime(dt),
+                                                                                    "value": float(val),
+                                                                                    "half_mdl": bool(is_half),
+                                                                                })
+                                                                
+                                                                print(f"DEBUG-DEBUG-DEBUG: combined_rows_m has {len(combined_rows_m)} items")
+                                                                
+                                                                if combined_rows_m:
+                                                                    combined_meas = pd.DataFrame(combined_rows_m)
+                                                                else:
+                                                                    combined_meas = None
+                                                                    
+                                                                if combined_meas is not None and not combined_meas.empty:
+                                                                    # Get event/non-event indices
+                                                                    idx_events_m = event_ctx_local.get("events")
+                                                                    idx_non_events_m = event_ctx_local.get("non_events")
+
+                                                                    # Create event/non-event date sets
+                                                                    if isinstance(idx_events_m, pd.DatetimeIndex):
+                                                                        event_set_m = set(pd.to_datetime(idx_events_m).floor('D').tolist())
+                                                                    else:
+                                                                        event_set_m = set()
+                                                                    if isinstance(idx_non_events_m, pd.DatetimeIndex):
+                                                                        non_event_set_m = set(pd.to_datetime(idx_non_events_m).floor('D').tolist())
+                                                                    else:
+                                                                        non_event_set_m = set()
+
+                                                                    # Prepare floored df_sorted for matching
+                                                                    df_sorted_floored_local = df_sorted.copy()
+                                                                    df_sorted_floored_local.index = pd.to_datetime(df_sorted_floored_local.index).floor('D')
+
+                                                                    # Classify measured points, separating half-MDL and full measurements
+                                                                    event_meas_x_e = []; event_meas_y_e = []
+                                                                    non_event_meas_x_e = []; non_event_meas_y_e = []
+                                                                    unclass_meas_x_e = []; unclass_meas_y_e = []
+                                                                    event_meas_x_half = []; event_meas_y_half = []
+                                                                    non_event_meas_x_half = []; non_event_meas_y_half = []
+                                                                    unclass_meas_x_half = []; unclass_meas_y_half = []
+
+                                                                    for _, row in combined_meas.iterrows():
+                                                                        meas_date = row["date"].floor('D')
+                                                                        matching = df_sorted_floored_local.loc[[meas_date]] if meas_date in df_sorted_floored_local.index else None
+                                                                        if matching is not None and not matching.empty:
+                                                                            exc_pct = float(matching['exceedance'].iloc[0]) * 100.0
+                                                                            is_half = bool(row.get("half_mdl", False))
+                                                                            if meas_date in event_set_m:
+                                                                                if is_half:
+                                                                                    event_meas_x_half.append(exc_pct)
+                                                                                    event_meas_y_half.append(row["value"])
+                                                                                else:
+                                                                                    event_meas_x_e.append(exc_pct)
+                                                                                    event_meas_y_e.append(row["value"])
+                                                                            elif meas_date in non_event_set_m:
+                                                                                if is_half:
+                                                                                    non_event_meas_x_half.append(exc_pct)
+                                                                                    non_event_meas_y_half.append(row["value"])
+                                                                                else:
+                                                                                    non_event_meas_x_e.append(exc_pct)
+                                                                                    non_event_meas_y_e.append(row["value"])
+                                                                            else:
+                                                                                if is_half:
+                                                                                    unclass_meas_x_half.append(exc_pct)
+                                                                                    unclass_meas_y_half.append(row["value"])
+                                                                                else:
+                                                                                    unclass_meas_x_e.append(exc_pct)
+                                                                                    unclass_meas_y_e.append(row["value"])
+
+                                                                    # Add measured traces (full + half-MDL using same event colors)
+                                                                    if event_meas_x_e and 'event' in visible_regimes:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=event_meas_x_e, y=event_meas_y_e,
+                                                                            mode='markers',
+                                                                            name='Measured (event)',
+                                                                            marker=dict(color=colors["event"], size=6, opacity=0.7, symbol='circle', line=dict(color='darkred', width=1)),
+                                                                            hovertemplate='<b>Measured (event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                                    if non_event_meas_x_e and 'non-event' in visible_regimes:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=non_event_meas_x_e, y=non_event_meas_y_e,
+                                                                            mode='markers',
+                                                                            name='Measured (non-event)',
+                                                                            marker=dict(color=colors["non-event"], size=6, opacity=0.7, symbol='circle', line=dict(color='darkblue', width=1)),
+                                                                            hovertemplate='<b>Measured (non-event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                                    if unclass_meas_x_e:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=unclass_meas_x_e, y=unclass_meas_y_e,
+                                                                            mode='markers',
+                                                                            name='Measured (unclassified)',
+                                                                            marker=dict(color='#2ca02c', size=6, opacity=0.7, symbol='circle', line=dict(color='darkgreen', width=1)),
+                                                                            hovertemplate='<b>Measured (unclassified)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                                    if event_meas_x_half:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=event_meas_x_half, y=event_meas_y_half,
+                                                                            mode='markers',
+                                                                            name='Measured (half-MDL, event)',
+                                                                            marker=dict(color=colors["event"], size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkred', width=1.5)),
+                                                                            hovertemplate='<b>Measured (half-MDL, event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                                    if non_event_meas_x_half:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=non_event_meas_x_half, y=non_event_meas_y_half,
+                                                                            mode='markers',
+                                                                            name='Measured (half-MDL, non-event)',
+                                                                            marker=dict(color=colors["non-event"], size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkblue', width=1.5)),
+                                                                            hovertemplate='<b>Measured (half-MDL, non-event)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                                    if unclass_meas_x_half:
+                                                                        fig2.add_trace(go.Scatter(
+                                                                            x=unclass_meas_x_half, y=unclass_meas_y_half,
+                                                                            mode='markers',
+                                                                            name='Measured (half-MDL, unclassified)',
+                                                                            marker=dict(color='#2ca02c', size=6, opacity=0.8, symbol='circle-open', line=dict(color='darkgreen', width=1.5)),
+                                                                            hovertemplate='<b>Measured (half-MDL, unclassified)</b><br>Exceedance: %{x:.1f}%<br>Load: %{y:.2f}<extra></extra>'
+                                                                        ))
+                                                        except Exception as _e_measured_e:
+                                                            _dbg('flow_strat_measured_event_ctx_fail', str(_e_measured_e))
                                                 else:
                                                     # Band shading mode (original): show min/mean/max envelopes
                                                     if not total_only:
@@ -5832,7 +6360,13 @@ def fan_compare_simulations_dashboard(
                                         flow_ext_valid=isinstance(flow_ext, pd.Series) and not (flow_ext is None or flow_ext.empty),
                                         flow_swat_valid=isinstance(flow_swat, pd.Series) and not (flow_swat is None or flow_swat.empty)
                                     ))
-                                    built = _build_flow_stratified_curve(load_min, load_mean, load_max, flow_ext, flow_swat, template_name=template)
+                                    built = _build_flow_stratified_curve(
+                                        load_min, load_mean, load_max, flow_ext, flow_swat, 
+                                        template_name=template,
+                                        measured_series=_last.get("meas_series"),
+                                        measured_half_mdl_flags=_last.get("meas_series_half_mdl_flags"),
+                                        event_context=_last.get("event_context")
+                                    )
                                     if built:
                                         fig_fsc, bundle = built
                                 except Exception as _e_helper_fail:
