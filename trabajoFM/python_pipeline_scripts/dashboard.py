@@ -945,7 +945,7 @@ def fan_compare_simulations_dashboard(
                         "symbol": "circle",
                         "size": 13,
                         "color": None,
-                        "opacity": 0.75,
+                        "opacity": 1,
                         "line": {"color": None, "width": 0.8},
                     },
                 },
@@ -975,7 +975,7 @@ def fan_compare_simulations_dashboard(
                         "symbol": "circle",
                         "size": 6,
                         "color": None,
-                        "opacity": 0.75,
+                        "opacity": 1.0,
                         "line": {"color": None, "width": 0.8},
                     },
                 },
@@ -1080,6 +1080,38 @@ def fan_compare_simulations_dashboard(
         if merged_line:
             marker["line"] = merged_line
         return marker
+
+    def _coerce_alpha(value: Any, default: float) -> float:
+        try:
+            alpha = float(value)
+        except Exception:
+            alpha = float(default)
+        if not np.isfinite(alpha):
+            alpha = float(default)
+        return max(0.0, min(1.0, alpha))
+
+    def _color_to_rgba(color: Any, alpha: float, *, fallback: str = "#646464") -> str:
+        text = str(color if color is not None else fallback).strip()
+        alpha = _coerce_alpha(alpha, 0.18)
+        try:
+            if text.startswith("#"):
+                h = text.lstrip("#")
+                if len(h) == 3:
+                    h = "".join(ch * 2 for ch in h)
+                if len(h) == 6:
+                    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                    return f"rgba({r},{g},{b},{alpha})"
+            match = re.match(r"rgba?\(([^)]+)\)", text, flags=re.IGNORECASE)
+            if match:
+                parts = [p.strip() for p in match.group(1).split(",")]
+                if len(parts) >= 3:
+                    r, g, b = (float(parts[0]), float(parts[1]), float(parts[2]))
+                    return f"rgba({int(r)},{int(g)},{int(b)},{alpha})"
+        except Exception:
+            pass
+        if text != fallback:
+            return _color_to_rgba(fallback, alpha, fallback=fallback)
+        return f"rgba(100,100,100,{alpha})"
 
     def _datetime_day_set(value: Any) -> set:
         if isinstance(value, pd.DatetimeIndex):
@@ -2286,6 +2318,24 @@ def fan_compare_simulations_dashboard(
             "trace_order": _last.get("trace_order", list(_TRACE_ORDER_DEFAULT)),
             "band_color": band_color,
             "band_alpha": band_alpha,
+            "ldc_band_color": (ui_defaults or {}).get("ldc_band_color", "#646464"),
+            "ldc_band_alpha": _coerce_alpha((ui_defaults or {}).get("ldc_band_alpha"), 0.18),
+            "ldc_smooth_window": int((ui_defaults or {}).get("ldc_smooth_window", 0) or 0),
+            "ldc_show_extra_dfs": bool(
+                (ui_defaults or {}).get(
+                    "ldc_show_extra_dfs",
+                    (ui_defaults or {}).get(
+                        "flow_chart_show_extra_dfs",
+                        (ui_defaults or {}).get("duration_chart_show_extra_dfs", False),
+                    ),
+                )
+            ),
+            "flow_strat_band_alpha": _coerce_alpha((ui_defaults or {}).get("flow_strat_band_alpha"), 0.20),
+            "flow_strat_band_colors": (
+                dict((ui_defaults or {}).get("flow_strat_band_colors"))
+                if isinstance((ui_defaults or {}).get("flow_strat_band_colors"), dict)
+                else None
+            ),
             "show_diagnostics": cb_show_diags.value,
             "show_measured": cb_meas_on.value,
             "show_water_flow": cb_flow_on.value,
@@ -2465,6 +2515,14 @@ def fan_compare_simulations_dashboard(
             if agg.empty: return None
             fig = go.Figure(layout=dict(template=template_name))
             colors = {"event":"#d62728", "non-event":"#1f77b4", "total":"#555555"}
+            flow_band_colors_cfg = (ui_defaults or {}).get("flow_strat_band_colors")
+            flow_band_colors_cfg = flow_band_colors_cfg if isinstance(flow_band_colors_cfg, dict) else {}
+            flow_band_alpha = _coerce_alpha((ui_defaults or {}).get("flow_strat_band_alpha"), 0.20)
+
+            def _flow_strat_band_rgba(regime: str, default_color: str, default_alpha: float = flow_band_alpha) -> str:
+                color = flow_band_colors_cfg.get(regime, default_color)
+                return _color_to_rgba(color, default_alpha, fallback=default_color)
+
             visible_regimes = _last.get("flow_regime_visible", {"event","non-event"})
             total_only = bool(_last.get("flow_total_only", False))
             want_total_band = bool(_last.get("flow_total_band", False) or total_only)
@@ -2495,15 +2553,9 @@ def fan_compare_simulations_dashboard(
                         continue
                     x_pct = sub.x_mid.to_numpy()*100.0
                     y_low = sub.y_min.to_numpy(); y_up = sub.y_max.to_numpy()
-                    # Upper line (max)
-                    fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name=f"{reg} max", line=dict(color=colors[reg], width=0.6), showlegend=False))
-                    # Fill
-                    if colors[reg].startswith('#') and len(colors[reg]) == 7:
-                        r = int(colors[reg][1:3],16); g = int(colors[reg][3:5],16); b = int(colors[reg][5:7],16)
-                        fill_col = f"rgba({r},{g},{b},0.20)"
-                    else:
-                        fill_col = 'rgba(0,0,0,0.15)'
-                    fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color=colors[reg], width=0.6), fill="tonexty", fillcolor=fill_col, hoverinfo="skip", showlegend=False))
+                    fill_col = _flow_strat_band_rgba(reg, colors[reg])
+                    fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name=f"{reg} band upper", line=dict(color="rgba(0,0,0,0)", width=0), showlegend=False, hoverinfo="skip"))
+                    fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name=f"{reg} band", line=dict(color="rgba(0,0,0,0)", width=0), fill="tonexty", fillcolor=fill_col, hoverinfo="skip", showlegend=False))
                     # Mean line
                     fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name=f"{reg} mean", line=dict(color=colors[reg], width=2)))
             
@@ -2524,14 +2576,14 @@ def fan_compare_simulations_dashboard(
                 sub = total_agg
                 x_pct = sub.x_mid.to_numpy()*100.0
                 y_low = sub.y_min.to_numpy(); y_up = sub.y_max.to_numpy()
-                # Total upper
-                fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name="total max", line=dict(color=colors["total"], width=0.6), showlegend=False))
-                # Total fill (lighter opacity if overlaying with regimes)
-                r,g,b = 85,85,85
                 overlay_flag = bool(_last.get("flow_overlay", True))
                 total_only = bool(_last.get("flow_total_only", False))
                 alpha = 0.10 if (overlay_flag and not total_only and not (visible_regimes == {"event","non-event"} and not want_total_band)) else 0.18
-                fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name="total band", line=dict(color=colors["total"], width=0.6), fill="tonexty", fillcolor=f"rgba({r},{g},{b},{alpha})", hoverinfo="skip", showlegend=False))
+                if (ui_defaults or {}).get("flow_strat_band_alpha") is not None:
+                    alpha = flow_band_alpha
+                fill_col = _flow_strat_band_rgba("total", colors["total"], alpha)
+                fig.add_trace(go.Scatter(x=x_pct, y=y_up, mode="lines", name="total band upper", line=dict(color="rgba(0,0,0,0)", width=0), showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=x_pct, y=y_low, mode="lines", name="total band", line=dict(color="rgba(0,0,0,0)", width=0), fill="tonexty", fillcolor=fill_col, hoverinfo="skip", showlegend=False))
                 # Total mean
                 fig.add_trace(go.Scatter(x=x_pct, y=sub.y_mean.to_numpy(), mode="lines", name="total mean", line=dict(color=colors["total"], width=3, dash="dot")))
             # Unified title to match event-context variant
@@ -2643,11 +2695,14 @@ def fan_compare_simulations_dashboard(
             # ------------------------------------------------------------------
             # Optional line visibility filter via ui_defaults.
             #   ldc_lines: list of column keys to show, e.g. ["p50"] or ["min","p50","max"]
-            #   When omitted, all PLOT_LINES entries are shown.
+            #   When omitted, load-sorted LDC shows the standard quantile lines;
+            #   flow-sorted LDC defaults to the central p50 line plus the band.
             # ------------------------------------------------------------------
+            _ldc_lines_explicit = False
             try:
                 _ldc_lines = (ui_defaults or {}).get("ldc_lines")
                 if isinstance(_ldc_lines, (list, tuple)) and _ldc_lines:
+                    _ldc_lines_explicit = True
                     _ldc_lines_set = set(str(k).lower() for k in _ldc_lines)
                     PLOT_LINES = [(c, n, s) for c, n, s in PLOT_LINES if c in _ldc_lines_set]
             except Exception:
@@ -2666,6 +2721,24 @@ def fan_compare_simulations_dashboard(
                     LDC_SMOOTH_WINDOW = 0
             except Exception:
                 LDC_SMOOTH_WINDOW = 0
+
+            _ldc_band_color = str((ui_defaults or {}).get("ldc_band_color", "#646464"))
+            _ldc_band_alpha = _coerce_alpha((ui_defaults or {}).get("ldc_band_alpha"), 0.18)
+
+            def _ldc_band_rgba() -> str:
+                return _color_to_rgba(_ldc_band_color, _ldc_band_alpha, fallback="#646464")
+
+            def _ui_bool_alias(keys: Sequence[str], default: bool = False) -> bool:
+                cfg = ui_defaults or {}
+                for key in keys:
+                    if isinstance(cfg.get(key), bool):
+                        return bool(cfg.get(key))
+                return bool(default)
+
+            LDC_SHOW_EXTRA_DFS = _ui_bool_alias(
+                ("ldc_show_extra_dfs", "flow_chart_show_extra_dfs", "duration_chart_show_extra_dfs"),
+                default=False,
+            )
 
             # Toggle the "(paired)" suffix in LDC legend labels.
             # ui_defaults key: ldc_show_paired_label (bool, default True)
@@ -2703,6 +2776,8 @@ def fan_compare_simulations_dashboard(
                 LDC_SORT_BY_FLOW = False
             if LDC_SORT_BY_FLOW:
                 BAND_MODE = "paired"  # flow sorting requires paired day-level ordering
+                if not _ldc_lines_explicit:
+                    PLOT_LINES = [(c, n, s) for c, n, s in PLOT_LINES if c == "p50"]
 
             if BAND_MODE == "paired" and all(c in q_plot.columns for c in ("min", "max")):
                 try:
@@ -2755,7 +2830,10 @@ def fan_compare_simulations_dashboard(
                                 padded = np.pad(arr, (w // 2, w - 1 - w // 2), mode='edge')
                                 return np.convolve(padded, kernel, mode='valid')
                             _sw = LDC_SMOOTH_WINDOW
-                            # Add band (max then min with fill)
+                            # Add min..max band around the central line. The
+                            # boundary traces are intentionally invisible so the
+                            # chart reads as one translucent range, not separate
+                            # min/max lines.
                             _y_max_raw = df_ordered["max"].to_numpy(dtype=float)
                             _y_min_raw = df_ordered["min"].to_numpy(dtype=float)
                             fig_ldc.add_trace(
@@ -2763,13 +2841,13 @@ def fan_compare_simulations_dashboard(
                                     x=x_rank,
                                     y=_ldc_smooth(_y_max_raw, _sw),
                                     mode="lines",
-                                    name=f"Max simulation{_LDC_PAIRED_TAG}",
-                                    line=dict(color="rgba(127,0,0,0.85)", width=0.8),
-                                    showlegend=True,
+                                    name=f"Simulation range upper{_LDC_PAIRED_TAG}",
+                                    line=dict(color="rgba(0,0,0,0)", width=0),
+                                    showlegend=False,
+                                    hoverinfo="skip",
                                     legendrank=500,
                                 )
                             )
-                            # Invisible fill trace (no legend) just for the grey band
                             fig_ldc.add_trace(
                                 go.Scatter(
                                     x=x_rank,
@@ -2777,20 +2855,10 @@ def fan_compare_simulations_dashboard(
                                     mode="lines",
                                     line=dict(color="rgba(0,0,0,0)", width=0),
                                     fill="tonexty",
-                                    fillcolor="rgba(100,100,100,0.18)",
-                                    showlegend=False,
-                                    hoverinfo="skip",
-                                )
-                            )
-                            # Visible min line with legend
-                            fig_ldc.add_trace(
-                                go.Scatter(
-                                    x=x_rank,
-                                    y=_ldc_smooth(_y_min_raw, _sw),
-                                    mode="lines",
-                                    name=f"Min simulation{_LDC_PAIRED_TAG}",
-                                    line=dict(color="rgba(0,68,27,0.85)", width=0.8),
+                                    fillcolor=_ldc_band_rgba(),
+                                    name=f"Simulation range{_LDC_PAIRED_TAG}",
                                     showlegend=True,
+                                    hoverinfo="skip",
                                     legendrank=300,
                                 )
                             )
@@ -2818,6 +2886,35 @@ def fan_compare_simulations_dashboard(
                                         legendrank=_lrank,
                                     )
                                 )
+                            if LDC_SHOW_EXTRA_DFS and LDC_SORT_BY_FLOW:
+                                extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
+                                if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
+                                    extra_palette = [
+                                        "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
+                                        "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
+                                    ]
+                                    for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
+                                        if not isinstance(extra_series, pd.Series) or extra_series.empty:
+                                            continue
+                                        try:
+                                            y_extra_raw = extra_series.reindex(df_ordered.index).to_numpy(dtype=float)
+                                        except Exception:
+                                            continue
+                                        valid_extra = np.isfinite(y_extra_raw)
+                                        if not np.any(valid_extra):
+                                            continue
+                                        color_extra = extra_palette[extra_i % len(extra_palette)]
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_rank[valid_extra],
+                                                y=_ldc_smooth(y_extra_raw[valid_extra], _sw),
+                                                mode="lines",
+                                                name=str(extra_name),
+                                                line=dict(color=color_extra, width=2.0, dash="dash"),
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=520 + extra_i,
+                                            )
+                                        )
                             # Annotate mode
                             # (Removed previous top-right overlay annotation to declutter.)
                 except Exception as _e_paired:
@@ -2843,9 +2940,10 @@ def fan_compare_simulations_dashboard(
                                         x=x_max,
                                         y=y_max_ord,
                                         mode="lines",
-                                        name="Max",
-                                        line=dict(color="rgba(127,0,0,0.8)", width=0.8),
+                                        name="Simulation range upper",
+                                        line=dict(color="rgba(0,0,0,0)", width=0),
                                         showlegend=False,
+                                        hoverinfo="skip",
                                     )
                                 )
                                 fig_ldc.add_trace(
@@ -2853,10 +2951,11 @@ def fan_compare_simulations_dashboard(
                                         x=x_min,
                                         y=y_min_ord,
                                         mode="lines",
-                                        name="Min-Max band",
-                                        line=dict(color="rgba(0,68,27,0.8)", width=0.8),
+                                        name="Simulation range",
+                                        line=dict(color="rgba(0,0,0,0)", width=0),
                                         fill="tonexty",
-                                        fillcolor="rgba(100,100,100,0.18)",
+                                        fillcolor=_ldc_band_rgba(),
+                                        hoverinfo="skip",
                                     )
                                 )
                                 added = True
@@ -2889,6 +2988,36 @@ def fan_compare_simulations_dashboard(
                         )
                     )
                     added = True
+                if LDC_SHOW_EXTRA_DFS:
+                    extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
+                    if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
+                        extra_palette = [
+                            "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
+                            "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
+                        ]
+                        for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
+                            if not isinstance(extra_series, pd.Series) or extra_series.empty:
+                                continue
+                            s_extra = extra_series.dropna()
+                            if s_extra.empty:
+                                continue
+                            try:
+                                x_extra, y_extra = _dcfs(s_extra, levels)
+                                y_extra = np.sort(y_extra)
+                            except Exception:
+                                continue
+                            fig_ldc.add_trace(
+                                go.Scatter(
+                                    x=x_extra,
+                                    y=y_extra,
+                                    mode="lines",
+                                    name=str(extra_name),
+                                    line=dict(color=extra_palette[extra_i % len(extra_palette)], width=2.0, dash="dash"),
+                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                    legendrank=520 + extra_i,
+                                )
+                            )
+                            added = True
             # ------------------------------------------------------------------
             # Overlay measured series (sparse points) from current view.
             # We DO NOT interpolate; each measured value is plotted at its
@@ -4687,6 +4816,7 @@ def fan_compare_simulations_dashboard(
         # Optional independent overlays: plot each as its own line, not part of fan
         # Also retain per-overlay resampled series for stats correlations
         _last["extra_series"] = {}
+        _last["extra_series_plot"] = {}
         if isinstance(extra_dfs, dict) and extra_dfs:
             extra_palette = [
                 "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
@@ -4776,6 +4906,7 @@ def fan_compare_simulations_dashboard(
                     # Store filtered series for stats correlations
                     try:
                         _last["extra_series"][str(name)] = s_ex_stats if not s_ex_stats.empty else s_ex
+                        _last["extra_series_plot"][str(name)] = s_ex
                     except Exception:
                         pass
                     color = extra_palette[ei % len(extra_palette)]; ei += 1
@@ -6287,6 +6418,14 @@ def fan_compare_simulations_dashboard(
                                             agg = pd.DataFrame(rows)
                                             if not agg.empty:
                                                 colors = {"event": "#d62728", "non-event": "#1f77b4", "total": "#555555"}
+                                                flow_band_colors_cfg = (ui_defaults or {}).get("flow_strat_band_colors")
+                                                flow_band_colors_cfg = flow_band_colors_cfg if isinstance(flow_band_colors_cfg, dict) else {}
+                                                flow_band_alpha = _coerce_alpha((ui_defaults or {}).get("flow_strat_band_alpha"), 0.20)
+
+                                                def _flow_strat_band_rgba_local(regime: str, default_color: str, default_alpha: float = flow_band_alpha) -> str:
+                                                    color = flow_band_colors_cfg.get(regime, default_color)
+                                                    return _color_to_rgba(color, default_alpha, fallback=default_color)
+
                                                 visible_regimes = _last.get("flow_regime_visible", {"event","non-event"})
                                                 total_only = bool(_last.get("flow_total_only", False))
                                                 want_total_band = bool(_last.get("flow_total_band", False) or total_only)
@@ -6374,23 +6513,22 @@ def fan_compare_simulations_dashboard(
                                                                 continue
                                                             x_pct = sub['x_mid'].to_numpy()*100.0
                                                             y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
-                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name=f"{rg} max", line=dict(color=colors[rg], width=0.6), showlegend=False))
-                                                            if colors[rg].startswith('#') and len(colors[rg])==7:
-                                                                r=int(colors[rg][1:3],16); g=int(colors[rg][3:5],16); b=int(colors[rg][5:7],16)
-                                                                fill_col=f"rgba({r},{g},{b},0.20)"
-                                                            else:
-                                                                fill_col='rgba(0,0,0,0.15)'
-                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name=f"{rg} band", line=dict(color=colors[rg], width=0.6), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
+                                                            fill_col = _flow_strat_band_rgba_local(rg, colors[rg])
+                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name=f"{rg} band upper", line=dict(color="rgba(0,0,0,0)", width=0), showlegend=False, hoverinfo='skip'))
+                                                            fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name=f"{rg} band", line=dict(color="rgba(0,0,0,0)", width=0), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
                                                             fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name=f"{rg} mean", line=dict(color=colors[rg], width=2)))
                                                 if total_agg is not None:
                                                     sub = total_agg
                                                     x_pct = sub['x_mid'].to_numpy()*100.0
                                                     y_up = sub['y_max'].to_numpy(); y_low = sub['y_min'].to_numpy()
-                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name='total max', line=dict(color=colors['total'], width=0.6), showlegend=False))
                                                     overlay_flag = bool(_last.get('flow_overlay', True))
                                                     total_only_flag = bool(_last.get('flow_total_only', False))
                                                     alpha = 0.10 if (overlay_flag and not total_only_flag) else 0.18
-                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name='total band', line=dict(color=colors['total'], width=0.6), fill='tonexty', fillcolor=f'rgba(85,85,85,{alpha})', hoverinfo='skip', showlegend=False))
+                                                    if (ui_defaults or {}).get("flow_strat_band_alpha") is not None:
+                                                        alpha = flow_band_alpha
+                                                    fill_col = _flow_strat_band_rgba_local("total", colors["total"], alpha)
+                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_up, mode='lines', name='total band upper', line=dict(color="rgba(0,0,0,0)", width=0), showlegend=False, hoverinfo='skip'))
+                                                    fig2.add_trace(go.Scatter(x=x_pct, y=y_low, mode='lines', name='total band', line=dict(color="rgba(0,0,0,0)", width=0), fill='tonexty', fillcolor=fill_col, hoverinfo='skip', showlegend=False))
                                                     fig2.add_trace(go.Scatter(x=x_pct, y=sub['y_mean'].to_numpy(), mode='lines', name='total mean', line=dict(color=colors['total'], width=3, dash='dot')))
                                                 fig2.update_layout(
                                                     **_build_duration_chart_layout_update(
