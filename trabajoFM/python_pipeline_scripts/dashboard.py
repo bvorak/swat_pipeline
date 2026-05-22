@@ -2362,6 +2362,15 @@ def fan_compare_simulations_dashboard(
             "ldc_band_color": (ui_defaults or {}).get("ldc_band_color", "#646464"),
             "ldc_band_alpha": _coerce_alpha((ui_defaults or {}).get("ldc_band_alpha"), 0.18),
             "ldc_smooth_window": int((ui_defaults or {}).get("ldc_smooth_window", 0) or 0),
+            "ldc_smooth_band": bool(
+                (ui_defaults or {}).get(
+                    "ldc_smooth_band",
+                    (ui_defaults or {}).get(
+                        "ldc_smooth_minmax_band",
+                        (ui_defaults or {}).get("flow_chart_smooth_band", False),
+                    ),
+                )
+            ),
             "ldc_show_extra_dfs": bool(
                 (ui_defaults or {}).get(
                     "ldc_show_extra_dfs",
@@ -2753,8 +2762,12 @@ def fan_compare_simulations_dashboard(
             # Rolling smoother window for paired mode (applied to every trace
             # after ordering by flow/reference). Reduces visual noise while
             # preserving the flow-regime diagnostic signal.
-            #   ldc_smooth_window: int (number of days). 0 or 1 = no smoothing.
-            #   Defaults to 0 (off).
+            #   ldc_smooth_window: int (number of flow-rank positions). 0 or 1 = no smoothing.
+            #   Defaults to 0 (off). By default this is applied only to central
+            #   lines and optional extra_dfs lines. The min..max band stays raw
+            #   so visual coverage checks match the same-day raw min..max bands
+            #   used by the stats panel. Set ldc_smooth_band=True only when a
+            #   deliberately smoothed visual envelope is wanted.
             # ------------------------------------------------------------------
             try:
                 LDC_SMOOTH_WINDOW = int((ui_defaults or {}).get("ldc_smooth_window", 0))
@@ -2775,6 +2788,11 @@ def fan_compare_simulations_dashboard(
                     if isinstance(cfg.get(key), bool):
                         return bool(cfg.get(key))
                 return bool(default)
+
+            LDC_SMOOTH_BAND = _ui_bool_alias(
+                ("ldc_smooth_band", "ldc_smooth_minmax_band", "flow_chart_smooth_band"),
+                default=False,
+            )
 
             LDC_SHOW_EXTRA_DFS = _ui_bool_alias(
                 ("ldc_show_extra_dfs", "flow_chart_show_extra_dfs", "duration_chart_show_extra_dfs"),
@@ -2907,12 +2925,15 @@ def fan_compare_simulations_dashboard(
                             # min/max lines.
                             _y_max_raw = df_ordered["max"].to_numpy(dtype=float)
                             _y_min_raw = df_ordered["min"].to_numpy(dtype=float)
+                            _y_band_max = _ldc_smooth(_y_max_raw, _sw) if LDC_SMOOTH_BAND else _y_max_raw
+                            _y_band_min = _ldc_smooth(_y_min_raw, _sw) if LDC_SMOOTH_BAND else _y_min_raw
+                            _range_label = "Simulation range (smoothed)" if (LDC_SMOOTH_BAND and _sw > 1) else "Simulation range"
                             fig_ldc.add_trace(
                                 go.Scatter(
                                     x=x_rank,
-                                    y=_ldc_smooth(_y_max_raw, _sw),
+                                    y=_y_band_max,
                                     mode="lines",
-                                    name=f"Simulation range upper{_LDC_PAIRED_TAG}",
+                                    name=f"{_range_label} upper{_LDC_PAIRED_TAG}",
                                     line=dict(color="rgba(0,0,0,0)", width=0),
                                     showlegend=False,
                                     hoverinfo="skip",
@@ -2922,12 +2943,12 @@ def fan_compare_simulations_dashboard(
                             fig_ldc.add_trace(
                                 go.Scatter(
                                     x=x_rank,
-                                    y=_ldc_smooth(_y_min_raw, _sw),
+                                    y=_y_band_min,
                                     mode="lines",
                                     line=dict(color="rgba(0,0,0,0)", width=0),
                                     fill="tonexty",
                                     fillcolor=_ldc_band_rgba(),
-                                    name=f"Simulation range{_LDC_PAIRED_TAG}",
+                                    name=f"{_range_label}{_LDC_PAIRED_TAG}",
                                     showlegend=True,
                                     hoverinfo="skip",
                                     legendrank=300,

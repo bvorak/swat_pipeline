@@ -1019,26 +1019,28 @@ def _pairwise_metrics(
 
 
 def _coverage(y: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> float:
+    y_arr = np.asarray(y, dtype=float)
+    lo_arr = np.asarray(lo, dtype=float)
+    hi_arr = np.asarray(hi, dtype=float)
 
-    y, lo = _finite_pairs(y, lo)
-
-    y, hi = _finite_pairs(y, hi)
-
-    n = min(y.size, lo.size, hi.size)
-
+    n = min(y_arr.size, lo_arr.size, hi_arr.size)
     if n == 0:
-
         return float("nan")
 
-    lo = lo[:n]
+    # Preserve row-wise alignment. Filtering y-vs-lo and y-vs-hi separately
+    # can shift observations against the wrong envelope when either bound has
+    # NaNs. Coverage must be evaluated only where all three values are finite.
+    y_arr = y_arr[:n]
+    lo_arr = lo_arr[:n]
+    hi_arr = hi_arr[:n]
+    mask = np.isfinite(y_arr) & np.isfinite(lo_arr) & np.isfinite(hi_arr)
+    if not np.any(mask):
+        return float("nan")
 
-    hi = hi[:n]
-
-    y = y[:n]
-
+    lo_safe = np.minimum(lo_arr[mask], hi_arr[mask])
+    hi_safe = np.maximum(lo_arr[mask], hi_arr[mask])
     with np.errstate(invalid="ignore"):
-
-        cov = np.nanmean((y >= lo) & (y <= hi))
+        cov = np.nanmean((y_arr[mask] >= lo_safe) & (y_arr[mask] <= hi_safe))
 
     return float(cov)
 
@@ -2226,6 +2228,32 @@ def compute_stats_for_view(
                             coverage_entries.setdefault(label, {})[suffix] = float(cov)
 
                             _record_cov_debug(label, f'{suffix}: coverage={cov:.3f} over {count} points')
+                            if suffix == "coverage_minmax" and count <= 30:
+                                try:
+                                    idx_vals = measured_times[mask]
+                                    obs_vals = measured_vals[mask]
+                                    lo_masked = lo_vals[mask]
+                                    hi_masked = hi_vals[mask]
+                                    lo_safe = np.minimum(lo_masked, hi_masked)
+                                    hi_safe = np.maximum(lo_masked, hi_masked)
+                                    inside = (obs_vals >= lo_safe) & (obs_vals <= hi_safe)
+                                    for t_val, obs_val, lo_val, hi_val, ok_val in zip(idx_vals, obs_vals, lo_safe, hi_safe, inside):
+                                        try:
+                                            day_txt = pd.Timestamp(t_val).strftime("%Y-%m-%d")
+                                        except Exception:
+                                            day_txt = str(t_val)
+                                        _record_cov_debug(
+                                            label,
+                                            (
+                                                f'{suffix} point {day_txt}: '
+                                                f'obs={float(obs_val):.6g}, '
+                                                f'min={float(lo_val):.6g}, '
+                                                f'max={float(hi_val):.6g}, '
+                                                f'inside={bool(ok_val)}'
+                                            ),
+                                        )
+                                except Exception:
+                                    pass
 
                         else:
 
