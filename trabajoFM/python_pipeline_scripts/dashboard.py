@@ -2830,6 +2830,36 @@ def fan_compare_simulations_dashboard(
                                 padded = np.pad(arr, (w // 2, w - 1 - w // 2), mode='edge')
                                 return np.convolve(padded, kernel, mode='valid')
                             _sw = LDC_SMOOTH_WINDOW
+                            if LDC_SHOW_EXTRA_DFS and LDC_SORT_BY_FLOW:
+                                extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
+                                if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
+                                    extra_palette = [
+                                        "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
+                                        "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
+                                    ]
+                                    for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
+                                        if not isinstance(extra_series, pd.Series) or extra_series.empty:
+                                            continue
+                                        try:
+                                            y_extra_raw = extra_series.reindex(df_ordered.index).to_numpy(dtype=float)
+                                        except Exception:
+                                            continue
+                                        valid_extra = np.isfinite(y_extra_raw)
+                                        if not np.any(valid_extra):
+                                            continue
+                                        color_extra = extra_palette[extra_i % len(extra_palette)]
+                                        fig_ldc.add_trace(
+                                            go.Scatter(
+                                                x=x_rank[valid_extra],
+                                                y=_ldc_smooth(y_extra_raw[valid_extra], _sw),
+                                                mode="lines",
+                                                name=str(extra_name),
+                                                line=dict(color=color_extra, width=2.0, dash="dash"),
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=250 + extra_i,
+                                            )
+                                        )
+                                        added = True
                             # Add min..max band around the central line. The
                             # boundary traces are intentionally invisible so the
                             # chart reads as one translucent range, not separate
@@ -2886,41 +2916,42 @@ def fan_compare_simulations_dashboard(
                                         legendrank=_lrank,
                                     )
                                 )
-                            if LDC_SHOW_EXTRA_DFS and LDC_SORT_BY_FLOW:
-                                extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
-                                if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
-                                    extra_palette = [
-                                        "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
-                                        "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
-                                    ]
-                                    for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
-                                        if not isinstance(extra_series, pd.Series) or extra_series.empty:
-                                            continue
-                                        try:
-                                            y_extra_raw = extra_series.reindex(df_ordered.index).to_numpy(dtype=float)
-                                        except Exception:
-                                            continue
-                                        valid_extra = np.isfinite(y_extra_raw)
-                                        if not np.any(valid_extra):
-                                            continue
-                                        color_extra = extra_palette[extra_i % len(extra_palette)]
-                                        fig_ldc.add_trace(
-                                            go.Scatter(
-                                                x=x_rank[valid_extra],
-                                                y=_ldc_smooth(y_extra_raw[valid_extra], _sw),
-                                                mode="lines",
-                                                name=str(extra_name),
-                                                line=dict(color=color_extra, width=2.0, dash="dash"),
-                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
-                                                legendrank=520 + extra_i,
-                                            )
-                                        )
                             # Annotate mode
                             # (Removed previous top-right overlay annotation to declutter.)
                 except Exception as _e_paired:
                     _dbg("paired_band_error", str(_e_paired))
             else:
                 # Existing order_stats behavior
+                if LDC_SHOW_EXTRA_DFS:
+                    extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
+                    if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
+                        extra_palette = [
+                            "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
+                            "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
+                        ]
+                        for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
+                            if not isinstance(extra_series, pd.Series) or extra_series.empty:
+                                continue
+                            s_extra = extra_series.dropna()
+                            if s_extra.empty:
+                                continue
+                            try:
+                                x_extra, y_extra = _dcfs(s_extra, levels)
+                                y_extra = np.sort(y_extra)
+                            except Exception:
+                                continue
+                            fig_ldc.add_trace(
+                                go.Scatter(
+                                    x=x_extra,
+                                    y=y_extra,
+                                    mode="lines",
+                                    name=str(extra_name),
+                                    line=dict(color=extra_palette[extra_i % len(extra_palette)], width=2.0, dash="dash"),
+                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                    legendrank=250 + extra_i,
+                                )
+                            )
+                            added = True
                 # Min-max shaded band (only if both columns exist and non-empty)
                 if all(c in q_plot.columns for c in ("min", "max")):
                     try:
@@ -2988,36 +3019,6 @@ def fan_compare_simulations_dashboard(
                         )
                     )
                     added = True
-                if LDC_SHOW_EXTRA_DFS:
-                    extra_series_for_ldc = _last.get("extra_series_plot") or _last.get("extra_series") or {}
-                    if isinstance(extra_series_for_ldc, dict) and extra_series_for_ldc:
-                        extra_palette = [
-                            "#ff7f0e", "#2ca02c", "#17becf", "#9467bd", "#8c564b",
-                            "#e377c2", "#7f7f7f", "#bcbd22", "#d62728",
-                        ]
-                        for extra_i, (extra_name, extra_series) in enumerate(extra_series_for_ldc.items()):
-                            if not isinstance(extra_series, pd.Series) or extra_series.empty:
-                                continue
-                            s_extra = extra_series.dropna()
-                            if s_extra.empty:
-                                continue
-                            try:
-                                x_extra, y_extra = _dcfs(s_extra, levels)
-                                y_extra = np.sort(y_extra)
-                            except Exception:
-                                continue
-                            fig_ldc.add_trace(
-                                go.Scatter(
-                                    x=x_extra,
-                                    y=y_extra,
-                                    mode="lines",
-                                    name=str(extra_name),
-                                    line=dict(color=extra_palette[extra_i % len(extra_palette)], width=2.0, dash="dash"),
-                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
-                                    legendrank=520 + extra_i,
-                                )
-                            )
-                            added = True
             # ------------------------------------------------------------------
             # Overlay measured series (sparse points) from current view.
             # We DO NOT interpolate; each measured value is plotted at its
