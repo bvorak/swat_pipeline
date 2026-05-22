@@ -39,6 +39,8 @@ from .dashboard_helper import (
 )
 DASHBOARD_VERSION = "2025-09-11-chem-ui-3"
 
+_NITRATE_NO3_TO_N_FACTOR = 14.0067 / 62.0049
+
 _DEFAULT_MEASURED_STATION_BY_REACH: Dict[int, str] = {
     13: "30304",
 }
@@ -150,6 +152,45 @@ def _pick_preferred_measured_option(
             if match is not None:
                 return match
     return options[0]
+
+
+def _normalize_measured_chemical_key(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    text = (
+        text.replace("ó", "o")
+        .replace("í", "i")
+        .replace("á", "a")
+        .replace("é", "e")
+        .replace("ú", "u")
+        .replace("ü", "u")
+        .replace("ñ", "n")
+    )
+    return re.sub(r"\s+", " ", text)
+
+
+def _measured_map_unit_factor(variable: object, chemical_name: object) -> float:
+    """Return factor to express measured analytes in the SWAT variable's N/P basis."""
+    if str(variable).strip().casefold() != "tot_nkg":
+        return 1.0
+    chem_key = _normalize_measured_chemical_key(chemical_name)
+    if chem_key in {"nitrato", "nitratos"}:
+        return _NITRATE_NO3_TO_N_FACTOR
+    return 1.0
+
+
+def _apply_measured_map_unit_factor(
+    per_station_daily: Dict[str, pd.Series],
+    factor: float,
+) -> Dict[str, pd.Series]:
+    if not per_station_daily or factor == 1.0:
+        return per_station_daily
+    scaled: Dict[str, pd.Series] = {}
+    for station, series in per_station_daily.items():
+        with np.errstate(invalid="ignore"):
+            scaled_series = pd.to_numeric(series, errors="coerce").astype(float) * factor
+        scaled_series.name = getattr(series, "name", station)
+        scaled[station] = scaled_series
+    return scaled
 
 # moved helpers to dashboard_helper.py
 
@@ -5164,6 +5205,13 @@ def fan_compare_simulations_dashboard(
                     end=end,
                     season_months=season_months,
                 )
+                map_unit_factor = _measured_map_unit_factor(var, chem_name)
+                if map_unit_factor != 1.0:
+                    _dbg(
+                        f"measured map{cat} unit factor",
+                        dict(chem=chem_name, factor=float(map_unit_factor), reason="NO3 as N"),
+                    )
+                    per_station_daily = _apply_measured_map_unit_factor(per_station_daily, map_unit_factor)
                 # Prepare excluded measured daily series based on event exclusion (if any)
                 per_station_daily_excl_union: Dict[str, pd.Series] = {}
                 if isinstance(measured_excluded_df, pd.DataFrame) and not measured_excluded_df.empty:
@@ -5180,6 +5228,10 @@ def fan_compare_simulations_dashboard(
                             start=start,
                             end=end,
                             season_months=season_months,
+                        )
+                        per_station_daily_excl_union = _apply_measured_map_unit_factor(
+                            per_station_daily_excl_union,
+                            map_unit_factor,
                         )
                     except Exception:
                         per_station_daily_excl_union = {}
@@ -8019,6 +8071,13 @@ def export_dashboard_stats_from_config(
                 end=cfg.get("end"),
                 season_months=season_months,
             )
+            map_unit_factor = _measured_map_unit_factor(variable, chem_name)
+            if map_unit_factor != 1.0:
+                _dbg(
+                    f"measured map{cat} unit factor",
+                    dict(chem=chem_name, factor=float(map_unit_factor), reason="NO3 as N"),
+                )
+                per_station_daily = _apply_measured_map_unit_factor(per_station_daily, map_unit_factor)
             for station, daily_series in per_station_daily.items():
                 if (not is_conc_mode) and method == "sum":
                     per_mean = daily_series.resample(freq_str).mean()

@@ -1590,6 +1590,60 @@ def compute_stats_for_view(
         return float(np.nanmedian(arr))
 
     stats: Dict[str, object] = {}
+    paired_series: Dict[str, object] = {}
+
+    def _paired_index_labels(index: pd.Index) -> List[str]:
+        """Stable JSON labels for paired-test source series, preserving duplicates."""
+        raw_labels: List[str] = []
+        for item in index:
+            if isinstance(item, pd.Timestamp):
+                raw_labels.append(item.isoformat())
+            else:
+                try:
+                    ts = pd.Timestamp(item)
+                    raw_labels.append(ts.isoformat())
+                except Exception:
+                    raw_labels.append(str(item))
+
+        counts: Dict[str, int] = {}
+        labels: List[str] = []
+        for label in raw_labels:
+            seen = counts.get(label, 0)
+            counts[label] = seen + 1
+            labels.append(label if seen == 0 else f"{label}#{seen + 1}")
+        return labels
+
+    def _store_paired_series(
+        section: str,
+        component: Optional[str],
+        metric_name: str,
+        index: object,
+        values: object,
+    ) -> None:
+        """Store finite daily values used later for paired significance tests."""
+        if not extended_stats:
+            return
+        try:
+            idx = pd.Index(index)
+            arr = np.asarray(values, dtype=float)
+        except Exception:
+            return
+        if idx.size != arr.size or arr.size == 0:
+            return
+        mask = np.isfinite(arr)
+        if not np.any(mask):
+            return
+
+        series_payload = {
+            "index": _paired_index_labels(idx[mask]),
+            "values": [float(v) for v in arr[mask]],
+        }
+        section_dict = paired_series.setdefault(str(section), {})
+        if component is None:
+            target = section_dict
+        else:
+            target = section_dict.setdefault(str(component), {})
+        target[str(metric_name)] = series_payload
 
     band_groups = _normalize_band_groups(band_data)
 
@@ -1632,6 +1686,37 @@ def compute_stats_for_view(
     n = int(Y.size)
 
     stats["n"] = n
+
+    if extended_stats and q_df is not None and not q_df.empty and measured_series:
+        _bias_idx_parts: List[pd.Index] = []
+        _bias_val_parts: List[np.ndarray] = []
+        for s in measured_series:
+            if s is None or s.empty:
+                continue
+            ss = s
+            if window is not None:
+                x0, x1 = window
+                ss = ss.loc[(ss.index >= x0) & (ss.index <= x1)]
+            if ss.empty:
+                continue
+            q_win = q_df.reindex(ss.index)
+            if "p50" not in q_win.columns:
+                continue
+            mask = q_win["p50"].notna() & ss.notna()
+            if not mask.any():
+                continue
+            _bias_idx_parts.append(pd.Index(ss.loc[mask].index))
+            _bias_val_parts.append(
+                (ss.loc[mask].to_numpy(dtype=float) - q_win.loc[mask, "p50"].to_numpy(dtype=float))
+            )
+        if _bias_idx_parts and _bias_val_parts:
+            _store_paired_series(
+                "same_day",
+                None,
+                "Bias(obs-pred)",
+                _bias_idx_parts[0].append(_bias_idx_parts[1:]),
+                np.concatenate(_bias_val_parts),
+            )
 
     
 
@@ -2298,7 +2383,15 @@ def compute_stats_for_view(
             # Compute mean raw width directly (not just median/p90) for user-requested display
             if isinstance(raw_width_series, pd.Series) and not raw_width_series.empty:
                 try:
-                    baseline_mean_width = float(np.nanmean(raw_width_series.reindex(baseline_width_index).to_numpy(dtype=float)))
+                    _baseline_raw_width_vals = raw_width_series.reindex(baseline_width_index).to_numpy(dtype=float)
+                    baseline_mean_width = float(np.nanmean(_baseline_raw_width_vals))
+                    _store_paired_series(
+                        "overlay_comparison",
+                        "__baseline__",
+                        "mean_W",
+                        baseline_width_index,
+                        _baseline_raw_width_vals,
+                    )
                 except Exception:
                     baseline_mean_width = float("nan")
         baseline_coverage_fraction = _coverage_fraction_for_series(baseline_series_for_overlay, baseline_series_for_overlay.index)
@@ -2420,6 +2513,13 @@ def compute_stats_for_view(
             rel_vals_mean = rel_vals_mean[np.isfinite(rel_vals_mean)]
             if rel_vals_mean.size:
                 baseline_mean_relative_width = float(np.nanmean(rel_vals_mean))
+                _store_paired_series(
+                    "overlay_comparison",
+                    "__baseline__",
+                    "relative_width_mean",
+                    idx,
+                    width_vals / denom_mean,
+                )
 
             # New: (max-min)/median, all days
             min_vals = raw_min_series.reindex(idx).to_numpy(dtype=float)
@@ -2431,6 +2531,13 @@ def compute_stats_for_view(
             if maxmin_over_median.size:
                 baseline_median_maxmin_over_median = float(np.nanmedian(maxmin_over_median))
                 baseline_mean_maxmin_over_median = float(np.nanmean(maxmin_over_median))
+                _store_paired_series(
+                    "overlay_comparison",
+                    "__baseline__",
+                    "mean_maxmin_over_median",
+                    idx,
+                    maxmin_over_median_all,
+                )
                 if extended_stats:
                     _ext_bl["sd_maxmin_over_median"] = float(np.nanstd(maxmin_over_median))
                     _ext_bl["n_maxmin_over_median"] = int(maxmin_over_median.size)
@@ -2479,6 +2586,13 @@ def compute_stats_for_view(
                     if ev_maxmin.size:
                         baseline_median_maxmin_over_median_event = float(np.nanmedian(ev_maxmin))
                         baseline_mean_maxmin_over_median_event = float(np.nanmean(ev_maxmin))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "mean_maxmin_over_median_event",
+                            idx[_bl_ev_mask],
+                            maxmin_over_median_all[_bl_ev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_maxmin_over_median_event"] = float(np.nanstd(ev_maxmin))
                             _ext_bl["n_maxmin_over_median_event"] = int(ev_maxmin.size)
@@ -2488,6 +2602,13 @@ def compute_stats_for_view(
                     if nev_maxmin.size:
                         baseline_median_maxmin_over_median_nonevent = float(np.nanmedian(nev_maxmin))
                         baseline_mean_maxmin_over_median_nonevent = float(np.nanmean(nev_maxmin))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "mean_maxmin_over_median_nonevent",
+                            idx[_bl_nev_mask],
+                            maxmin_over_median_all[_bl_nev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_maxmin_over_median_nonevent"] = float(np.nanstd(nev_maxmin))
                             _ext_bl["n_maxmin_over_median_nonevent"] = int(nev_maxmin.size)
@@ -2526,6 +2647,13 @@ def compute_stats_for_view(
                     if ev_rel.size:
                         baseline_relative_width_event = float(np.nanmedian(ev_rel))
                         baseline_mean_relative_width_event = float(np.nanmean(ev_rel))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "relative_width_mean_event",
+                            idx[_bl_ev_mask],
+                            rel_vals_all[_bl_ev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_relative_width_event"] = float(np.nanstd(ev_rel))
                             _ext_bl["n_relative_width_event"] = int(ev_rel.size)
@@ -2534,6 +2662,13 @@ def compute_stats_for_view(
                         baseline_median_W_event = float(np.nanmedian(ev_w))
                         baseline_mean_W_event = float(np.nanmean(ev_w))
                         baseline_p90_W_event = float(np.nanpercentile(ev_w, 90))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "mean_W_event",
+                            idx[_bl_ev_mask],
+                            width_vals[_bl_ev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_W_event"] = float(np.nanstd(ev_w))
                             _ext_bl["n_W_event"] = int(ev_w.size)
@@ -2554,6 +2689,13 @@ def compute_stats_for_view(
                     if nev_rel.size:
                         baseline_relative_width_nonevent = float(np.nanmedian(nev_rel))
                         baseline_mean_relative_width_nonevent = float(np.nanmean(nev_rel))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "relative_width_mean_nonevent",
+                            idx[_bl_nev_mask],
+                            rel_vals_all[_bl_nev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_relative_width_nonevent"] = float(np.nanstd(nev_rel))
                             _ext_bl["n_relative_width_nonevent"] = int(nev_rel.size)
@@ -2562,6 +2704,13 @@ def compute_stats_for_view(
                         baseline_median_W_nonevent = float(np.nanmedian(nev_w))
                         baseline_mean_W_nonevent = float(np.nanmean(nev_w))
                         baseline_p90_W_nonevent = float(np.nanpercentile(nev_w, 90))
+                        _store_paired_series(
+                            "overlay_comparison",
+                            "__baseline__",
+                            "mean_W_nonevent",
+                            idx[_bl_nev_mask],
+                            width_vals[_bl_nev_mask],
+                        )
                         if extended_stats:
                             _ext_bl["sd_W_nonevent"] = float(np.nanstd(nev_w))
                             _ext_bl["n_W_nonevent"] = int(nev_w.size)
@@ -2615,6 +2764,13 @@ def compute_stats_for_view(
             base_vals = paired_base.to_numpy(dtype=float)
             overlay_vals = paired_overlay.to_numpy(dtype=float)
             diff = base_vals - overlay_vals
+            _store_paired_series(
+                "overlay_comparison",
+                str(name),
+                "delta_mean",
+                diff_series.index,
+                diff_series.to_numpy(dtype=float),
+            )
             # SHIFT AGGREGATION POINT: Change np.nanmedian -> np.nanmean below to switch to mean shifts
             # Primary shift (baseline - overlay) summary. Supports SHIFT_AGG in {'median','mean','both'}
             median_delta = float('nan')
@@ -2739,6 +2895,13 @@ def compute_stats_for_view(
                             if extended_stats:
                                 _fe = ev_diff[np.isfinite(ev_diff)]
                                 if _fe.size:
+                                    _store_paired_series(
+                                        "overlay_comparison",
+                                        str(name),
+                                        "delta_event_pairs_mean",
+                                        diff_series.loc[event_mask].index,
+                                        ev_diff,
+                                    )
                                     _ext_ov_ev = {
                                         "sd_delta_event": float(np.nanstd(_fe)),
                                         "n_delta_event": int(_fe.size),
@@ -2762,6 +2925,13 @@ def compute_stats_for_view(
                             if extended_stats:
                                 _fn = nev_diff[np.isfinite(nev_diff)]
                                 if _fn.size:
+                                    _store_paired_series(
+                                        "overlay_comparison",
+                                        str(name),
+                                        "delta_non_event_pairs_mean",
+                                        diff_series.loc[nonevent_mask].index,
+                                        nev_diff,
+                                    )
                                     _ext_ov_nev = {
                                         "sd_delta_nonevent": float(np.nanstd(_fn)),
                                         "n_delta_nonevent": int(_fn.size),
@@ -2985,6 +3155,8 @@ def compute_stats_for_view(
             if isinstance(_ev, int) or (isinstance(_ev, float) and np.isfinite(_ev)):
                 baseline_entry[_ek] = _ev
     stats["overlay_comparison"] = overlay_comparison
+    if paired_series:
+        stats["paired_series"] = paired_series
     if overlay_full_stats:
         stats["overlay_full_series"] = overlay_full_stats
 
