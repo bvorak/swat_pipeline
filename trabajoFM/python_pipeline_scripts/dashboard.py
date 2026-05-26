@@ -412,6 +412,31 @@ def fan_compare_simulations_dashboard(
             f"{UNMATCHED_ANALYTE_MDL_MG_L:g} mg/L -> {UNMATCHED_ANALYTE_MDL_MG_L * 0.5:g} mg/L)"
         )
 
+    def _resolve_measured_secondary_symbol_mode() -> str:
+        if not isinstance(ui_defaults, dict):
+            return "half_mdl"
+        raw = ui_defaults.get("measured_secondary_symbol_mode")
+        if raw is None:
+            raw = ui_defaults.get("secondary_symbol_mode")
+        token = str(raw).strip().lower() if raw is not None else ""
+        if token in {
+            "bounds",
+            "minmax",
+            "min_max",
+            "min-max",
+            "minmax_bounds",
+            "min_max_bounds",
+            "outside_bounds",
+            "outside_minmax",
+            "outside_min_max",
+        }:
+            return "bounds"
+        if token in {"half_mdl", "half-mdl", "halfmdl", "mdl"}:
+            return "half_mdl"
+        return "half_mdl"
+
+    measured_secondary_symbol_mode = _resolve_measured_secondary_symbol_mode()
+
     # Structured figure layout overrides for the main time-series chart and the
     # lower duration / "vs flow percentile" chart. Users can pass the nested
     # dict either through the dedicated `dashboard_layout` argument or via
@@ -977,10 +1002,12 @@ def fan_compare_simulations_dashboard(
         return layout_update
 
     def _resolve_half_mdl_observation_style() -> Dict[str, Any]:
+        secondary_suffix_default = "half-MDL" if measured_secondary_symbol_mode == "half_mdl" else "not covered"
+        secondary_label_default = f"Measured ({secondary_suffix_default})"
         resolved: Dict[str, Any] = {
             "enabled": bool(style_half_mdl_observations),
             "main_chart": {
-                "name_suffix": "half-MDL",
+                "name_suffix": secondary_suffix_default,
                 "unaffected": {
                     "marker": {
                         "symbol": "circle",
@@ -1000,7 +1027,7 @@ def fan_compare_simulations_dashboard(
             },
             "duration_chart": {
                 "affected": {
-                    "name": "Measured (half-MDL)",
+                    "name": secondary_label_default,
                     "marker": {
                         "symbol": "circle-open",
                         "size": 9,
@@ -1056,7 +1083,7 @@ def fan_compare_simulations_dashboard(
         affected_cfg = duration_cfg.get("affected") if isinstance(duration_cfg.get("affected"), dict) else {}
         unaffected_cfg = duration_cfg.get("unaffected") if isinstance(duration_cfg.get("unaffected"), dict) else {}
         resolved["main_chart"] = {
-            "name_suffix": str(main_cfg.get("name_suffix") or "half-MDL"),
+            "name_suffix": str(main_cfg.get("name_suffix") or secondary_suffix_default),
             "unaffected": {
                 "marker": _normalize_marker_style(
                     main_unaffected_cfg.get("marker"),
@@ -1076,7 +1103,7 @@ def fan_compare_simulations_dashboard(
         }
         resolved["duration_chart"] = {
             "affected": {
-                "name": str(affected_cfg.get("name") or "Measured (half-MDL)"),
+                "name": str(affected_cfg.get("name") or secondary_label_default),
                 "marker": _normalize_marker_style(
                     affected_cfg.get("marker"),
                     default_symbol="circle-open",
@@ -1172,12 +1199,44 @@ def fan_compare_simulations_dashboard(
             idx_events = event_ctx.get("events")
         return _datetime_day_set(idx_events), _datetime_day_set(event_ctx.get("non_events"))
 
-    def _half_mdl_style_active_for_current_view() -> bool:
+    def _secondary_symbol_style_active(policy: Optional[str] = None) -> bool:
         if not bool(resolved_half_mdl_observation_style.get("enabled")):
             return False
-        audit = _last.get("measured_nonnum_audit") or {}
-        policy = audit.get("policy") if isinstance(audit, dict) else None
+        if measured_secondary_symbol_mode != "half_mdl":
+            return True
+        if policy is None:
+            audit = _last.get("measured_nonnum_audit") or {}
+            policy = audit.get("policy") if isinstance(audit, dict) else None
         return policy is None or str(policy) == "half_MDL"
+
+    def _secondary_symbol_suffix() -> str:
+        if measured_secondary_symbol_mode == "bounds":
+            return "not covered"
+        main_cfg = resolved_half_mdl_observation_style.get("main_chart") if isinstance(resolved_half_mdl_observation_style.get("main_chart"), dict) else {}
+        return str(main_cfg.get("name_suffix") or "half-MDL")
+
+    def _measurement_trace_name(base_label: str, status: Optional[str] = None, *, secondary: bool = False) -> str:
+        parts: List[str] = []
+        if measured_secondary_symbol_mode == "bounds":
+            parts.append("not covered" if secondary else "covered")
+        elif secondary:
+            parts.append(_secondary_symbol_suffix())
+        if status:
+            parts.append(str(status))
+        return f"{base_label} ({', '.join(parts)})" if parts else base_label
+
+    def _measurement_legendrank(status: Optional[str] = None, *, secondary: bool = False) -> int:
+        status_offsets = {
+            "event": 0,
+            "non-event": 5,
+            "unclassified": 10,
+            "flow-outlier": 0,
+            "deviation": 5,
+            "kept": 10,
+        }
+        if measured_secondary_symbol_mode == "bounds":
+            return (600 if secondary else 660) + status_offsets.get(str(status or ""), 0)
+        return (660 if secondary else 600) + status_offsets.get(str(status or ""), 0)
 
     def _align_half_mdl_flags_for_series(flags: Any, target_index: pd.Index) -> pd.Series:
         empty = pd.Series(False, index=target_index, dtype=bool)
@@ -1213,6 +1272,58 @@ def fan_compare_simulations_dashboard(
             )
         except Exception:
             return aligned
+
+    def _resolve_bounds_frame(primary: Optional[pd.DataFrame], fallback: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+        if isinstance(primary, pd.DataFrame) and not primary.empty and {"min", "max"}.issubset(primary.columns):
+            return primary[["min", "max"]].copy()
+        if isinstance(fallback, pd.DataFrame) and not fallback.empty:
+            try:
+                with np.errstate(invalid="ignore"):
+                    mins = fallback.min(axis=1, skipna=True)
+                    maxs = fallback.max(axis=1, skipna=True)
+                return pd.DataFrame({"min": mins, "max": maxs}, index=fallback.index)
+            except Exception:
+                return None
+        return None
+
+    def _compute_outside_bounds_flags(values: pd.Series, bounds_df: Optional[pd.DataFrame]) -> pd.Series:
+        flags = pd.Series(False, index=values.index, dtype=bool)
+        if not isinstance(values, pd.Series) or values.empty:
+            return flags
+        if not isinstance(bounds_df, pd.DataFrame) or bounds_df.empty:
+            return flags
+        if not {"min", "max"}.issubset(bounds_df.columns):
+            return flags
+        try:
+            bounds = bounds_df.reindex(values.index)
+        except Exception:
+            bounds = None
+        if bounds is None or bounds[["min", "max"]].isna().all().all():
+            try:
+                bounds_idx = pd.to_datetime(bounds_df.index, errors="coerce").floor("D")
+                valid = ~pd.isna(bounds_idx)
+                if valid.any():
+                    bounds_by_day = bounds_df.loc[valid, ["min", "max"]].copy()
+                    bounds_by_day.index = bounds_idx[valid]
+                    bounds_by_day = bounds_by_day.groupby(level=0).agg({"min": "min", "max": "max"})
+                    target_days = pd.to_datetime(values.index, errors="coerce").floor("D")
+                    min_vals = [bounds_by_day["min"].get(day, np.nan) if not pd.isna(day) else np.nan for day in target_days]
+                    max_vals = [bounds_by_day["max"].get(day, np.nan) if not pd.isna(day) else np.nan for day in target_days]
+                    bounds = pd.DataFrame({"min": min_vals, "max": max_vals}, index=values.index)
+            except Exception:
+                return flags
+        try:
+            vals = values.to_numpy(dtype=float)
+            min_vals = np.asarray(bounds["min"], dtype=float)
+            max_vals = np.asarray(bounds["max"], dtype=float)
+            low = np.minimum(min_vals, max_vals)
+            high = np.maximum(min_vals, max_vals)
+            valid = np.isfinite(vals) & np.isfinite(low) & np.isfinite(high)
+            out = np.zeros_like(vals, dtype=bool)
+            out[valid] = (vals[valid] < low[valid]) | (vals[valid] > high[valid])
+            return pd.Series(out, index=values.index, dtype=bool)
+        except Exception:
+            return flags
 
     def _collect_measured_rows_with_half_mdl(
         measured_series: Any,
@@ -1335,7 +1446,8 @@ def fan_compare_simulations_dashboard(
 
         event_set, non_event_set = _event_classification_day_sets(event_context)
         visible = set(visible_regimes) if isinstance(visible_regimes, (set, list, tuple)) else {"event", "non-event"}
-        half_mdl_active = _half_mdl_style_active_for_current_view()
+        secondary_mode = measured_secondary_symbol_mode
+        secondary_style_active = _secondary_symbol_style_active()
 
         df_by_day = df_sorted.copy()
         try:
@@ -1363,18 +1475,32 @@ def fan_compare_simulations_dashboard(
                 continue
             exc_pct = float(matching["exceedance"].iloc[0]) * 100.0
             status = "event" if meas_day in event_set else "non-event" if meas_day in non_event_set else "unclassified"
-            is_half = half_mdl_active and bool(row.get("half_mdl", False))
-            buckets[(status, is_half)]["x"].append(exc_pct)
-            buckets[(status, is_half)]["y"].append(float(row["value"]))
-            counts[f"{'half' if is_half else 'full'}_{status.replace('-', '_')}"] += 1
+            is_secondary = False
+            if secondary_style_active:
+                if secondary_mode == "half_mdl":
+                    is_secondary = bool(row.get("half_mdl", False))
+                else:
+                    try:
+                        val_here = float(row["value"])
+                        min_val = float(matching["L_min"].iloc[0]) if "L_min" in matching.columns else None
+                        max_val = float(matching["L_max"].iloc[0]) if "L_max" in matching.columns else None
+                        if min_val is not None and max_val is not None and np.isfinite(val_here) and np.isfinite(min_val) and np.isfinite(max_val):
+                            low = min(min_val, max_val)
+                            high = max(min_val, max_val)
+                            is_secondary = val_here < low or val_here > high
+                    except Exception:
+                        is_secondary = False
+            buckets[(status, is_secondary)]["x"].append(exc_pct)
+            buckets[(status, is_secondary)]["y"].append(float(row["value"]))
+            counts[f"{'half' if is_secondary else 'full'}_{status.replace('-', '_')}"] += 1
 
         trace_specs = [
-            ("event", False, "Measured (event)", colors.get("event", "#d62728"), 620),
-            ("non-event", False, "Measured (non-event)", colors.get("non-event", "#1f77b4"), 625),
-            ("unclassified", False, "Measured (unclassified)", "#2ca02c", 630),
-            ("event", True, "Measured (half-MDL, event)", colors.get("event", "#d62728"), 660),
-            ("non-event", True, "Measured (half-MDL, non-event)", colors.get("non-event", "#1f77b4"), 665),
-            ("unclassified", True, "Measured (half-MDL, unclassified)", "#2ca02c", 670),
+            ("event", False, _measurement_trace_name("Measured", "event"), colors.get("event", "#d62728"), _measurement_legendrank("event")),
+            ("non-event", False, _measurement_trace_name("Measured", "non-event"), colors.get("non-event", "#1f77b4"), _measurement_legendrank("non-event")),
+            ("unclassified", False, _measurement_trace_name("Measured", "unclassified"), "#2ca02c", _measurement_legendrank("unclassified")),
+            ("event", True, _measurement_trace_name("Measured", "event", secondary=True), colors.get("event", "#d62728"), _measurement_legendrank("event", secondary=True)),
+            ("non-event", True, _measurement_trace_name("Measured", "non-event", secondary=True), colors.get("non-event", "#1f77b4"), _measurement_legendrank("non-event", secondary=True)),
+            ("unclassified", True, _measurement_trace_name("Measured", "unclassified", secondary=True), "#2ca02c", _measurement_legendrank("unclassified", secondary=True)),
         ]
         for status, is_half, name, color, legendrank in trace_specs:
             if status in {"event", "non-event"} and status not in visible:
@@ -2408,6 +2534,7 @@ def fan_compare_simulations_dashboard(
             "mdl_mg_L": mdl_mg_L,
             "mdl_mg_L_by_name": dict(normalized_mdl_mg_L_by_name) or None,
             "style_half_mdl_observations": bool(resolved_half_mdl_observation_style.get("enabled")),
+            "measured_secondary_symbol_mode": measured_secondary_symbol_mode,
             "half_mdl_observation_style": resolved_half_mdl_observation_style,
             "flag_deviations": cb_flag_dev.value,
             "deviation_factor": sl_dev_factor.value,
@@ -3094,13 +3221,27 @@ def fan_compare_simulations_dashboard(
                 try:
                     meas_list = _last.get("meas_series") or []
                     meas_half_mdl_flags = _last.get("meas_series_half_mdl_flags") or []
-                    half_mdl_duration_style_active = (
-                        bool(resolved_half_mdl_observation_style.get("enabled"))
-                        and str((_last.get("measured_nonnum_audit") or {}).get("policy")) == "half_MDL"
+                    secondary_mode = measured_secondary_symbol_mode
+                    half_mdl_duration_style_active = _secondary_symbol_style_active()
+                    bounds_df_duration = (
+                        _resolve_bounds_frame(q_plot, _last.get("aligned_df_plot"))
+                        if secondary_mode == "bounds"
+                        else None
                     )
                     duration_half_mdl_cfg = resolved_half_mdl_observation_style.get("duration_chart", {}) if isinstance(resolved_half_mdl_observation_style.get("duration_chart"), dict) else {}
                     duration_half_mdl_affected_cfg = duration_half_mdl_cfg.get("affected", {}) if isinstance(duration_half_mdl_cfg.get("affected"), dict) else {}
                     duration_half_mdl_unaffected_cfg = duration_half_mdl_cfg.get("unaffected", {}) if isinstance(duration_half_mdl_cfg.get("unaffected"), dict) else {}
+                    if secondary_mode == "bounds":
+                        primary_duration_paired_name = _measurement_trace_name("Measured")
+                        primary_duration_order_name = _measurement_trace_name("Measured")
+                        secondary_duration_name = _measurement_trace_name("Measured", secondary=True)
+                    else:
+                        primary_duration_paired_name = str(duration_half_mdl_unaffected_cfg.get("name_paired") or "Measured")
+                        primary_duration_order_name = str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)")
+                        secondary_duration_name = str(
+                            duration_half_mdl_affected_cfg.get("name")
+                            or _measurement_trace_name("Measured", secondary=True)
+                        )
                     
                     # Check if event/non-event coloring is enabled for measured points
                     use_event_coloring_ldc = bool(_last.get("flow_strat_point_color", False))
@@ -3112,9 +3253,13 @@ def fan_compare_simulations_dashboard(
                         event_set_ldc, non_event_set_ldc = _event_classification_day_sets(event_context_ldc)
 
                     def _duration_half_mdl_flags_for(idx: int, series_here: pd.Series) -> pd.Series:
-                        if idx < len(meas_half_mdl_flags) and isinstance(meas_half_mdl_flags[idx], pd.Series):
-                            return meas_half_mdl_flags[idx].reindex(series_here.index).fillna(False).astype(bool)
-                        return pd.Series(False, index=series_here.index, dtype=bool)
+                        if not half_mdl_duration_style_active:
+                            return pd.Series(False, index=series_here.index, dtype=bool)
+                        if secondary_mode == "half_mdl":
+                            if idx < len(meas_half_mdl_flags) and isinstance(meas_half_mdl_flags[idx], pd.Series):
+                                return meas_half_mdl_flags[idx].reindex(series_here.index).fillna(False).astype(bool)
+                            return pd.Series(False, index=series_here.index, dtype=bool)
+                        return _compute_outside_bounds_flags(series_here, bounds_df_duration)
 
                     def _duration_regular_marker(color: str) -> Dict[str, Any]:
                         return _flow_strat_marker(color, half_mdl=False, style_scope="duration_chart")
@@ -3152,7 +3297,7 @@ def fan_compare_simulations_dashboard(
                             y_pts_non_event: List[float] = []
                             x_pts_unclass: List[float] = []
                             y_pts_unclass: List[float] = []
-                            # Half-MDL event-separated lists (used when event coloring is active)
+                            # Secondary-marker event-separated lists (used when event coloring is active)
                             x_pts_event_half: List[float] = []
                             y_pts_event_half: List[float] = []
                             x_pts_non_event_half: List[float] = []
@@ -3164,7 +3309,7 @@ def fan_compare_simulations_dashboard(
                                     x_here = float(paired_x_rank[i])
                                     for val, was_half_mdl in combined[dt]:
                                         if half_mdl_duration_style_active and was_half_mdl:
-                                            # If event-coloring is enabled, classify half-MDL points by event status
+                                            # If event-coloring is enabled, classify secondary-marker points by event status
                                             if use_event_coloring_ldc:
                                                 dt_floored = pd.Timestamp(dt).normalize()
                                                 if dt_floored in event_set_ldc:
@@ -3221,10 +3366,10 @@ def fan_compare_simulations_dashboard(
                                                 x=np.array(x_pts_event, dtype=float),
                                                 y=np.array(y_pts_event, dtype=float),
                                                 mode="markers",
-                                                name="Measured (event)",
+                                                name=_measurement_trace_name("Measured", "event"),
                                                 marker=_duration_regular_marker("#d62728"),
-                                                hovertemplate="Measured (event): %{y:.4g}<extra></extra>",
-                                                legendrank=600,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("event"),
                                             )
                                         )
                                     if x_pts_non_event:
@@ -3233,10 +3378,10 @@ def fan_compare_simulations_dashboard(
                                                 x=np.array(x_pts_non_event, dtype=float),
                                                 y=np.array(y_pts_non_event, dtype=float),
                                                 mode="markers",
-                                                name="Measured (non-event)",
+                                                name=_measurement_trace_name("Measured", "non-event"),
                                                 marker=_duration_regular_marker("#1f77b4"),
-                                                hovertemplate="Measured (non-event): %{y:.4g}<extra></extra>",
-                                                legendrank=605,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("non-event"),
                                             )
                                         )
                                     if x_pts_unclass:
@@ -3245,10 +3390,10 @@ def fan_compare_simulations_dashboard(
                                                 x=np.array(x_pts_unclass, dtype=float),
                                                 y=np.array(y_pts_unclass, dtype=float),
                                                 mode="markers",
-                                                name="Measured (unclassified)",
+                                                name=_measurement_trace_name("Measured", "unclassified"),
                                                 marker=_duration_regular_marker("#2ca02c"),
-                                                hovertemplate="Measured (unclassified): %{y:.4g}<extra></extra>",
-                                                legendrank=610,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("unclassified"),
                                             )
                                         )
                                     if half_mdl_duration_style_active:
@@ -3258,10 +3403,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_pts_event_half, dtype=float),
                                                     y=np.array(y_pts_event_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, event)",
+                                                    name=_measurement_trace_name("Measured", "event", secondary=True),
                                                     marker=_duration_half_mdl_marker("#d62728"),
-                                                    hovertemplate="Measured (half-MDL, event): %{y:.4g}<extra></extra>",
-                                                    legendrank=660,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("event", secondary=True),
                                                 )
                                             )
                                         if x_pts_non_event_half:
@@ -3270,10 +3415,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_pts_non_event_half, dtype=float),
                                                     y=np.array(y_pts_non_event_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, non-event)",
+                                                    name=_measurement_trace_name("Measured", "non-event", secondary=True),
                                                     marker=_duration_half_mdl_marker("#1f77b4"),
-                                                    hovertemplate="Measured (half-MDL, non-event): %{y:.4g}<extra></extra>",
-                                                    legendrank=665,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("non-event", secondary=True),
                                                 )
                                             )
                                         if x_pts_unclass_half:
@@ -3282,10 +3427,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_pts_unclass_half, dtype=float),
                                                     y=np.array(y_pts_unclass_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, unclassified)",
+                                                    name=_measurement_trace_name("Measured", "unclassified", secondary=True),
                                                     marker=_duration_half_mdl_marker("#2ca02c"),
-                                                    hovertemplate="Measured (half-MDL, unclassified): %{y:.4g}<extra></extra>",
-                                                    legendrank=670,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("unclassified", secondary=True),
                                                 )
                                             )
                                 else:
@@ -3297,23 +3442,23 @@ def fan_compare_simulations_dashboard(
                                                 x=np.array(x_pts, dtype=float),
                                                 y=np.array(y_pts, dtype=float),
                                                 mode="markers",
-                                                name=str(duration_half_mdl_unaffected_cfg.get("name_paired") or "Measured"),
+                                                name=primary_duration_paired_name,
                                                 marker=base_duration_marker,
-                                                hovertemplate="Measured: %{y:.4g}<extra></extra>",
-                                                legendrank=600,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank(),
                                             )
                                         )
-                                # Half-MDL points (always separate)
+                                # Secondary-marker points (always separate)
                                 if half_mdl_duration_style_active and x_pts_half_mdl:
                                     fig_ldc.add_trace(
                                         go.Scatter(
                                             x=np.array(x_pts_half_mdl, dtype=float),
                                             y=np.array(y_pts_half_mdl, dtype=float),
                                             mode="markers",
-                                            name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
+                                            name=secondary_duration_name,
                                             marker=_duration_half_mdl_marker("#d62728"),
-                                            hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
-                                            legendrank=650,
+                                            hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                            legendrank=_measurement_legendrank(secondary=True),
                                         )
                                     )
                                 added = True
@@ -3351,7 +3496,7 @@ def fan_compare_simulations_dashboard(
                                 
                                 if use_event_coloring_ldc:
                                     # Event/non-event coloring mode for order-stats
-                                    # Separate regular vs half-MDL points for proper styling
+                                    # Separate regular vs secondary-marker points for proper styling
                                     x_meas_event = []
                                     y_meas_event = []
                                     x_meas_non_event = []
@@ -3372,7 +3517,7 @@ def fan_compare_simulations_dashboard(
                                             # Classify by event status
                                             is_event = dt_floored in event_set_ldc
                                             is_non_event = dt_floored in non_event_set_ldc
-                                            # Classify by half-MDL status
+                                            # Classify by secondary-marker status
                                             is_half_mdl = bool(flag) and half_mdl_duration_style_active
                                             
                                             if is_half_mdl:
@@ -3403,10 +3548,10 @@ def fan_compare_simulations_dashboard(
                                                 x=x_meas_event,
                                                 y=y_meas_event,
                                                 mode="markers",
-                                                name="Measured (event)",
+                                                name=_measurement_trace_name("Measured", "event"),
                                                 marker=_duration_regular_marker("#d62728"),
-                                                hovertemplate="Measured (event): %{y:.4g}<extra></extra>",
-                                                legendrank=600,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("event"),
                                             )
                                         )
                                     if x_meas_non_event:
@@ -3415,10 +3560,10 @@ def fan_compare_simulations_dashboard(
                                                 x=x_meas_non_event,
                                                 y=y_meas_non_event,
                                                 mode="markers",
-                                                name="Measured (non-event)",
+                                                name=_measurement_trace_name("Measured", "non-event"),
                                                 marker=_duration_regular_marker("#1f77b4"),
-                                                hovertemplate="Measured (non-event): %{y:.4g}<extra></extra>",
-                                                legendrank=605,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("non-event"),
                                             )
                                         )
                                     if x_meas_unclass:
@@ -3427,14 +3572,14 @@ def fan_compare_simulations_dashboard(
                                                 x=x_meas_unclass,
                                                 y=y_meas_unclass,
                                                 mode="markers",
-                                                name="Measured (unclassified)",
+                                                name=_measurement_trace_name("Measured", "unclassified"),
                                                 marker=_duration_regular_marker("#2ca02c"),
-                                                hovertemplate="Measured (unclassified): %{y:.4g}<extra></extra>",
-                                                legendrank=610,
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank("unclassified"),
                                             )
                                         )
                                     
-                                    # Add half-MDL traces with event coloring if enabled and present
+                                    # Add secondary-marker traces with event coloring if enabled and present
                                     if half_mdl_duration_style_active and (x_meas_event_half or x_meas_non_event_half or x_meas_unclass_half):
                                         if x_meas_event_half:
                                             fig_ldc.add_trace(
@@ -3442,10 +3587,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_meas_event_half, dtype=float),
                                                     y=np.array(y_meas_event_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, event)",
+                                                    name=_measurement_trace_name("Measured", "event", secondary=True),
                                                     marker=_duration_half_mdl_marker("#d62728"),
-                                                    hovertemplate="Measured (half-MDL, event): %{y:.4g}<extra></extra>",
-                                                    legendrank=660,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("event", secondary=True),
                                                 )
                                             )
                                         if x_meas_non_event_half:
@@ -3454,10 +3599,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_meas_non_event_half, dtype=float),
                                                     y=np.array(y_meas_non_event_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, non-event)",
+                                                    name=_measurement_trace_name("Measured", "non-event", secondary=True),
                                                     marker=_duration_half_mdl_marker("#1f77b4"),
-                                                    hovertemplate="Measured (half-MDL, non-event): %{y:.4g}<extra></extra>",
-                                                    legendrank=665,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("non-event", secondary=True),
                                                 )
                                             )
                                         if x_meas_unclass_half:
@@ -3466,10 +3611,10 @@ def fan_compare_simulations_dashboard(
                                                     x=np.array(x_meas_unclass_half, dtype=float),
                                                     y=np.array(y_meas_unclass_half, dtype=float),
                                                     mode="markers",
-                                                    name="Measured (half-MDL, unclassified)",
+                                                    name=_measurement_trace_name("Measured", "unclassified", secondary=True),
                                                     marker=_duration_half_mdl_marker("#2ca02c"),
-                                                    hovertemplate="Measured (half-MDL, unclassified): %{y:.4g}<extra></extra>",
-                                                    legendrank=670,
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank("unclassified", secondary=True),
                                                 )
                                             )
                                 else:
@@ -3481,9 +3626,10 @@ def fan_compare_simulations_dashboard(
                                                 x=x_meas,
                                                 y=arr_meas,
                                                 mode="markers",
-                                                name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+                                                name=primary_duration_order_name,
                                                 marker=base_duration_marker,
-                                                hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                                hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                legendrank=_measurement_legendrank(),
                                             )
                                         )
                                     else:
@@ -3493,9 +3639,10 @@ def fan_compare_simulations_dashboard(
                                                     x=x_meas[~arr_flags],
                                                     y=arr_meas[~arr_flags],
                                                     mode="markers",
-                                                    name=str(duration_half_mdl_unaffected_cfg.get("name_order_stats") or "Measured (all)"),
+                                                    name=primary_duration_order_name,
                                                     marker=base_duration_marker,
-                                                    hovertemplate="Measured: %{y:.4g}<extra></extra>",
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank(),
                                                 )
                                             )
                                         if arr_flags.any():
@@ -3504,9 +3651,10 @@ def fan_compare_simulations_dashboard(
                                                     x=x_meas[arr_flags],
                                                     y=arr_meas[arr_flags],
                                                     mode="markers",
-                                                    name=str(duration_half_mdl_affected_cfg.get("name") or "Measured (half-MDL)"),
+                                                    name=secondary_duration_name,
                                                     marker=_duration_half_mdl_marker("#d62728"),
-                                                    hovertemplate="Measured (half-MDL): %{y:.4g}<extra></extra>",
+                                                    hovertemplate="%{fullData.name}: %{y:.4g}<extra></extra>",
+                                                    legendrank=_measurement_legendrank(secondary=True),
                                                 )
                                             )
                                 added = True
@@ -4442,6 +4590,35 @@ def fan_compare_simulations_dashboard(
             _last["y_fixed"] = _last.get("y_fixed", None)
             _plot_end_ts = pd.Timestamp(aligned_df.index[-1]) if len(aligned_df) else None
 
+        def _q_dict_from_df(df_in: Optional[pd.DataFrame]) -> Optional[Dict[int, np.ndarray]]:
+            if not isinstance(df_in, pd.DataFrame) or df_in.empty:
+                return None
+            key_map = {
+                5: "p05",
+                10: "p10",
+                25: "p25",
+                50: "p50",
+                60: "p60",
+                75: "p75",
+                90: "p90",
+                95: "p95",
+            }
+            if not all(col in df_in.columns for col in key_map.values()):
+                return None
+            return {k: df_in[col].to_numpy(dtype=float) for k, col in key_map.items()}
+
+        use_filtered_for_main = str(event_mode) in ("events", "non_events")
+        arr_plot_main = arr_plot
+        q_plot_main = q_plot
+        if use_filtered_for_main:
+            q_from_df = _q_dict_from_df(q_df)
+            if q_from_df is not None:
+                arr_plot_main = arr
+                q_plot_main = q_from_df
+                _dbg("main band source", "filtered")
+            else:
+                _dbg("main band source", "unfiltered (fallback)")
+
         # Per-point human-friendly hover scaling (k = thousands, M = millions)
         # Keeps numbers readable and avoids misleading labels for small values.
         def _nan_to_none(arr: np.ndarray) -> np.ndarray:
@@ -4467,7 +4644,7 @@ def fan_compare_simulations_dashboard(
             cd[:, 1] = labels
             return cd
 
-        # Build figure (plotting uses UNFILTERED data arrays)
+        # Build figure (main band uses filtered arrays when event view is active)
         fig = go.FigureWidget(layout=dict(template=template))
         _apply_figure_size(fig, main_chart_layout)
         # Z-order control: traces are collected per group, then added in order
@@ -4618,7 +4795,7 @@ def fan_compare_simulations_dashboard(
         _alpha_mm_line = round(_band_alpha * 0.71, 3)
         _alpha_mm_fill = round(_band_alpha * 0.64, 3)
         rgba = lambda a: f"rgba({_br},{_bg},{_bb},{a})"
-        n_runs_here = int(arr_plot.shape[1])
+        n_runs_here = int(arr_plot_main.shape[1])
         min_runs_for_bands = 5
         # Median with percentile tooltip
         def _make_customdata_multi(*arrays: Iterable[np.ndarray]) -> np.ndarray:
@@ -4635,8 +4812,8 @@ def fan_compare_simulations_dashboard(
         if n_runs_here >= min_runs_for_bands:
             # Use None values for invalid points to prevent triangular fill artifacts
             x_arr = np.array(x_dt, dtype=object)
-            p95 = np.asarray(q_plot[95], dtype=float); p05 = np.asarray(q_plot[5], dtype=float)
-            p75 = np.asarray(q_plot[75], dtype=float); p25 = np.asarray(q_plot[25], dtype=float)
+            p95 = np.asarray(q_plot_main[95], dtype=float); p05 = np.asarray(q_plot_main[5], dtype=float)
+            p75 = np.asarray(q_plot_main[75], dtype=float); p25 = np.asarray(q_plot_main[25], dtype=float)
             mask90 = np.isfinite(p95) & np.isfinite(p05)
             mask50 = np.isfinite(p75) & np.isfinite(p25)
             
@@ -4673,29 +4850,31 @@ def fan_compare_simulations_dashboard(
                 ))
                 # Median — deferred: added after flows/erosion for correct z-order
                 _deferred_central_trace = go.Scatter(
-                    x=x_dt, y=_nan_to_none(q_plot[50]), mode="lines", line=dict(color="black", width=2),
+                    x=x_dt, y=_nan_to_none(q_plot_main[50]), mode="lines", line=dict(color="black", width=2),
                     name="median",
-                    customdata=_make_customdata_multi(q_plot[5], q_plot[25], q_plot[50], q_plot[75], q_plot[95]),
+                    customdata=_make_customdata_multi(
+                        q_plot_main[5], q_plot_main[25], q_plot_main[50], q_plot_main[75], q_plot_main[95]
+                    ),
                     hovertemplate=_median_hovertemplate(cb_show_names_in_tooltip.value, _run_label),
                 )
         else:
             # Too few runs: show min-max envelope + mean line
             # Only compute envelope where we have sufficient data (at least 50% of runs)
             min_data_threshold = max(1, n_runs_here // 2)  # At least half the runs
-            data_count = np.sum(np.isfinite(arr_plot), axis=1)  # Count finite values per time point
+            data_count = np.sum(np.isfinite(arr_plot_main), axis=1)  # Count finite values per time point
             sufficient_data = data_count >= min_data_threshold
             
             with np.errstate(invalid='ignore'):
-                vmin = np.full(arr_plot.shape[0], np.nan)
-                vmax = np.full(arr_plot.shape[0], np.nan)
-                vmean = np.full(arr_plot.shape[0], np.nan)
+                vmin = np.full(arr_plot_main.shape[0], np.nan)
+                vmax = np.full(arr_plot_main.shape[0], np.nan)
+                vmean = np.full(arr_plot_main.shape[0], np.nan)
                 
                 # Only compute where we have sufficient data
                 if np.any(sufficient_data):
                     sufficient_indices = np.where(sufficient_data)[0]
-                    vmin[sufficient_indices] = np.nanmin(arr_plot[sufficient_indices, :], axis=1)
-                    vmax[sufficient_indices] = np.nanmax(arr_plot[sufficient_indices, :], axis=1)
-                    vmean[sufficient_indices] = np.nanmean(arr_plot[sufficient_indices, :], axis=1)
+                    vmin[sufficient_indices] = np.nanmin(arr_plot_main[sufficient_indices, :], axis=1)
+                    vmax[sufficient_indices] = np.nanmax(arr_plot_main[sufficient_indices, :], axis=1)
+                    vmean[sufficient_indices] = np.nanmean(arr_plot_main[sufficient_indices, :], axis=1)
             if cb_show_ensemble.value:
                 # Max then min with fill between
                 _deferred_groups["bands"].append(go.Scatter(
@@ -5138,10 +5317,13 @@ def fan_compare_simulations_dashboard(
             cat_resampled: Dict[int, Dict[str, pd.Series]] = {}
             cat_resampled_half_mdl: Dict[int, Dict[str, pd.Series]] = {}
             half_mdl_replaced_col = "__half_mdl_replaced__"
-            half_mdl_style_active = (
+            half_mdl_flags_active = (
                 bool(resolved_half_mdl_observation_style.get("enabled"))
                 and str(current_nonnum_policy) == "half_MDL"
             )
+            secondary_mode = measured_secondary_symbol_mode
+            secondary_style_active = _secondary_symbol_style_active(policy=current_nonnum_policy)
+            bounds_df_main = _resolve_bounds_frame(q_df, aligned_df) if secondary_mode == "bounds" else None
 
             # Prepare period day counts for sum-mode multiplication
             # Split measured data according to the selected event view (if any)
@@ -5257,7 +5439,7 @@ def fan_compare_simulations_dashboard(
                     except Exception:
                         per_station_daily_excl_union = {}
                 per_station_daily_half_mdl: Dict[str, pd.Series] = {}
-                if half_mdl_style_active and (half_mdl_replaced_col in measured_included_df.columns):
+                if half_mdl_flags_active and (half_mdl_replaced_col in measured_included_df.columns):
                     try:
                         per_station_daily_half_mdl_raw = _aggregate_measured(
                             measured_included_df,
@@ -5301,7 +5483,7 @@ def fan_compare_simulations_dashboard(
                         continue
                     cat_resampled.setdefault(cat, {})[st] = s_plot
                     s_half_mdl_plot = pd.Series(False, index=s_plot.index, dtype=bool)
-                    if half_mdl_style_active:
+                    if half_mdl_flags_active:
                         s_half_mdl_daily = per_station_daily_half_mdl.get(st)
                         if isinstance(s_half_mdl_daily, pd.Series) and not s_half_mdl_daily.empty:
                             s_half_mdl_daily = s_half_mdl_daily.reindex(s_daily.index).fillna(False).astype(bool)
@@ -5341,7 +5523,7 @@ def fan_compare_simulations_dashboard(
                     if combined_series.empty:
                         continue
                     combined_half_mdl_flags = pd.Series(False, index=combined_series.index, dtype=bool)
-                    if half_mdl_style_active:
+                    if half_mdl_flags_active:
                         aligned_half_mdl_flags: List[pd.Series] = []
                         for c in active_for_intersection:
                             s_flag = cat_resampled_half_mdl.get(c, {}).get(st)
@@ -5350,6 +5532,12 @@ def fan_compare_simulations_dashboard(
                             aligned_half_mdl_flags.append(s_flag.reindex(intersection_idx).fillna(False).astype(bool))
                         if aligned_half_mdl_flags:
                             combined_half_mdl_flags = pd.concat(aligned_half_mdl_flags, axis=1).any(axis=1).reindex(combined_series.index).fillna(False).astype(bool)
+                    combined_secondary_flags = pd.Series(False, index=combined_series.index, dtype=bool)
+                    if secondary_style_active:
+                        if secondary_mode == "half_mdl":
+                            combined_secondary_flags = combined_half_mdl_flags
+                        else:
+                            combined_secondary_flags = _compute_outside_bounds_flags(combined_series, bounds_df_main)
                     _meas_for_stats.append(combined_series)
                     _meas_half_mdl_flags.append(combined_half_mdl_flags)
                     label_parts = []
@@ -5368,13 +5556,19 @@ def fan_compare_simulations_dashboard(
                         if ss.empty:
                             return
                         # Defaults match the flow-percentile chart:
-                        # filled circle = regular measurement, open circle = half-MDL.
-                        # The main-chart half-MDL marker can still be overridden via
+                        # filled circle = regular measurement, open circle = secondary marker.
+                        # The main-chart secondary marker can still be overridden via
                         # half_mdl_observation_style["main_chart"]["marker"].
                         base_marker = _flow_strat_marker(color, half_mdl=False, style_scope="main_chart")
-                        base_name = f"{base_label} ({name_suffix})"
+                        base_name = _measurement_trace_name(base_label, name_suffix)
 
-                        def _append_trace(series_here: pd.Series, marker_here: Dict[str, Any], trace_name: str) -> None:
+                        def _append_trace(
+                            series_here: pd.Series,
+                            marker_here: Dict[str, Any],
+                            trace_name: str,
+                            *,
+                            secondary: bool = False,
+                        ) -> None:
                             if series_here.empty:
                                 return
                             _deferred_measured_traces.append(go.Scatter(
@@ -5384,21 +5578,22 @@ def fan_compare_simulations_dashboard(
                                 customdata=_make_customdata(series_here.values),
                                 hovertemplate="%{fullData.name}<br>%{x|%Y-%m-%d}: %{customdata[0]:.4g}%{customdata[1]}<extra></extra>",
                                 showlegend=True,
+                                legendrank=_measurement_legendrank(name_suffix, secondary=secondary),
                             ))
 
-                        if not half_mdl_style_active:
+                        if not secondary_style_active:
                             _append_trace(ss, base_marker, base_name)
                             return
 
-                        half_mdl_mask_here = combined_half_mdl_flags.reindex(ss.index).fillna(False).astype(bool)
-                        _append_trace(ss.loc[~half_mdl_mask_here], base_marker, base_name)
-                        ss_half_mdl = ss.loc[half_mdl_mask_here]
-                        if not ss_half_mdl.empty:
-                            half_mdl_suffix = str(resolved_half_mdl_observation_style["main_chart"].get("name_suffix") or "half-MDL")
+                        secondary_mask_here = combined_secondary_flags.reindex(ss.index).fillna(False).astype(bool)
+                        _append_trace(ss.loc[~secondary_mask_here], base_marker, base_name)
+                        ss_secondary = ss.loc[secondary_mask_here]
+                        if not ss_secondary.empty:
                             _append_trace(
-                                ss_half_mdl,
+                                ss_secondary,
                                 _flow_strat_marker(color, half_mdl=True, style_scope="main_chart"),
-                                f"{base_label} ({name_suffix}, {half_mdl_suffix})",
+                                _measurement_trace_name(base_label, name_suffix, secondary=True),
+                                secondary=True,
                             )
                     # Color-code measured points by event/non-event status if enabled, else by deviation
                     try:
