@@ -266,6 +266,34 @@ def transform_scale_variable(
     return df, []
 
 
+def _resolve_direct_center_value(spec: Dict, primary_key: str, *, context: str) -> tuple[float, str]:
+    """Resolve a transform value when no spec-runner override supplied one."""
+    for key in (primary_key, "mean", "standard"):
+        if spec.get(key) is not None:
+            try:
+                return float(spec[key]), key
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{context}: {key!r} must be numeric, got {spec[key]!r}") from exc
+
+    lo = spec.get("lower")
+    hi = spec.get("upper")
+    if lo is not None and hi is not None:
+        try:
+            return (float(lo) + float(hi)) / 2.0, "bounds_midpoint"
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}: lower/upper must be numeric, got lower={lo!r}, upper={hi!r}") from exc
+
+    raise ValueError(
+        f"{context}: missing {primary_key}, mean, standard, or lower+upper midpoint"
+    )
+
+
+def _has_direct_center_value(spec: Dict, primary_key: str) -> bool:
+    return any(spec.get(k) is not None for k in (primary_key, "mean", "standard")) or (
+        spec.get("lower") is not None and spec.get("upper") is not None
+    )
+
+
 def transform_apply_ops(
     data: pd.DataFrame,
     dest_dir: Path,
@@ -278,7 +306,9 @@ def transform_apply_ops(
     Supports simple per-column operations with transparent provenance:
       - op: 'mul' (multiply), 'add' (add), 'set' (constant or from another column)
       - Provide 'factor' for 'mul', 'delta' for 'add', 'value' for 'set'
-      - For logging/reporting, you may specify mean/lower/upper bounds (no sampling here)
+      - If no explicit operation value is supplied, direct calls resolve
+        mean/standard, then midpoint(lower, upper). Spec-runner mean mode uses
+        the same center rule before this transform is called.
 
     params:
       ops: [
@@ -302,54 +332,46 @@ def transform_apply_ops(
         mean = spec.get("mean")
         lower = spec.get("lower")
         upper = spec.get("upper")
-        source = spec.get("source", "n/a")
+        source = spec.get("source")
 
         if op in ("mul", "relative"):
-            # Do NOT default to 1.0 silently; prefer explicit factor/mean/standard, else skip
-            factor = spec.get("factor", None)
-            if factor is None:
-                if mean is not None:
-                    factor = float(mean)
-                elif spec.get("standard") is not None:
-                    factor = float(spec.get("standard"))
-            if factor is None:
+            if not _has_direct_center_value(spec, "factor"):
                 if params.get("debug"):
-                    log.warning("[debug] skipping mul op due to missing factor: src=%s out=%s", src, out)
+                    log.warning("[debug] skipping mul op due to missing factor/center: src=%s out=%s", src, out)
                 continue
-            factor = float(factor)
+            factor, value_source = _resolve_direct_center_value(
+                spec,
+                "factor",
+                context=f"mul op {src!r} -> {out!r}",
+            )
             df[out] = df[src].astype(float) * factor
             val = factor
             opname = "mul"
         elif op in ("add", "absolute"):
-            # Do NOT default to 0.0 silently; prefer explicit delta/mean/standard, else skip
-            delta = spec.get("delta", None)
-            if delta is None:
-                if mean is not None:
-                    delta = float(mean)
-                elif spec.get("standard") is not None:
-                    delta = float(spec.get("standard"))
-            if delta is None:
+            if not _has_direct_center_value(spec, "delta"):
                 if params.get("debug"):
-                    log.warning("[debug] skipping add op due to missing delta: src=%s out=%s", src, out)
+                    log.warning("[debug] skipping add op due to missing delta/center: src=%s out=%s", src, out)
                 continue
-            delta = float(delta)
+            delta, value_source = _resolve_direct_center_value(
+                spec,
+                "delta",
+                context=f"add op {src!r} -> {out!r}",
+            )
             df[out] = df[src].astype(float) + delta
             val = delta
             opname = "add"
         elif op == "set":
-            # Prefer explicit 'value'; if not present but 'mean'/'standard' provided, use those; else require src
-            if "value" in spec and spec.get("value") is not None:
-                df[out] = float(spec.get("value"))
-                val = float(spec.get("value"))
-            elif mean is not None:
-                df[out] = float(mean)
-                val = float(mean)
-            elif spec.get("standard") is not None:
-                df[out] = float(spec.get("standard"))
-                val = float(spec.get("standard"))
+            if _has_direct_center_value(spec, "value"):
+                val, value_source = _resolve_direct_center_value(
+                    spec,
+                    "value",
+                    context=f"set op output {out!r}",
+                )
+                df[out] = float(val)
             elif src is not None:
                 df[out] = df[src]
                 val = "from_src"
+                value_source = "from_src"
             else:
                 if params.get("debug"):
                     log.warning("[debug] skipping set op due to missing value and src: out=%s", out)
@@ -368,7 +390,7 @@ def transform_apply_ops(
             "mean": mean,
             "lower": lower,
             "upper": upper,
-            "source": source,
+            "source": source if source is not None else value_source,
             "input_source": input_source,
         })
 
@@ -406,13 +428,18 @@ def transform_split_with_bounds(
     renorm = bool(params.get("renormalize", True))
     input_source = params.get("input_source")
 
-    # choose ratios from overrides; if not present, fall back to 'mean'
+    # choose ratios from overrides; if not present, fall back to explicit center
+    # fields, then midpoint(lower, upper)
     chosen = []
+    value_sources = []
     for o in outs:
-        ratio = o.get("ratio")
-        if ratio is None:
-            ratio = o.get("mean")
+        ratio, value_source = _resolve_direct_center_value(
+            o,
+            "ratio",
+            context=f"split output {o.get('name', '<unknown>')!r}",
+        )
         chosen.append(float(ratio))
+        value_sources.append(value_source)
 
     final = chosen
     if renorm and sum(final) != 0:
@@ -429,14 +456,14 @@ def transform_split_with_bounds(
     if rp:
         # record detailed choices (mean/lower/upper and used ratio)
         details = []
-        for o, frac in zip(outs, final):
+        for o, frac, value_source in zip(outs, final, value_sources):
             details.append({
                 "name": o.get("name"),
                 "mean": o.get("mean"),
                 "lower": o.get("lower"),
                 "upper": o.get("upper"),
                 "ratio": frac,
-                "source": o.get("source", "n/a"),
+                "source": o.get("source", value_source),
                 "input_source": input_source,
             })
         with rp.step(

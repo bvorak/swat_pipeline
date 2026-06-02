@@ -257,8 +257,11 @@ def transform_build_point_load_timeseries(
     params:
       id_col: str = 'GRIDCODE'
       years: Optional[list[int]] (auto-detect numeric columns if None)
-      wastewater_lppd: float = 150.0
-      mgL_values: Dict[str, Dict] mapping pollutant var -> { mean, lower, upper, mgL (override), source }
+      wastewater_lppd: float or dict = 150.0; dicts may use value,
+        standard/mean, or midpoint(lower, upper)
+      mgL_values: Dict[str, Dict] mapping pollutant var -> { mgL, mean,
+        standard, lower, upper, source }. If no explicit concentration is
+        supplied, midpoint(lower, upper) is used when both bounds exist.
       out_columns: Optional[list[str]]: SWAT variable order; default standard order
       round_to: int = 6
     Output: returns a long DataFrame with columns: [id_col, YEAR, FLOYR, pollutants...]
@@ -266,29 +269,44 @@ def transform_build_point_load_timeseries(
     log = get_logger(__name__)
     df = data.copy()
     id_col = params.get("id_col", "GRIDCODE")
+
+    def _resolve_numeric_spec_value(
+        spec: Dict,
+        keys: tuple[str, ...],
+        *,
+        context: str,
+    ) -> tuple[float | None, str | None]:
+        for key in keys:
+            if spec.get(key) is not None:
+                try:
+                    return float(spec[key]), str(spec.get("source", key))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{context}: {key!r} must be numeric, got {spec[key]!r}") from exc
+        lo = spec.get("lower")
+        hi = spec.get("upper")
+        if lo is not None and hi is not None:
+            try:
+                return (float(lo) + float(hi)) / 2.0, "bounds_midpoint"
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{context}: lower/upper must be numeric, got lower={lo!r}, upper={hi!r}") from exc
+        return None, None
+
     # Accept scalar or dict for wastewater_lppd with bounds
     def _resolve_lppd(spec) -> tuple[float, Dict[str, float | str | None]]:
-        meta = {"value": None, "standard": None, "lower": None, "upper": None, "source": None}
+        meta = {"value": None, "standard": None, "mean": None, "lower": None, "upper": None, "source": None}
         try:
             if isinstance(spec, dict):
-                meta["standard"] = float(spec.get("standard", spec.get("mean"))) if spec.get("standard", spec.get("mean")) is not None else None
+                meta["standard"] = float(spec.get("standard")) if spec.get("standard") is not None else None
+                meta["mean"] = float(spec.get("mean")) if spec.get("mean") is not None else None
                 meta["lower"] = float(spec.get("lower")) if spec.get("lower") is not None else None
                 meta["upper"] = float(spec.get("upper")) if spec.get("upper") is not None else None
-                if spec.get("value") is not None:
-                    meta["value"] = float(spec.get("value"))
-                    meta["source"] = str(spec.get("source", "value"))
-                else:
-                    # Default to standard/mean if provided
-                    if meta["standard"] is not None:
-                        meta["value"] = float(meta["standard"])
-                        meta["source"] = "standard"
-                    else:
-                        # Fallback to any numeric-like key
-                        for k in ("lppd", "val", "v"):
-                            if k in spec and spec[k] is not None:
-                                meta["value"] = float(spec[k])
-                                meta["source"] = "given"
-                                break
+                value, source = _resolve_numeric_spec_value(
+                    spec,
+                    ("value", "standard", "mean", "lppd", "val", "v"),
+                    context="wastewater_lppd",
+                )
+                meta["value"] = value
+                meta["source"] = source
                 if meta["value"] is None:
                     meta["value"] = 150.0
                     meta["source"] = meta["source"] or "default"
@@ -361,14 +379,18 @@ def transform_build_point_load_timeseries(
     records = []
     used_mgL = {}
     for var, meta in mgL_values.items():
-        # Accept 'standard' as a fallback for convenience
-        mg = meta.get("mgL", meta.get("mean", meta.get("standard")))
+        # Accept standard/mean and lower/upper-only midpoint specs for direct calls.
+        mg, source = _resolve_numeric_spec_value(
+            meta,
+            ("mgL", "mean", "standard"),
+            context=f"mgL_values[{var}]",
+        )
         used_mgL[var] = {
             "mgL": float(mg) if mg is not None else None,
             "mean": meta.get("mean"),
             "lower": meta.get("lower"),
             "upper": meta.get("upper"),
-            "source": meta.get("source", "n/a"),
+            "source": source or meta.get("source", "n/a"),
         }
 
     for _, row in df.iterrows():

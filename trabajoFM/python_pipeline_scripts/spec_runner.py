@@ -64,6 +64,45 @@ def _has_bounds(lo, hi) -> bool:
         return False
 
 
+def _source_for_center_key(key: str) -> str:
+    if key in ("standard", "mean", "bounds_midpoint"):
+        return key
+    return f"explicit_{key}"
+
+
+def _resolve_center_value(
+    spec: Dict[str, Any],
+    *,
+    context: str,
+    value_keys: tuple[str, ...] = (),
+) -> tuple[float, str]:
+    """Resolve the central value used by mode='mean'.
+
+    Priority is intentionally explicit and shared by all mean-mode spec
+    sections: standard, mean, transform-specific value keys, then the midpoint
+    of lower/upper. The lower/upper midpoint is used even when both bounds are
+    equal, which lets fixed zero bounds remain fixed without adding a redundant
+    mean field.
+    """
+    for key in ("standard", "mean", *value_keys):
+        if spec.get(key) is not None:
+            try:
+                return float(spec[key]), _source_for_center_key(key)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{context}: {key!r} must be numeric, got {spec[key]!r}") from exc
+
+    lo = spec.get("lower")
+    hi = spec.get("upper")
+    if lo is not None and hi is not None:
+        try:
+            return (float(lo) + float(hi)) / 2.0, "bounds_midpoint"
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}: lower/upper must be numeric, got lower={lo!r}, upper={hi!r}") from exc
+
+    accepted = ", ".join(("standard", "mean", *value_keys, "lower+upper"))
+    raise ValueError(f"{context}: cannot resolve mean-mode value; provide one of {accepted}")
+
+
 def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optional[Path], debug: bool):
     transforms = []
     transforms_params = []
@@ -140,7 +179,9 @@ def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optiona
             transforms_params.append(
                 {
                     "id_col": t.get("id_col", "GRIDCODE"),
-                    # Accept scalar or bounds dict {standard/lower/upper}
+                    # Accept scalar or bounds dict {standard/mean/lower/upper};
+                    # mode='mean' derives midpoint(lower, upper) if no explicit
+                    # standard/mean is provided.
                     "wastewater_lppd": t.get("wastewater_lppd", 500.0),
                     "mgL_values": t.get("mgL_values", {}),
                     "out_columns": t.get("out_columns"),
@@ -165,6 +206,12 @@ def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optiona
 
 
 def _build_overrides(spec: Dict[str, Any], *, mode: str, draws: int, seed: Optional[int]):
+    """Build per-realization parameter overrides from the declarative spec.
+
+    For mode='mean', central values are resolved consistently as:
+    standard -> mean -> explicit transform value -> midpoint(lower, upper).
+    Other modes keep their existing lower/upper/random/extreme behavior.
+    """
     from itertools import product
 
     def extreme():
@@ -365,33 +412,46 @@ def _build_overrides(spec: Dict[str, Any], *, mode: str, draws: int, seed: Optio
             if tt == "ops":
                 bundle = []
                 for op in t.get("ops", []):
-                    op = dict(op); key = _op_param_name(op.get("op", "mul"))
-                    std = op.get("standard", op.get("mean", op.get(key)))
-                    op[key] = float(std); op["source"] = "standard"
+                    op = dict(op); key = _op_param_name(op.get("op") or op.get("mode") or "mul")
+                    value, source = _resolve_center_value(
+                        op,
+                        context=f"mean mode ops transform {t.get('name', '<unnamed>')} output {op.get('out', op.get('src', '<unknown>'))}",
+                        value_keys=(key,),
+                    )
+                    op[key] = value; op["source"] = source
                     bundle.append(op)
                 per_tf.append({"ops": bundle})
             elif tt == "split":
                 outs = []
                 for o in t.get("outputs", []):
-                    outs.append({"name": o["name"], "ratio": float(o.get("standard", o.get("mean"))), "source": "standard"})
+                    value, source = _resolve_center_value(
+                        o,
+                        context=f"mean mode split output {o.get('name', '<unknown>')}",
+                        value_keys=("ratio",),
+                    )
+                    outs.append({"name": o["name"], "ratio": value, "source": source})
                 per_tf.append({"outputs": outs})
             elif tt == "build_point":
                 mg = {}
                 for var, meta in t.get("mgL_values", {}).items():
-                    std = float(meta.get("standard", meta.get("mean", meta.get("mgL", 0.0))))
-                    mg[var] = {**meta, "mgL": std, "source": "standard"}
+                    value, source = _resolve_center_value(
+                        meta,
+                        context=f"mean mode build_point mgL value {var}",
+                        value_keys=("mgL",),
+                    )
+                    mg[var] = {**meta, "mgL": value, "source": source}
                 step = {"mgL_values": mg}
-                # wastewater_lppd mean/standard
+                # wastewater_lppd mean/standard/midpoint
                 lppd_spec = t.get("wastewater_lppd")
-                try:
-                    if isinstance(lppd_spec, dict):
-                        std = lppd_spec.get("standard", lppd_spec.get("mean"))
-                        if std is not None:
-                            step["wastewater_lppd"] = {"value": float(std), "source": "standard"}
-                    elif lppd_spec is not None:
-                        step["wastewater_lppd"] = {"value": float(lppd_spec), "source": "fixed"}
-                except Exception:
-                    pass
+                if isinstance(lppd_spec, dict):
+                    value, source = _resolve_center_value(
+                        lppd_spec,
+                        context="mean mode build_point wastewater_lppd",
+                        value_keys=("value", "lppd", "val", "v"),
+                    )
+                    step["wastewater_lppd"] = {**lppd_spec, "value": value, "source": source}
+                elif lppd_spec is not None:
+                    step["wastewater_lppd"] = {"value": float(lppd_spec), "source": "fixed"}
                 per_tf.append(step)
             else:
                 per_tf.append({})
