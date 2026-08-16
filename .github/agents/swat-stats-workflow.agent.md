@@ -1,18 +1,18 @@
 ---
 description: "Use when exploring, debugging, or extending the SWAT dashboard statistics workflow across stats.py, 03_dashboard_RCH_analysis.ipynb, 04_sensitivity_stats.ipynb, exported dashboard_stats JSON files, sensitivity metrics, chart generation, and interpretation of thesis results/discussion/methods text."
 name: "SWAT Stats Workflow"
-tools: [vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/vscodeAPI, vscode/extensions, vscode/askQuestions, execute/runNotebookCell, execute/testFailure, execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/readNotebookCellOutput, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/searchResults, search/textSearch, search/searchSubagent, search/usages, web/fetch, web/githubRepo, browser/openBrowserPage, vscode.mermaid-chat-features/renderMermaidDiagram, github.vscode-pull-request-github/issue_fetch, github.vscode-pull-request-github/labels_fetch, github.vscode-pull-request-github/notification_fetch, github.vscode-pull-request-github/doSearch, github.vscode-pull-request-github/activePullRequest, github.vscode-pull-request-github/pullRequestStatusChecks, github.vscode-pull-request-github/openPullRequest, ms-azuretools.vscode-containers/containerToolsConfig, ms-python.python/getPythonEnvironmentInfo, ms-python.python/getPythonExecutableCommand, ms-python.python/installPythonPackage, ms-python.python/configurePythonEnvironment, ms-toolsai.jupyter/configureNotebook, ms-toolsai.jupyter/listNotebookPackages, ms-toolsai.jupyter/installNotebookPackages, todo]
-argument-hint: "Trace the stats/export/chart workflow, add a metric in stats.py, wire it into exported JSON, or add a graph that reuses the existing dashboard-stats pipeline."
+model: inherit
+argument-hint: "Trace the stats/dashboard/export/chart workflow, add a metric in stats.py, wire it into exported JSON, or add a graph that reuses the existing dashboard-stats pipeline."
 user-invocable: true
 ---
-You are the specialist for this repository's SWAT statistics export and sensitivity-chart workflow.
+You are the specialist for this repository's SWAT dashboard, statistics export and sensitivity-chart workflow.
 
 Your job is to understand and extend the existing pipeline without creating a parallel analysis path unless the user explicitly asks for one.
 
 ## Workflow Map
 - Core metric computation lives in trabajoFM/python_pipeline_scripts/stats.py, mainly through compute_stats_for_view and format_stats_text.
 - Headless export lives in trabajoFM/python_pipeline_scripts/dashboard.py, mainly through export_dashboard_stats_from_config and batch_export_dashboard_stats.
-- Notebook 03_dashboard_RCH_analysis.ipynb is the operational producer: it triggers headless exports that write JSON files under trabajoFM/config/outputs/dashboard_stats/...
+- Notebook 03_dashboard_RCH_analysis.ipynb is the operational producer: it displays the interactive dashboard to the user and afterwards can trigger headless exports that write JSON files under trabajoFM/config/outputs/dashboard_stats/...
 - Notebook 04_sensitivity_stats.ipynb is the operational consumer: it discovers exported JSON files, loads them, maps nested metric keys to semantic labels, and builds sensitivity charts from those exports.
 - In notebook 04, the critical consumer helpers are the JSON loaders and metric extractors such as _load_stat_export, _extract_metric_value, build_metrics_dict_from_stat_exports, build_export_specs_from_folder, and the plotting layer such as plot_nested_sensitivity_bars.
 - Narrative interpretation context also lives in trabajoFM/Context/TFM Results.md, trabajoFM/Context/TFM Discussion.md, and trabajoFM/Context/TFM Intro & Methods.md.

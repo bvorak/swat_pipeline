@@ -1,0 +1,177 @@
+warning: in the working copy of 'trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb b/trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb[m
+[1mindex 33985d7..ad85780 100644[m
+[1m--- a/trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb[m
+[1m+++ b/trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb[m
+[36m@@ -2,7 +2,7 @@[m
+  "cells": [[m
+   {[m
+    "cell_type": "markdown",[m
+[31m-   "id": "30e88b91",[m
+[32m+[m[32m   "id": "a8a0c20b",[m
+    "metadata": {},[m
+    "source": [[m
+     "# MC\n",[m
+[36m@@ -12,7 +12,7 @@[m
+   },[m
+   {[m
+    "cell_type": "markdown",[m
+[31m-   "id": "61864ca7",[m
+[32m+[m[32m   "id": "8689331d",[m
+    "metadata": {},[m
+    "source": [[m
+     "## Load environment"[m
+[36m@@ -20,42 +20,20 @@[m
+   },[m
+   {[m
+    "cell_type": "code",[m
+[31m-   "execution_count": 2,[m
+[31m-   "id": "22675276",[m
+[32m+[m[32m   "execution_count": null,[m
+[32m+[m[32m   "id": "a5c6a194",[m
+    "metadata": {},[m
+[31m-   "outputs": [[m
+[31m-    {[m
+[31m-     "data": {[m
+[31m-      "text/plain": [[m
+[31m-       "'c:\\\\Program Files\\\\Python312\\\\python.exe'"[m
+[31m-      ][m
+[31m-     },[m
+[31m-     "execution_count": 2,[m
+[31m-     "metadata": {},[m
+[31m-     "output_type": "execute_result"[m
+[31m-    }[m
+[31m-   ],[m
+[32m+[m[32m   "outputs": [],[m
+    "source": [[m
+     "import sys; sys.executable"[m
+    ][m
+   },[m
+   {[m
+    "cell_type": "code",[m
+[31m-   "execution_count": 3,[m
+[31m-   "id": "87dd07bd",[m
+[32m+[m[32m   "execution_count": null,[m
+[32m+[m[32m   "id": "b38f82e8",[m
+    "metadata": {},[m
+[31m-   "outputs": [[m
+[31m-    {[m
+[31m-     "data": {[m
+[31m-      "text/plain": [[m
+[31m-       "'c:\\\\Users\\\\Usuario\\\\OneDrive - UNIVERSIDAD DE HUELVA\\\\Granada\\\\TrabajoFM\\\\scripts\\\\Python_Pipeline_SWAT_Pascal\\\\swat_pipeline\\\\trabajoFM\\\\notebooks'"[m
+[31m-      ][m
+[31m-     },[m
+[31m-     "execution_count": 3,[m
+[31m-     "metadata": {},[m
+[31m-     "output_type": "execute_result"[m
+[31m-    }[m
+[31m-   ],[m
+[32m+[m[32m   "outputs": [],[m
+    "source": [[m
+     "from pathlib import Path\n",[m
+     "import sys\n",[m
+[36m@@ -82,7 +60,7 @@[m
+   },[m
+   {[m
+    "cell_type": "markdown",[m
+[31m-   "id": "283505c8",[m
+[32m+[m[32m   "id": "17138e4d",[m
+    "metadata": {},[m
+    "source": [[m
+     "## monte carlo runs"[m
+[36m@@ -90,21 +68,10 @@[m
+   },[m
+   {[m
+    "cell_type": "code",[m
+[31m-   "execution_count": 4,[m
+[31m-   "id": "61e7eda4",[m
+[32m+[m[32m   "execution_count": null,[m
+[32m+[m[32m   "id": "062a29af",[m
+    "metadata": {},[m
+[31m-   "outputs": [[m
+[31m-    {[m
+[31m-     "data": {[m
+[31m-      "text/plain": [[m
+[31m-       "<Logger python_pipeline_scripts.transforms.soil_chm (INFO)>"[m
+[31m-      ][m
+[31m-     },[m
+[31m-     "execution_count": 4,[m
+[31m-     "metadata": {},[m
+[31m-     "output_type": "execute_result"[m
+[31m-    }[m
+[31m-   ],[m
+[32m+[m[32m   "outputs": [],[m
+    "source": [[m
+     "# Ensure verbose logging for raster aggregation (even when cached)\n",[m
+     "from python_pipeline_scripts import utils\n",[m
+[36m@@ -124,26 +91,10 @@[m
+   },[m
+   {[m
+    "cell_type": "code",[m
+[31m-   "execution_count": 5,[m
+[31m-   "id": "a3077cb9",[m
+[32m+[m[32m   "execution_count": null,[m
+[32m+[m[32m   "id": "1ea5d592",[m
+    "metadata": {},[m
+[31m-   "outputs": [[m
+[31m-    {[m
+[31m-     "name": "stdout",[m
+[31m-     "output_type": "stream",[m
+[31m-     "text": [[m
+[31m-      "repo wide config: {'logging': {'level': 'INFO', 'log_dir': 'logs', 'file': 'pipeline.log', 'format': '%(asctime)s | %(levelname)s | %(name)s | %(message)s'}, 'paths': {'project_root': '..', 'data_root': 'data', 'outputs_root': 'outputs', 'base_txtinout': 'C:\\\\SWAT\\\\RSWAT\\\\cubillas\\\\cubillas_set_219_ruben\\\\cubillas_BASE_set-219\\\\BASE recreated from arcswat default\\\\TxtInOut_1', 'swat_executable': 'C:\\\\SWAT\\\\ArcSWAT\\\\swat_64rel.exe'}, 'input_groups': {'baseline': {'description': 'Base input data set (recreated)', 'folder': 'C:\\\\SWAT\\\\RSWAT\\\\cubillas\\\\cubillas_set_219_ruben\\\\cubillas_BASE_set-219\\\\BASE recreated from arcswat default\\\\TxtInOut_1'}, 'urban_expansion_2030': {'description': 'Urban expansion scenario for 2030', 'folder': 'data/input_groups/urban_expansion_2030'}, 'climate_rcp45': {'description': 'Climate RCP4.5 scenario', 'folder': 'data/input_groups/climate_rcp45'}}, 'reproducibility': {'random_seed': 12345, 'change_sets': [{'name': 'example_change', 'applies_to_group': 'baseline', 'notes': 'placeholder for documented transformation'}]}, '_base_dir': 'C:\\\\Users\\\\Usuario\\\\OneDrive - UNIVERSIDAD DE HUELVA\\\\Granada\\\\TrabajoFM\\\\scripts\\\\Python_Pipeline_SWAT_Pascal\\\\swat_pipeline\\\\trabajoFM\\\\config'}\n",[m
+[31m-      "CHM GPKG: C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil GEO_INFO_POOL\\Input Data\\Diffuse loads\\Soil chemical composition\\python calculated hru stats\\hru_chem_stats.gpkg\n",[m
+[31m-      "CHM CSV: C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil GEO_INFO_POOL\\Input Data\\Diffuse loads\\Soil chemical composition\\python calculated hru stats\\hru_chem_stats.csv\n",[m
+[31m-      "Point GPKG: C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil GEO_INFO_POOL\\Input Data\\Point loads\\Population data\\HIPGDAC-ES-v1.0.0\\custom_aggregations\\open_source\\cubillas_population.gpkg\n",[m
+[31m-      "Point CSV: C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil GEO_INFO_POOL\\Input Data\\Point loads\\Population data\\HIPGDAC-ES-v1.0.0\\custom_aggregations\\open_source\\cubillas_population.csv\n",[m
+[31m-      "Base TxtInOut: C:\\SWAT\\RSWAT\\cubillas\\cubillas_set_219_ruben\\cubillas_BASE_set-219\\BASE recreated from arcswat default\\TxtInOut_1\n",[m
+[31m-      "Realizations root: C:\\SWAT\\RSWAT\\cubillas\\mc_realizations\n",[m
+[31m-      "Results root: C:\\SWAT\\RSWAT\\cubillas\\mc_results\n",[m
+[31m-      "Manifest (CHM): C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil GEO_INFO_POOL\\Input Data\\Diffuse loads\\Soil chemical composition\\python calculated hru stats\\hru_chem_stats.gpkg.manifest.json\n"[m
+[31m-     ][m
+[31m-    }[m
+[31m-   ],[m
+[32m+[m[32m   "outputs": [],[m
+    "source": [[m
+     "# Input paths (run this cell before your main pipeline cell)\n",[m
+     "\n",[m
+[36m@@ -217,7 +168,7 @@[m
+   },[m
+   {[m
+    "cell_type": "markdown",[m
+[31m-   "id": "55d36eb5",[m
+[32m+[m[32m   "id": "038a52dd",[m
+    "metadata": {},[m
+    "source": [[m
+     "## Run input data transformation pipeline (or load from cache)"[m
+[36m@@ -225,22 +176,10 @@[m
+   },[m
+   {[m
+    "cell_type": "code",[m
+[31m-   "execution_count": 6,[m
+[31m-   "id": "db564489",[m
+[32m+[m[32m   "execution_count": null,[m
+[32m+[m[32m   "id": "d859c8b0",[m
+    "metadata": {},[m
+[31m-   "outputs": [[m
+[31m-    {[m
+[31m-     "data": {[m
+[31m-      "text/plain": [[m
+[31m-       "('mean_N_prediction_best_according_weight_bias_accuracy_wc_error_resample',\n",[m
+[31m-       " 'mean_P_prediction_best_according_weight_bias_accuracy_wc_error_resample')"[m
+[31m-      ][m
+[31m-     },[m
+[31m-     "execution_count": 6,[m
+[31m-     "metadata": {},[m
+[31m-     "output_type": "execute_result"[m
+[31m-    }[m
+[31m-   ],[m
+[32m+[m[32m   "outputs": [],[m
+    "source": [[m
+     "from pathlib import Path\n",[m
+     "from typing import List\n",[m
+[36m@@ -283,26 +222,19 @@[m
+     "\n",[m
+     "path_to_rasters = r\"C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM\\Genil_ArcGIS_Ruben\\ArcGIS _ base de suelo quimico _ ruben _ 30-05-25\\raster\\temp_rasters\"\n",[m
+     "\n",[m
+[31m-    "P_raster_interpolation = find_files_with_string(path_to_rasters, \"P_\", \"mean_\", remove_substring = \".tif\")[0]\n",[m
+[31m-    "N_ra

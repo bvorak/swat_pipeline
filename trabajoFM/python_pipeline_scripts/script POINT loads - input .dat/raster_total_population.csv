@@ -1,0 +1,7 @@
+year,total_population_inside_subbasins,valid_pixels_inside_subbasins,total_pixels_inside_subbasins,percent_valid_inside_subbasins
+1970,17607,347,64208,0.54
+1981,14135,422,64208,0.66
+1991,15264,569,64208,0.89
+2001,15578,743,64208,1.16
+2011,15581,895,64208,1.39
+2021,15346,867,64208,1.35

@@ -62,3 +62,9 @@ trabajoFM/notebooks/04_sensitivity_stats.pre_reapply_20260408_210232.ipynb
 chat_exports/.chat_export_manifest.json
 .vscode/tasks.json
 chat_exports/
+.excalidraw-copilot/*
+trabajoFM/python_pipeline_scripts/__pycache__/*
+
+trabajoFM/python_pipeline_scripts/script POINT loads - input .dat/swat_ready_recyear_files/*
+
+.claude/settings.local.json

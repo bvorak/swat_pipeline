@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable, Literal, Optional, Union
+from typing import Iterable, Literal, Optional, Union, Any
+
+import pickle
 
 import os
 import pandas as pd
+import numpy as np
 import re
 
 DEFAULT_RCH_COLUMNS = [
-    "object type","RCH","GIS","MON","AREAkm2","FLOW_INcms","FLOW_OUTcms","EVAPcms","TLOSScms",
+    "object type","RCH","GIS","MON","AREAkm2","FLOW_INcms","FLOW_OUTcmscms","EVAPcms","TLOSScms",
     "SED_INtons","SED_OUTtons","SEDCONCmg/L","ORGN_INkg","ORGN_OUTkg","ORGP_INkg","ORGP_OUTkg",
     "NO3_INkg","NO3_OUTkg","NH4_INkg","NH4_OUTkg","NO2_INkg","NO2_OUTkg","MINP_INkg","MINP_OUTkg",
     "CHLA_INkg","CHLA_OUTkg","CBOD_INkg","CBOD_OUTkg","DISOX_INkg","DISOX_OUTkg","SOLPST_INmg",
@@ -19,29 +22,29 @@ DEFAULT_RCH_COLUMNS = [
     "Salt4","Salt5","Salt6","Salt7","Salt8","Salt9","Salt10","SAR","EC"
 ]
 
-DEFAULT_DROP_COLS = ["object type","total_days","GIS","MON","AREAkm2","YEAR"]
+DEFAULT_DROP_COLS = ["object type","total_days","GIS","MON","AREAkm2","YEAR"] # To have a clean dataframe, adjust as wanted
 
 def load_output_rch(
-    file_path: Union[str, Path],
-    cio_file: Union[str, Path],
+    file_path: str,
+    cio_file: str,  
     *,
-    columns: Optional[list[str]] = None,
+    columns: list[str] = None,
     skiprows: int = 9,
-    group_size: int = 17,        # rows per day in output.rch (typical)
+    group_size: int = 17,        
     add_area_ha: bool = True,
     hectare_per_km2: float = 100.0,
-    drop_cols: Optional[list[str]] = None,
+    drop_cols: list[str] = None,
     reorder_date_cols: bool = True
 ) -> pd.DataFrame:
     """
-    Load SWAT output.rch, attach datetime based on file.cio, compute area_ha, and tidy columns.
+    Loads SWAT output.rch, attach datetime based on file.cio, compute area_ha, and tidy columns.
 
     Parameters
     ----------
     file_path : str
         Path to output.rch
     cio_file : str
-        Path to file.cio (used to derive simulation start date)
+        Path to file.cio (used to derive simulation start date and possibly other metadata)
     columns : list[str], optional
         Column names for output.rch; defaults to DEFAULT_RCH_COLUMNS
     skiprows : int, optional
@@ -49,9 +52,7 @@ def load_output_rch(
     group_size : int, optional
         Number of rows per simulated day in output.rch (default 17)
     add_area_ha : bool, optional
-        If True, adds area_ha = AREAkm2 * hectare_per_km2
-    hectare_per_km2 : float, optional
-        Conversion factor (default 100 ha per km²)
+        If True, adds area_ha = AREAkm2 * 100
     drop_cols : list[str], optional
         Columns to drop at the end (default DEFAULT_DROP_COLS)
     reorder_date_cols : bool, optional
@@ -64,7 +65,7 @@ def load_output_rch(
     """
 
     # ---- helpers to read cio ----
-    def _getModelParameter(param: str, parameterfile: Union[str, Path]) -> Optional[str]:
+    def _getModelParameter(param: str, parameterfile: str) -> str | None:
         with open(parameterfile, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if param in line:
@@ -72,7 +73,7 @@ def load_output_rch(
                     return line.partition("|")[0].strip()
         return None
 
-    def _getStartDate(swatiofile: Union[str, Path]) -> date:
+    def _getStartDate(swatiofile: str) -> date:
         skip_year = int(_getModelParameter("NYSKIP", swatiofile))
         sim_year = int(_getModelParameter("NBYR", swatiofile))
         start_year = int(_getModelParameter("IYR", swatiofile))
@@ -87,8 +88,6 @@ def load_output_rch(
         drop_cols = DEFAULT_DROP_COLS
 
     # ---- read output.rch ----
-    file_path = str(file_path)
-    cio_file = str(cio_file)
     df = pd.read_csv(file_path, sep=r"\s+", skiprows=skiprows, header=None, names=columns, engine="python")
 
     # ---- create total_days from row index / group_size ----
@@ -114,7 +113,7 @@ def load_output_rch(
     if add_area_ha:
         if "AREAkm2" not in df.columns:
             raise KeyError("AREAkm2 column not found; cannot compute area_ha.")
-        df["area_ha"] = df["AREAkm2"] * hectare_per_km2
+        df["area_ha"] = df["AREAkm2"] * 100
         # place area_ha after AREAkm2 (which is index 6 after inserts; but robustly reinsert)
         # insert at 7 like your original
         df.insert(7, "area_ha", df.pop("area_ha"))
@@ -126,72 +125,316 @@ def load_output_rch(
     return df
 
 
-
-def load_multiple_rch_from_folders(
-    base_folders: Iterable[Union[str, Path]],
-    *,
-    return_dict: bool = False,
-    name_prefix: str = "rch_",
-    name_from: Literal["parent", "folder"] = "folder",
-    **kwargs,
-) -> Union[list[pd.DataFrame], dict[str, pd.DataFrame]]:
+def load_multiple_rch_from_folders(base_folders: list[str], **kwargs) -> dict[str, pd.DataFrame]:
     """
-    Load output.rch and file.cio from multiple SWAT TxtInOut base folders.
+    Loads output.rch and file.cio from multiple SWAT TxtInOut base folders.
 
     Parameters
     ----------
-    base_folders : Iterable[Union[str, Path]]
-        Paths to output folders ('out_' needs to be in their names).
-    return_dict : bool, optional
-        If True, returns a dict[name->DataFrame]; otherwise returns a list of DataFrames (default).
-    name_prefix : str, optional
-        Prefix to add to generated names when return_dict=True (default 'rch_').
-    name_from : {'parent','folder'}
-        How to derive the dict key name when return_dict=True:
-        - 'parent': one folder above TxtInOut (default)
-        - 'folder': the TxtInOut folder name itself
+    base_folders : list[str]
+        List of paths to TxtInOut folders.
     **kwargs :
-        Extra args passed to load_output_rch().
+        Additional keyword arguments to pass to load_output_rch().
 
     Returns
     -------
-    list[pd.DataFrame] or dict[str, pd.DataFrame]
-        Parsed DataFrames in the same order as base_folders, or a mapping when return_dict=True.
+    dict[str, pd.DataFrame]
+        Dictionary mapping parent folder names to loaded DataFrames.
     """
-    dfs: list[pd.DataFrame] = []
-    mapping: dict[str, pd.DataFrame] = {}
+    results = {}
 
     for folder in base_folders:
-        # Normalize and resolve TxtInOut path
-        folder = os.path.abspath(str(folder))
-        txt = Path(folder)
-        if "out_" not in txt.name.lower():
-            raise FileNotFoundError(f"Expected a folder with 'out_' in its name but folder name is: {folder}")
-
-        # Parent folder name (one above TxtInOut)
-        if name_from == "parent":
-            base_name = os.path.basename(os.path.dirname(str(txt)))
+        # Normalize path
+        folder = os.path.abspath(folder)
+        parent_folder = os.path.dirname(folder)
+        if "txtinout" in os.path.basename(folder).lower():
+            realization_name = f"rch_{os.path.basename(parent_folder)}"
         else:
-            base_name = os.path.basename(str(txt))
-        parent_name = f"{name_prefix}{base_name}"
+            realization_name = f"rch_{os.path.basename(folder)}"
+        print(f"Loading from folder: {folder} as {realization_name}")
 
         # Expected files
-        output_rch_path = os.path.join(str(txt), "output.rch")
-        cio_path = os.path.join(str(txt), "file.cio")
+        output_rch_path = os.path.join(folder, "output.rch")
+        cio_path = os.path.join(folder, "file.cio")
 
         # Safety check
         if not os.path.isfile(output_rch_path):
-            raise FileNotFoundError(f"output.rch not found in {txt}")
+            raise FileNotFoundError(f"output.rch not found in {folder}")
         if not os.path.isfile(cio_path):
-            raise FileNotFoundError(f"file.cio not found in {txt}")
+            raise FileNotFoundError(f"file.cio not found in {folder}")
 
         # Load using the previous function
         df = load_output_rch(file_path=output_rch_path, cio_file=cio_path, **kwargs)
 
-        if return_dict:
-            mapping[parent_name] = df
-        else:
-            dfs.append(df)
+        results[realization_name] = df
 
-    return mapping if return_dict else dfs
+    return results
 
+
+# -----------------------------
+# Find folders of RUN number
+# -----------------------------
+
+
+def find_run_folders(run_number, path=r"C:\SWAT\RSWAT\cubillas\mc_results"):
+    """
+    Find folders in the given path that match the pattern:
+    runXXXXXX_realYYYYYY_*
+    
+    Parameters
+    ----------
+    run_number : int
+        The run number to match (will be zero-padded to 6 digits).
+    path : str, optional
+        The folder path to search in. Defaults to 
+        'C:\\SWAT\\RSWAT\\cubillas\\mc_results'.
+    
+    Returns
+    -------
+    list of str
+        A list of matching folder names.
+    """
+    # Format the number as 6 digits with leading zeros
+    run_str = f"run{run_number:06d}_"
+    
+    try:
+        # List all entries in the path
+        all_entries = os.listdir(path)
+    except FileNotFoundError:
+        print(f"Error: Path '{path}' does not exist.")
+        return []
+    
+    # Keep only directories that start with the correct run string
+    matching_folders = [
+        os.path.join(path, folder) for folder in all_entries
+        if os.path.isdir(os.path.join(path, folder)) and folder.startswith(run_str)
+    ]
+    
+    return matching_folders
+
+
+# -----------------------------
+# converts a run number to a dict of .rch parsed dfs within that run's folders
+# -----------------------------
+
+
+def load_or_build_dfs_for_runs(
+    runs: int | Iterable[int],
+    *,
+    pickle_name_fmt: str = "all_dfs_mc_run_{run}.pkl",
+    force_rebuild: bool = False,
+    save_pickle: bool = True,
+) -> Dict[str, Any]:
+    """
+    For each run:
+      - Look in first folder from find_run_folders(run) for a pickle.
+      - Load it unless force_rebuild; otherwise build with load_multiple_rch_from_folders.
+      - Coerce result to a dict (compat with old pickles returning lists), then merge.
+    Returns ONE merged dict across all runs.
+    """
+    run_list = [runs] if isinstance(runs, int) else list(runs)
+    merged: Dict[str, Any] = {}
+
+    for run in run_list:
+        folders = find_run_folders(run)
+        if not folders:
+            continue
+        first_folder = Path(folders[0])
+        pkl_path = first_folder / pickle_name_fmt.format(run=run)
+
+        run_obj = None
+        if not force_rebuild and pkl_path.exists():
+            try:
+                with open(pkl_path, "rb") as f:
+                    run_obj = pickle.load(f)
+            except Exception:
+                run_obj = None
+
+        if run_obj is None:
+            run_obj = load_multiple_rch_from_folders(folders)
+            if save_pickle:
+                try:
+                    with open(pkl_path, "wb") as f:
+                        pickle.dump(run_obj, f)
+                except Exception:
+                    pass
+
+        run_dict = _coerce_to_dict(run_obj, run)
+        # if keys collide across runs, later runs overwrite earlier ones
+        merged.update(run_dict)
+
+    return merged
+
+
+
+
+
+
+
+def _coerce_to_dict(obj: Any, run: int) -> Dict[str, Any]:
+    """Make sure we hand back a dict no matter what was stored."""
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, list):
+        # common patterns: list of (name, df) or list of dfs
+        try:
+            if all(isinstance(x, tuple) and len(x) == 2 for x in obj):
+                return dict(obj)  # [(key, df), ...]
+        except Exception:
+            pass
+        # fallback: enumerate
+        return {f"run{run}_sim{i}": x for i, x in enumerate(obj)}
+    # last resort: wrap single object
+    return {f"run{run}": obj}
+
+
+
+def load_or_build_dfs_for_runs(
+    runs: int | Iterable[int],
+    *,
+    pickle_name_fmt: str = "all_dfs_mc_run_{run}.pkl",
+    force_rebuild: bool = False,
+    save_pickle: bool = True,
+) -> Dict[str, Any]:
+    """
+    For each run:
+      - Look in first folder from find_run_folders(run) for a pickle.
+      - Load it unless force_rebuild; otherwise build with load_multiple_rch_from_folders.
+      - Coerce result to a dict (compat with old pickles returning lists), then merge.
+    Returns ONE merged dict across all runs.
+    """
+    run_list = [runs] if isinstance(runs, int) else list(runs)
+    merged: Dict[str, Any] = {}
+
+    for run in run_list:
+        folders = find_run_folders(run)
+        if not folders:
+            continue
+        first_folder = Path(folders[0])
+        pkl_path = first_folder / pickle_name_fmt.format(run=run)
+
+        run_obj = None
+        if not force_rebuild and pkl_path.exists():
+            try:
+                with open(pkl_path, "rb") as f:
+                    run_obj = pickle.load(f)
+            except Exception:
+                run_obj = None
+
+        if run_obj is None:
+            run_obj = load_multiple_rch_from_folders(folders)
+            if save_pickle:
+                try:
+                    with open(pkl_path, "wb") as f:
+                        pickle.dump(run_obj, f)
+                except Exception:
+                    pass
+
+        run_dict = _coerce_to_dict(run_obj, run)
+        # if keys collide across runs, later runs overwrite earlier ones
+        merged.update(run_dict)
+
+    return merged
+
+
+
+
+
+def compare_dfs(df1: pd.DataFrame, df2: pd.DataFrame):
+    # Only compare numeric columns
+    df1_numeric = df1.select_dtypes(include=[np.number])
+    df2_numeric = df2.select_dtypes(include=[np.number])
+
+    # Handle column name differences (e.g., FLOW_OUTcms vs FLOW_OUTcmscms)
+    col_map = {
+        "FLOW_OUTcms": "FLOW_OUTcmscms",
+        "FLOW_OUTcmscms": "FLOW_OUTcms"
+    }
+    df1_cols = set(df1_numeric.columns)
+    df2_cols = set(df2_numeric.columns)
+
+    # Prepare lists of columns to compare
+    common_cols = [c for c in df1_numeric.columns if c in df2_numeric.columns and c not in col_map]
+    mapped_comparisons = []
+    for c1, c2 in col_map.items():
+        if c1 in df1_cols and c2 in df2_cols:
+            mapped_comparisons.append((c1, c2))
+        elif c2 in df1_cols and c1 in df2_cols:
+            mapped_comparisons.append((c2, c1))
+
+    # Align DataFrames by columns
+    df1_common = df1_numeric[common_cols]
+    df2_common = df2_numeric[common_cols]
+
+    # Compare common columns directly
+    if df1_common.shape != df2_common.shape:
+        raise ValueError("DataFrames must have the same shape for direct comparison.")
+
+    diff_mask = df1_common != df2_common
+    any_diff = diff_mask.any().any()
+
+    # Metrics for common columns
+    abs_diff = (df1_common - df2_common).abs()
+    mean_abs_diff = abs_diff.mean()
+    max_abs_diff = abs_diff.max()
+    mean_rel_diff = ((abs_diff / (df1_common.replace(0, np.nan))).mean()).replace([np.inf, -np.inf], np.nan)
+
+    # Compare mapped columns
+    mapped_diff_columns = []
+    mapped_diff_counts = {}
+    mapped_mean_abs_diff = {}
+    mapped_max_abs_diff = {}
+    mapped_mean_rel_diff = {}
+    for c1, c2 in mapped_comparisons:
+        col_diff_mask = df1_numeric[c1] != df2_numeric[c2]
+        if col_diff_mask.any():
+            mapped_diff_columns.append(f"{c1} vs {c2}")
+            mapped_diff_counts[f"{c1} vs {c2}"] = int(col_diff_mask.sum())
+            abs_diff_col = (df1_numeric[c1] - df2_numeric[c2]).abs()
+            mapped_mean_abs_diff[f"{c1} vs {c2}"] = abs_diff_col.mean()
+            mapped_max_abs_diff[f"{c1} vs {c2}"] = abs_diff_col.max()
+            mapped_mean_rel_diff[f"{c1} vs {c2}"] = (abs_diff_col / df1_numeric[c1].replace(0, np.nan)).mean()
+            any_diff = True
+
+    # Columns with at least one difference
+    diff_columns = diff_mask.any(axis=0)
+    diff_counts = diff_mask.sum(axis=0)[diff_columns]
+
+    # Collect metrics for columns with differences
+    metrics = {}
+    for col in diff_columns.index[diff_columns]:
+        metrics[col] = {
+            "count": int(diff_counts[col]),
+            "mean_abs_diff": float(mean_abs_diff[col]),
+            "max_abs_diff": float(max_abs_diff[col]),
+            "mean_rel_diff": float(mean_rel_diff[col]) if col in mean_rel_diff else None
+        }
+    for col in mapped_diff_columns:
+        metrics[col] = {
+            "count": mapped_diff_counts[col],
+            "mean_abs_diff": mapped_mean_abs_diff[col],
+            "max_abs_diff": mapped_max_abs_diff[col],
+            "mean_rel_diff": mapped_mean_rel_diff[col]
+        }
+
+    # Print easy to read stats
+    print("Comparison Summary")
+    print("==================")
+    print(f"Any difference: {any_diff}")
+    print(f"Number of numeric columns with differences: {int(diff_columns.sum()) + len(mapped_diff_columns)}")
+    print("Numeric columns with differences:")
+    for col in diff_columns.index[diff_columns]:
+        m = metrics[col]
+        print(f"  {col}: count={m['count']}, mean_abs_diff={m['mean_abs_diff']:.4g}, max_abs_diff={m['max_abs_diff']:.4g}, mean_rel_diff={m['mean_rel_diff']:.4g}")
+    for col in mapped_diff_columns:
+        m = metrics[col]
+        print(f"  {col}: count={m['count']}, mean_abs_diff={m['mean_abs_diff']:.4g}, max_abs_diff={m['max_abs_diff']:.4g}, mean_rel_diff={m['mean_rel_diff']:.4g}")
+
+    result = {
+        "any_difference": any_diff,
+        "n_diff_columns": int(diff_columns.sum()) + len(mapped_diff_columns),
+        "diff_columns": diff_columns.index[diff_columns].tolist() + mapped_diff_columns,
+        "diff_counts": {**diff_counts.to_dict(), **mapped_diff_counts},
+        "metrics": metrics
+    }
+    return result
