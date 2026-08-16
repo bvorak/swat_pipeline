@@ -176,7 +176,7 @@ def load_multiple_rch_from_folders(base_folders: list[str], **kwargs) -> dict[st
 # -----------------------------
 
 
-def find_run_folders(run_number, path=r"C:\SWAT\RSWAT\cubillas\mc_results"):
+def find_run_folders(run_number, path=r"..\outputs\results"):
     """
     Find folders in the given path that match the pattern:
     runXXXXXX_realYYYYYY_*
@@ -187,7 +187,7 @@ def find_run_folders(run_number, path=r"C:\SWAT\RSWAT\cubillas\mc_results"):
         The run number to match (will be zero-padded to 6 digits).
     path : str, optional
         The folder path to search in. Defaults to 
-        'C:\\SWAT\\RSWAT\\cubillas\\mc_results'.
+        '..\outputs\results'.
     
     Returns
     -------
@@ -224,6 +224,7 @@ def load_or_build_dfs_for_runs(
     pickle_name_fmt: str = "all_dfs_mc_run_{run}.pkl",
     force_rebuild: bool = False,
     save_pickle: bool = True,
+    path: str = r"..\outputs\results"
 ) -> Dict[str, Any]:
     """
     For each run:
@@ -236,7 +237,7 @@ def load_or_build_dfs_for_runs(
     merged: Dict[str, Any] = {}
 
     for run in run_list:
-        folders = find_run_folders(run)
+        folders = find_run_folders(run, path=path)
         if not folders:
             continue
         first_folder = Path(folders[0])
@@ -287,54 +288,6 @@ def _coerce_to_dict(obj: Any, run: int) -> Dict[str, Any]:
     # last resort: wrap single object
     return {f"run{run}": obj}
 
-
-
-def load_or_build_dfs_for_runs(
-    runs: int | Iterable[int],
-    *,
-    pickle_name_fmt: str = "all_dfs_mc_run_{run}.pkl",
-    force_rebuild: bool = False,
-    save_pickle: bool = True,
-) -> Dict[str, Any]:
-    """
-    For each run:
-      - Look in first folder from find_run_folders(run) for a pickle.
-      - Load it unless force_rebuild; otherwise build with load_multiple_rch_from_folders.
-      - Coerce result to a dict (compat with old pickles returning lists), then merge.
-    Returns ONE merged dict across all runs.
-    """
-    run_list = [runs] if isinstance(runs, int) else list(runs)
-    merged: Dict[str, Any] = {}
-
-    for run in run_list:
-        folders = find_run_folders(run)
-        if not folders:
-            continue
-        first_folder = Path(folders[0])
-        pkl_path = first_folder / pickle_name_fmt.format(run=run)
-
-        run_obj = None
-        if not force_rebuild and pkl_path.exists():
-            try:
-                with open(pkl_path, "rb") as f:
-                    run_obj = pickle.load(f)
-            except Exception:
-                run_obj = None
-
-        if run_obj is None:
-            run_obj = load_multiple_rch_from_folders(folders)
-            if save_pickle:
-                try:
-                    with open(pkl_path, "wb") as f:
-                        pickle.dump(run_obj, f)
-                except Exception:
-                    pass
-
-        run_dict = _coerce_to_dict(run_obj, run)
-        # if keys collide across runs, later runs overwrite earlier ones
-        merged.update(run_dict)
-
-    return merged
 
 
 

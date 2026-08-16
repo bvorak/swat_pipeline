@@ -24,6 +24,20 @@ except ImportError:
     gpd = None
 
 
+def resolve_hru_identifier(columns, *candidates, default="HRU_GIS"):
+    """Return the first matching HRU identifier column across common variants."""
+    normalized = {str(col).strip().lower(): col for col in columns}
+    for candidate in candidates:
+        key = str(candidate).strip().lower()
+        if key in normalized:
+            return normalized[key]
+    if default in normalized:
+        return normalized[default]
+    if len(columns) > 0:
+        return columns[0]
+    raise KeyError(f"No HRU identifier found in columns: {list(columns)}")
+
+
 def read_n_p_means_from_csv_to_df(
     csv_path: Path | str,
     *,
@@ -42,6 +56,7 @@ def read_n_p_means_from_csv_to_df(
     """
     log = get_logger(__name__)
     df = pd.read_csv(csv_path, sep=sep)
+    id_col = resolve_hru_identifier(df.columns, id_col, "HRU_GIS", "HRUGIS")
     if decimal_comma_for_last_n > 0:
         for col in df.columns[-decimal_comma_for_last_n:]:
             df[col] = df[col].astype(str).str.replace(",", ".", regex=False).astype(float)
@@ -134,7 +149,7 @@ def transform_write_chm_from_df(
     """
     log = get_logger(__name__)
     df = data
-    id_col = params.get("id_col", "HRU_GIS")
+    id_col = resolve_hru_identifier(df.columns, params.get("id_col", "HRU_GIS"), "HRU_GIS", "HRUGIS")
     label_map: Dict[str, str] = params.get("label_map", {
         "Soil NO3 [mg/kg]": "Soil NO3 [mg/kg]",
         "Soil organic N [mg/kg]": "Soil organic N [mg/kg]",

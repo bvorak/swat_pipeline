@@ -14,6 +14,18 @@ from .provenance import RealizationProvenance
 from .utils import get_logger
 
 
+def resolve_column_name(columns, *candidates, default=None):
+    """Return the first matching column name across common naming variants."""
+    normalized = {str(col).strip().lower(): col for col in columns}
+    for candidate in candidates:
+        key = str(candidate).strip().lower()
+        if key in normalized:
+            return normalized[key]
+    if default is not None:
+        return default
+    raise KeyError(f"None of {candidates} found in columns: {list(columns)}")
+
+
 def reproject_raster_to_epsg(input_path, output_path, epsg: int = 25830, overwrite_cache: bool = False) -> bool:
     """Reproject with simple on-disk caching.
 
@@ -157,6 +169,8 @@ def rasterZonalAggregationToGPKG(
 
     print(f"→ Reading {zone_meaning.lower()} shapefile: {zones_fp}")
     gdf = geopandas.read_file(zones_fp).to_crs("EPSG:25830")
+    zone_field = resolve_column_name(gdf.columns, zone_field, "HRU_GIS", "HRUGIS")
+    label_field = resolve_column_name(gdf.columns, label_field, "OBJECTID", "ID")
 
     # Filter out invalid zone_field values
     valid_mask = gdf[zone_field].notna() & (gdf[zone_field] != "") & (gdf[zone_field] != "NA")

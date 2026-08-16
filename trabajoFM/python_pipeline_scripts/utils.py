@@ -9,6 +9,7 @@ import yaml
 
 
 _LOGGER_CACHE: Dict[str, logging.Logger] = {}
+_FILE_HANDLER_CACHE: Dict[Path, RotatingFileHandler] = {}
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -58,10 +59,11 @@ def get_logger(name: Optional[str] = None, config: Optional[Dict[str, Any]] = No
     formatter = logging.Formatter(log_fmt)
 
     # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(log_level)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logger.handlers):
+        ch = logging.StreamHandler()
+        ch.setLevel(log_level)
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
 
     # File handler (optional)
     if log_dir and log_file:
@@ -70,11 +72,21 @@ def get_logger(name: Optional[str] = None, config: Optional[Dict[str, Any]] = No
         else:
             base_log_dir = Path(log_dir)
         ensure_dir(base_log_dir)
-        fh_path = base_log_dir / str(log_file)
-        fh = RotatingFileHandler(fh_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        fh_path = (base_log_dir / str(log_file)).resolve()
+        fh = _FILE_HANDLER_CACHE.get(fh_path)
+        if fh is None:
+            fh = RotatingFileHandler(
+                fh_path,
+                maxBytes=2_000_000,
+                backupCount=3,
+                encoding="utf-8",
+                delay=True,
+            )
+            _FILE_HANDLER_CACHE[fh_path] = fh
         fh.setLevel(log_level)
         fh.setFormatter(formatter)
-        logger.addHandler(fh)
+        if fh not in logger.handlers:
+            logger.addHandler(fh)
 
     _LOGGER_CACHE[key] = logger
     return logger
