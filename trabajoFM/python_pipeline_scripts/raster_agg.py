@@ -158,7 +158,8 @@ def rasterZonalAggregationToGPKG(
     stat_operation="sum",  # Options: "mean", "sum", "min", "max", "median"
     raster_alias="year",  # or "full_name"
     zone_meaning="Sub-basin",
-    overwrite_cache=False
+    overwrite_cache=False,
+    enable_plotting=True,
 ):
 
     import os
@@ -225,8 +226,17 @@ def rasterZonalAggregationToGPKG(
             print(f"→ Raster stats AFTER clip:")
             print(f"   MIN: {np.nanmin(clipped)}, MAX: {np.nanmax(clipped)}, MEAN: {np.nanmean(clipped)}, SUM: {np.nansum(clipped)}")
 
-        print(f"→ Plotting raster with {zone_meaning.lower()} overlay:")
-        plot_raster_and_zones(clip_raster_path, gdf, title=f"Raster {alias} and {zone_meaning} Alignment", raster_alias=alias, label_field=label_field)
+        if enable_plotting:
+            print(f"→ Plotting raster with {zone_meaning.lower()} overlay:")
+            plot_raster_and_zones(
+                clip_raster_path,
+                gdf,
+                title=f"Raster {alias} and {zone_meaning} Alignment",
+                raster_alias=alias,
+                label_field=label_field,
+            )
+        else:
+            print("→ Plotting disabled (enable_plotting=False)")
 
         with rasterio.open(clip_raster_path) as src:
             nodata_val = 0

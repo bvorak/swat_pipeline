@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--rebuild-chm-csv", action="store_true", help="Force rebuild CHM intermediate CSV")
     p.add_argument("--rebuild-point-csv", action="store_true", help="Force rebuild point intermediate CSV")
+    p.add_argument(
+        "--enable-plotting",
+        action="store_true",
+        help="Enable interactive raster plots during CHM aggregation (disabled by default for terminal runs)",
+    )
 
     p.add_argument("--run-model", action="store_true", default=True, help="Execute SWAT runs")
     p.add_argument("--no-run-model", action="store_false", dest="run_model", help="Prepare realizations only, skip SWAT")
@@ -147,6 +152,7 @@ def ensure_chm_csv(
     output_gpkg: Path,
     rebuild: bool,
     cfg: dict,
+    enable_plotting: bool,
 ) -> Path:
     if rebuild or not chm_csv_path.exists():
         log = utils.get_logger("scripts.run_mc_from_notebook_spec", config=cfg)
@@ -162,6 +168,7 @@ def ensure_chm_csv(
             raster_alias="full_name",
             zone_meaning="HRU",
             overwrite_cache=rebuild,
+            enable_plotting=enable_plotting,
         )
     return _require_existing(chm_csv_path, "CHM CSV")
 
@@ -254,6 +261,7 @@ def main() -> int:
         output_gpkg=output_gpkg,
         rebuild=args.rebuild_chm_csv,
         cfg=cfg,
+        enable_plotting=args.enable_plotting,
     )
     point_csv_path = ensure_point_csv(
         point_csv_path=point_csv_path,
