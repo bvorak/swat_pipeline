@@ -43,6 +43,11 @@ Monte Carlo & Provenance
   - `python trabajoFM/scripts/run_mc_example.py --csv <hru.csv> --base-txtinout <TxtInOut> --realizations-root <dir> --results-root <dir> --exe <swat.exe> --alpha-n 0.10 --alpha-p 0.10 --outputs output.std`
   - Runs 4 realizations using all combinations of ±alpha for N and P bounds, writes CHM files via the provided transform, runs SWAT, and records provenance.
 
+- Notebook-to-script entry point (from `notebooks/01_run_swat_monte_carlo.ipynb`):
+  - `python trabajoFM/scripts/run_mc_from_notebook_spec.py --no-run-model`
+  - `python trabajoFM/scripts/run_mc_from_notebook_spec.py --mode minmax --rebuild-chm-csv --rebuild-point-csv`
+  - This script keeps the notebook Monte Carlo spec in a CLI-safe `main()` flow with fail-fast path checks and reproducible flags.
+
 RCH parsing
 
 - Single file: `from python_pipeline_scripts.rch_parser import load_output_rch`

@@ -15,6 +15,7 @@ Lightweight but reproducible SWAT pipeline: modular transforms, Monte Carlo orch
   - `paths.base_txtinout`: absolute path to your model’s `TxtInOut`
   - `paths.swat_executable`: absolute path to `swat2012.exe` or `swatplus-rel.exe`
 - Run the example (extreme bounds): `python trabajoFM\scripts\run_mc_extreme_bounds.py`
+- Run the notebook-converted MC flow (no SWAT execution): `python trabajoFM\scripts\run_mc_from_notebook_spec.py --no-run-model`
 
 ## Data Setup (input_data)
 

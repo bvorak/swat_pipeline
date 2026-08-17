@@ -153,7 +153,14 @@ def _extract_year_from_raster_name(raster_path):
     return None
 
 
-def subbasinPopulationAggregationToGPKG(raster_folder, sub_basin_fp, zone_field, output_gpkg, overwrite_cache=False):
+def subbasinPopulationAggregationToGPKG(
+    raster_folder,
+    sub_basin_fp,
+    zone_field,
+    output_gpkg,
+    overwrite_cache=False,
+    enable_plotting=True,
+):
     print(f"→ Reading sub-basin shapefile: {sub_basin_fp}")
     gdf = gpd.read_file(sub_basin_fp).to_crs("EPSG:25830")
 
@@ -216,9 +223,12 @@ def subbasinPopulationAggregationToGPKG(raster_folder, sub_basin_fp, zone_field,
             print(f"→ Raster stats AFTER clip:")
             print(f"   MIN: {np.nanmin(clipped)}, MAX: {np.nanmax(clipped)}, MEAN: {np.nanmean(clipped)}, SUM: {np.nansum(clipped)}")
 
-        # Step 5: Plot
-        print("→ Plotting raster with sub-basin overlay:")
-        plot_raster_and_zones(clip_raster_path, gdf, title=f"Raster {year} and Sub-basin Alignment")
+        # Step 5: Plot (optional, can block in non-interactive terminal sessions)
+        if enable_plotting:
+            print("→ Plotting raster with sub-basin overlay:")
+            plot_raster_and_zones(clip_raster_path, gdf, title=f"Raster {year} and Sub-basin Alignment")
+        else:
+            print("→ Plotting disabled (enable_plotting=False)")
 
         # Step 6: Zonal stats
         with rasterio.open(clip_raster_path) as src:
