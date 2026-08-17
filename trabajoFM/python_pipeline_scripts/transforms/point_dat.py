@@ -455,10 +455,7 @@ def transform_write_point_dat_from_df(
     import shutil
 
     _DEFAULT_FIG_FIG = (
-        "C:\\Users\\Usuario\\OneDrive - UNIVERSIDAD DE HUELVA\\Granada\\TrabajoFM"
-        "\\scripts\\Python_Pipeline_SWAT_Pascal\\swat_pipeline\\trabajoFM"
-        "\\python_pipeline_scripts\\script POINT loads - input .dat\\.fig files"
-        "\\modified .fig\\fig.fig"
+        r"..\python_pipeline_scripts\script POINT loads - input .dat\.fig files\modified .fig\fig.fig"
     )
 
     # Resolve fig.fig source: params > hardcoded default
