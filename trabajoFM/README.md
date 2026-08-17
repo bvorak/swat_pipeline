@@ -5,6 +5,7 @@ Lightweight structure to keep Python modules and Jupyter notebooks side‑by‑s
 - `python_pipeline_scripts/`: importable helpers and the main runner
 - `notebooks/`: exploratory and build notebooks (can import the scripts)
 - `scripts/`: CLI entry point that wires config to the runner
+- `input_data/` see section below 
 - `config/`: YAML config with paths, logging, and input groups for reproducible changes
 
 Quick start:
@@ -12,6 +13,14 @@ Quick start:
 - Install requirements: `pip install -r trabajoFM/requirements.txt`
 - Run pipeline: `python trabajoFM/scripts/run_pipeline.py --config trabajoFM/config/config.yaml`
 - In notebooks, ensure the parent folder is on `sys.path` (examples provided inside the notebook stubs).
+
+Data policy for input_data
+
+- Treat all content under `trabajoFM/input_data/` as potentially too large for normal Git objects.
+- For complete runnable data, use exactly one of these:
+  - Git + LFS path: clone the repo, run `git lfs install`, then `git lfs pull`.
+  - External package path: download the provided data ZIP and replace the entire `trabajoFM/input_data/` folder with the extracted folder.
+- Browser ZIP downloads from GitHub can leave LFS-tracked files as pointer files, so they are not sufficient by themselves.
 
 Monte Carlo & Provenance
 
@@ -94,8 +103,8 @@ Integration: external tools
 Reproducible environment (team-friendly)
 
 - Pinned Python: this repo targets Python 3.12 (see `.python-version`).
-- Create venv + install + Jupyter kernel (Windows PowerShell): `trabajoFM/scripts/setup_venv.ps1` (prefers Python 3.12)
-- Create venv + install + Jupyter kernel (macOS/Linux): `bash trabajoFM/scripts/setup_venv.sh` (prefers Python 3.12)
+- Create venv + install + Jupyter kernel (Windows PowerShell): `trabajoFM/scripts/setup_venv.ps1` (prefers Python 3.12; initializes Git LFS locally when available)
+- Create venv + install + Jupyter kernel (macOS/Linux): `bash trabajoFM/scripts/setup_venv.sh` (prefers Python 3.12; initializes Git LFS locally when available)
 - Prefer installing from a lock file for reproducibility. After you have a known-good env, freeze it:
   - Windows: `trabajoFM/scripts/freeze_lock.ps1`
   - macOS/Linux: `bash trabajoFM/scripts/freeze_lock.sh`

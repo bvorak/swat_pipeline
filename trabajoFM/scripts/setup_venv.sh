@@ -30,6 +30,16 @@ else
   "${VENV_PY}" -m pip install -r requirements.txt
 fi
 
+# Ensure this repository is initialized for Git LFS if available.
+if command -v git >/dev/null 2>&1; then
+  if git lfs version >/dev/null 2>&1; then
+    echo "Initializing Git LFS for this repository"
+    git lfs install --local
+  else
+    echo "Warning: git-lfs not found. Install Git LFS to fetch/push large raster files (*.tif, *.tiff)." >&2
+  fi
+fi
+
 # Removed swat-pytools auto-install; if needed, install separately.
 
 # Ensure ipykernel is available for Jupyter kernel registration

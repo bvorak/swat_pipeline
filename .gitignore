@@ -63,7 +63,7 @@ chat_exports/.chat_export_manifest.json
 .vscode/tasks.json
 chat_exports/
 .excalidraw-copilot/*
-trabajoFM/python_pipeline_scripts/__pycache__/*
+**/__pycache__/
 
 trabajoFM/python_pipeline_scripts/script POINT loads - input .dat/swat_ready_recyear_files/*
 
@@ -72,5 +72,9 @@ key_walter29
 key_walter29.pub
 
 
-trabajoFM/swat/cubillas
+trabajoFM/input_data/swat/cubillas
+
+# Generated heavy intermediate outputs
+**/temp_cache/
+**/python_intermediate_outputs/
 

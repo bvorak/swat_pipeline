@@ -16,6 +16,15 @@ Lightweight but reproducible SWAT pipeline: modular transforms, Monte Carlo orch
   - `paths.swat_executable`: absolute path to `swat2012.exe` or `swatplus-rel.exe`
 - Run the example (extreme bounds): `python trabajoFM\scripts\run_mc_extreme_bounds.py`
 
+## Data Setup (input_data)
+
+- Treat everything under `trabajoFM/input_data/` as large data.
+- Do not rely on browser ZIP downloads for this data; Git LFS files may download as pointer files.
+- Use one of these two supported paths:
+  - Path A (Git clone + LFS): clone with Git, run `git lfs install`, then `git lfs pull`.
+  - Path B (external data package): download the externally provided ZIP and replace the full `trabajoFM/input_data/` folder with the extracted one.
+- If data seems missing or too small, verify with `git lfs ls-files` and re-run `git lfs pull`.
+
 ## Modular Transforms + MC Engine
 
 - Typical sequence (soil chemistry example):
@@ -110,8 +119,8 @@ reconstruct_mc_from_ledger(
 ## Environment & Setup
 
 - Python target: 3.12
-- Windows: `trabajoFM\scripts\setup_venv.ps1` (installs deps, registers Jupyter kernel, writes `.pth` so `python_pipeline_scripts` is importable anywhere in the venv)
-- macOS/Linux: `bash trabajoFM/scripts/setup_venv.sh`
+- Windows: `trabajoFM\scripts\setup_venv.ps1` (installs deps, registers Jupyter kernel, writes `.pth` so `python_pipeline_scripts` is importable anywhere in the venv, and runs `git lfs install --local` when available)
+- macOS/Linux: `bash trabajoFM/scripts/setup_venv.sh` (also runs `git lfs install --local` when available)
 - Logging configured via `trabajoFM/config/config.yaml` → `logging`
 
 ## Troubleshooting
