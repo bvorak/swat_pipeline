@@ -244,6 +244,57 @@ def _select_workspace_root(base_input: Path, resolved_base: Path, log) -> tuple[
     return ws_root, ws_txtinout
 
 
+def _find_deepest_txtinout_dir(root: Path) -> Optional[Path]:
+    """Find deepest descendant directory containing 'txtinout' in its name.
+
+    Prefer directories that contain file.cio; otherwise prefer deeper and lexicographically later.
+    """
+    candidates: list[Path] = []
+    for d in root.rglob("*"):
+        if d.is_dir() and "txtinout" in d.name.lower():
+            candidates.append(d.resolve())
+
+    if not candidates:
+        return None
+
+    def _score(p: Path) -> tuple[int, int, str]:
+        has_cio = 1 if (p / "file.cio").is_file() else 0
+        depth = len(p.parts)
+        return (has_cio, depth, str(p).lower())
+
+    return max(candidates, key=_score)
+
+
+def _flatten_workspace_txtinout(work_txtinout: Path, log) -> None:
+    """Promote the deepest nested TxtInOut content to workspace root.
+
+    This strips intermediate TxtInOut_* wrapper folders from messy source layouts.
+    """
+    deepest = _find_deepest_txtinout_dir(work_txtinout)
+    if deepest is None or deepest == work_txtinout:
+        return
+
+    log.info("Normalizing workspace TxtInOut by flattening nested path: %s -> %s", deepest, work_txtinout)
+
+    # Move deepest contents into root, replacing existing targets if needed.
+    for item in list(deepest.iterdir()):
+        dest = work_txtinout / item.name
+        if dest.exists() or dest.is_symlink():
+            if dest.is_dir() and not dest.is_symlink():
+                shutil.rmtree(dest, ignore_errors=True)
+            else:
+                _unlink_existing(dest)
+        shutil.move(str(item), str(dest))
+
+    # Best-effort cleanup of now-empty directories under workspace root.
+    for d in sorted((p for p in work_txtinout.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if d != work_txtinout and not any(d.iterdir()):
+                d.rmdir()
+        except Exception:
+            continue
+
+
 def run_realizations_batch(
     base_txtinout: Union[str, Path],
     realizations: list[RealizationSpec],
@@ -314,7 +365,7 @@ def run_realizations_batch(
             work_txtinout = _runner._resolve_txtinout(workspace_dir) if workspace_dir.exists() else (workspace_dir / "TxtInOut")
 
         if work_txtinout.exists() and force_recreate_workspace:
-            ws_remove_root = work_txtinout.parent if work_txtinout.name.lower() == "txtinout" else work_txtinout
+            ws_remove_root = Path(workspace_dir).resolve()
             log.info("Removing existing workspace to recreate: %s", ws_remove_root)
             shutil.rmtree(ws_remove_root, ignore_errors=True)
             work_txtinout = Path(workspace_dir) / "TxtInOut"
@@ -323,8 +374,10 @@ def run_realizations_batch(
             log.info("Creating full workspace copy at %s", work_txtinout)
             work_txtinout.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(base, work_txtinout)
+            _flatten_workspace_txtinout(work_txtinout, log)
         else:
             log.info("Reusing existing workspace at %s", work_txtinout)
+            _flatten_workspace_txtinout(work_txtinout, log)
     else:
         # Operate in-place on the original base folder (dangerous)
         log.warning("Operating in-place on base TxtInOut (no workspace copy). The base folder will be modified.")
