@@ -401,7 +401,7 @@ def main() -> int:
                     "Soil labile P [mg/kg]": "Soil labile P [mg/kg]",
                     "Soil organic P [mg/kg]": "Soil organic P [mg/kg]",
                 },
-                "require_all_source_chm": True,
+                "max_missing_source_chm_fraction": 0.10,
             },
             {
                 "type": "interpolate_years_wide",

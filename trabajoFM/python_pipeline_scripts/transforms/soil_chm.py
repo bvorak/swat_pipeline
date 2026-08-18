@@ -200,16 +200,47 @@ def transform_write_chm_from_df(
     source_without_rows = sorted(set(chm_index) - requested_ids)
     if source_without_rows:
         sample = ", ".join(str(v) for v in source_without_rows[:10])
-        if params.get("require_all_source_chm", False):
+        missing_fraction = len(source_without_rows) / max(1, len(chm_index))
+        max_missing_fraction = params.get("max_missing_source_chm_fraction")
+        if max_missing_fraction is None:
+            max_missing_fraction = 0.0 if params.get("require_all_source_chm", False) else 1.0
+        max_missing_fraction = float(max_missing_fraction)
+
+        message = (
+            "CHM source has %s numeric .chm file(s) with no dataframe row "
+            "(%.2f%% of %s source CHM files). These CHMs cannot be perturbed "
+            "from CHM source=%s "
+            "because the HRU IDs are absent from the HRU chemistry CSV/zonal "
+            "aggregation output, likely because those HRUs did not receive valid "
+            "raster statistics or are not represented in the HRU zones used to "
+            "build the CSV. They will remain base values. sample missing "
+            "dataframe HRU id(s): %s"
+        )
+        if missing_fraction > max_missing_fraction:
             raise ValueError(
-                "write_chm cannot cover all source CHM files because the dataframe "
-                f"has no row for {len(source_without_rows)} of {len(chm_index)} source .chm file(s). "
-                f"CHM source={chm_source_txtinout}; sample missing dataframe HRU id(s): {sample}"
+                (
+                    "write_chm missing-source coverage exceeded the allowed threshold "
+                    f"({missing_fraction:.2%} > {max_missing_fraction:.2%}). "
+                    f"CHM source={chm_source_txtinout}. "
+                )
+                + (
+                    message
+                    % (
+                        len(source_without_rows),
+                        missing_fraction * 100.0,
+                        len(chm_index),
+                        chm_source_txtinout,
+                        sample,
+                    )
+                )
             )
         else:
             log.warning(
-                "CHM source has %s numeric .chm file(s) with no dataframe row; they will remain base values unless generated elsewhere. sample=%s",
+                message,
                 len(source_without_rows),
+                missing_fraction * 100.0,
+                len(chm_index),
+                chm_source_txtinout,
                 sample,
             )
 

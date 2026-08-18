@@ -166,6 +166,7 @@ def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optiona
                     "require_all_chm_sources": t.get("require_all_chm_sources", True),
                     "require_chm_writes": t.get("require_chm_writes", True),
                     "require_all_source_chm": t.get("require_all_source_chm", False),
+                    "max_missing_source_chm_fraction": t.get("max_missing_source_chm_fraction"),
                 }
             )
         elif ttype == "interpolate_years_wide":
