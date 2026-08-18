@@ -158,6 +158,92 @@ def _link_tree(src_root: Path, dst_root: Path, prefer_link: str, log) -> tuple[i
     return linked, copied
 
 
+def _count_work_suffixes(name: str) -> int:
+    """Count trailing repeated '_work' suffixes in a folder name."""
+    count = 0
+    cur = name.lower()
+    while cur.endswith("_work"):
+        count += 1
+        cur = cur[:-5]
+    return count
+
+
+def _make_work_name(base_name: str, count: int) -> str:
+    if count <= 0:
+        return base_name
+    return base_name + ("_work" * count)
+
+
+def _strip_work_suffixes(name: str) -> str:
+    cur = name
+    while cur.lower().endswith("_work"):
+        cur = cur[:-5]
+    return cur
+
+
+def _is_work_variant(name: str, base_name: str) -> bool:
+    if name == base_name:
+        return True
+    if not name.startswith(base_name):
+        return False
+    tail = name[len(base_name):]
+    if not tail:
+        return True
+    return tail.replace("_work", "") == ""
+
+
+def _select_workspace_root(base_input: Path, resolved_base: Path, log) -> tuple[Path, Path]:
+    """Pick workspace root and source TxtInOut folder.
+
+    Strategy:
+    - Resolve the deepest valid TxtInOut source from the provided input.
+    - In the same parent folder as the provided input, reuse the existing valid
+      workspace variant with the most trailing '_work' suffixes.
+    - If none exists, create a new variant by appending one more '_work'.
+    """
+    source_txtinout = resolved_base
+
+    if base_input.is_dir() and "txtinout" in base_input.name.lower():
+        anchor_parent = base_input.parent
+        anchor_name = _strip_work_suffixes(base_input.name)
+    else:
+        anchor_parent = resolved_base.parent
+        anchor_name = _strip_work_suffixes(resolved_base.name)
+
+    valid_existing: list[tuple[int, Path, Path]] = []
+    max_seen_suffix = 0
+    for child in anchor_parent.iterdir():
+        if not child.is_dir():
+            continue
+        if not _is_work_variant(child.name, anchor_name):
+            continue
+
+        suffix_count = _count_work_suffixes(child.name) - _count_work_suffixes(anchor_name)
+        if suffix_count > max_seen_suffix:
+            max_seen_suffix = suffix_count
+
+        if suffix_count >= 1:
+            try:
+                resolved_child_txt = _runner._resolve_txtinout(child)
+                valid_existing.append((suffix_count, child.resolve(), resolved_child_txt.resolve()))
+            except FileNotFoundError:
+                # Existing folder name is fine but not a valid workspace layout.
+                continue
+
+    if valid_existing:
+        valid_existing.sort(key=lambda t: (t[0], str(t[1]).lower()))
+        suffix_count, ws_root, ws_txtinout = valid_existing[-1]
+        log.info("Reusing existing workspace variant with most _work suffixes (%s): %s", suffix_count, ws_root)
+        return ws_root, ws_txtinout
+
+    next_suffix = max(1, max_seen_suffix + 1)
+    ws_name = _make_work_name(anchor_name, next_suffix)
+    ws_root = (anchor_parent / ws_name).resolve()
+    ws_txtinout = ws_root / "TxtInOut"
+    log.info("No valid existing workspace found; selected new workspace variant: %s", ws_root)
+    return ws_root, ws_txtinout
+
+
 def run_realizations_batch(
     base_txtinout: Union[str, Path],
     realizations: list[RealizationSpec],
@@ -211,22 +297,27 @@ def run_realizations_batch(
     if prefer_link is None:
         prefer_link = "hardlink" if os.name == "nt" else "symlink"
 
-    base = Path(base_txtinout).resolve()
-    if "txtinout" not in base.name.lower():
-        raise ValueError(f"base_txtinout must be the TxtInOut folder, got: {base}")
+    base_input = Path(base_txtinout).resolve()
+    try:
+        base = _runner._resolve_txtinout(base_input)
+    except FileNotFoundError as e:
+        raise ValueError(f"base_txtinout could not be resolved to a valid TxtInOut folder: {base_input} ({e})") from e
 
     # Determine working TxtInOut
     if create_workspace_copy:
         if workspace_dir is None:
-            ws_root = base.parent / (base.name + "_work")
+            ws_root, selected_txtinout = _select_workspace_root(base_input, base, log)
             workspace_dir = ws_root
+            work_txtinout = selected_txtinout
         else:
             workspace_dir = Path(workspace_dir)
-        work_txtinout = Path(workspace_dir) / "TxtInOut"
+            work_txtinout = _runner._resolve_txtinout(workspace_dir) if workspace_dir.exists() else (workspace_dir / "TxtInOut")
 
         if work_txtinout.exists() and force_recreate_workspace:
-            log.info("Removing existing workspace to recreate: %s", work_txtinout)
-            shutil.rmtree(work_txtinout.parent, ignore_errors=True)
+            ws_remove_root = work_txtinout.parent if work_txtinout.name.lower() == "txtinout" else work_txtinout
+            log.info("Removing existing workspace to recreate: %s", ws_remove_root)
+            shutil.rmtree(ws_remove_root, ignore_errors=True)
+            work_txtinout = Path(workspace_dir) / "TxtInOut"
 
         if not work_txtinout.exists():
             log.info("Creating full workspace copy at %s", work_txtinout)

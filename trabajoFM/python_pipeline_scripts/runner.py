@@ -22,15 +22,64 @@ class RunnerResult:
     elapsed_seconds: float = 0.0
 
 
+def _count_work_suffixes(name: str) -> int:
+    """Count trailing repeated '_work' suffixes in a folder name."""
+    count = 0
+    cur = name.lower()
+    while cur.endswith("_work"):
+        count += 1
+        cur = cur[:-5]
+    return count
+
+
+def _find_txtinout_candidates(root: Path) -> list[Path]:
+    """Find directories named like TxtInOut that directly contain file.cio.
+
+    Search starts at root and includes descendants.
+    """
+    candidates: list[Path] = []
+
+    if not root.is_dir():
+        return candidates
+
+    # If root itself is a valid TxtInOut folder, include it.
+    if "txtinout" in root.name.lower() and (root / "file.cio").is_file():
+        candidates.append(root.resolve())
+
+    # Discover deeper candidates by locating file.cio then checking parent naming.
+    for cio in root.rglob("file.cio"):
+        parent = cio.parent.resolve()
+        if "txtinout" in parent.name.lower() and parent not in candidates:
+            candidates.append(parent)
+
+    return candidates
+
+
+def _choose_best_txtinout(candidates: list[Path]) -> Path:
+    """Choose best TxtInOut candidate by depth, then _work nesting, then path name."""
+    if not candidates:
+        raise FileNotFoundError("No valid TxtInOut candidate found")
+
+    def _score(p: Path) -> tuple[int, int, str]:
+        # Prefer deeper folders first to handle nested TxtInOut structures.
+        depth = len(p.parts)
+        work_depth = _count_work_suffixes(p.parent.name)
+        return (depth, work_depth, str(p).lower())
+
+    return max(candidates, key=_score)
+
+
 def _resolve_txtinout(path: Union[str, Path]) -> Path:
     p = Path(path).resolve()
-    if "txtinout" in p.name.lower() and p.is_dir():
-        return p
-    # If the passed path is a project root containing TxtInOut, use that
-    candidate = p / "TxtInOut"
-    if candidate.is_dir():
-        return candidate.resolve()
-    raise FileNotFoundError(f"A folder having the string 'txtinout' in its name was not found at this path: {p}")
+    candidates = _find_txtinout_candidates(p)
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No directory containing 'txtinout' in its name with a direct file.cio was found "
+            f"under: {p}"
+        )
+
+    return _choose_best_txtinout(candidates)
 
 
 def run_swat(
