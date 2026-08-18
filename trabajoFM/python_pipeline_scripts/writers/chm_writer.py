@@ -14,9 +14,6 @@ def resolve_chm_source_txtinout(base_txtinout: Path) -> Path:
     from the content folder, not necessarily from the file.cio folder.
     """
     base_txtinout = Path(base_txtinout).resolve()
-    if any(p.is_file() for p in base_txtinout.glob("*.chm")):
-        return base_txtinout
-
     if not base_txtinout.is_dir():
         return base_txtinout
 
@@ -32,10 +29,10 @@ def resolve_chm_source_txtinout(base_txtinout: Path) -> Path:
 
     def _score(path: Path) -> tuple[int, int, int, int, str]:
         name_has_txtinout = 1 if "txtinout" in path.name.lower() else 0
-        has_file_cio = 1 if (path / "file.cio").is_file() else 0
-        depth = len(path.parts)
         direct_chm_count = chm_counts[path]
-        return (name_has_txtinout, has_file_cio, depth, direct_chm_count, str(path).lower())
+        depth = len(path.parts)
+        has_file_cio = 1 if (path / "file.cio").is_file() else 0
+        return (name_has_txtinout, direct_chm_count, depth, has_file_cio, str(path).lower())
 
     return max(chm_counts, key=_score)
 
