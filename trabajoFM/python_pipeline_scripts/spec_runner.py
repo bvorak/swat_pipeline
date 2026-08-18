@@ -159,7 +159,15 @@ def _build_transforms_and_params(spec: Dict[str, Any], *, manifest_file: Optiona
             )
         elif ttype == "write_chm":
             transforms.append(_wrap_on(tgt, transform_write_chm_from_df))
-            transforms_params.append({"id_col": t["id_col"], "label_map": t["label_map"]})
+            transforms_params.append(
+                {
+                    "id_col": t["id_col"],
+                    "label_map": t["label_map"],
+                    "require_all_chm_sources": t.get("require_all_chm_sources", True),
+                    "require_chm_writes": t.get("require_chm_writes", True),
+                    "require_all_source_chm": t.get("require_all_source_chm", False),
+                }
+            )
         elif ttype == "interpolate_years_wide":
             def _normalize_then_interpolate(df, dest_dir, rng, params, rp):
                 df2 = normalize_point_year_columns(df, id_col=params.get("id_col", "GRIDCODE"), debug=debug)

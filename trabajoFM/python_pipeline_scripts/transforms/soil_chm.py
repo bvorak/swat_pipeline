@@ -9,7 +9,7 @@ import pandas as pd
 
 from ..provenance import RealizationProvenance
 from ..utils import get_logger
-from ..writers.chm_writer import apply_replacements_bulk
+from ..writers.chm_writer import apply_replacements_bulk, build_chm_file_index
 import numpy as np
 
 try:
@@ -167,13 +167,64 @@ def transform_write_chm_from_df(
         mapping[hru_id] = repl
 
     src_txtinout = Path(rp.base_txtinout)
+    chm_source_txtinout, chm_index = build_chm_file_index(src_txtinout)
+    if chm_source_txtinout.resolve() != src_txtinout.resolve():
+        log.info("Resolved CHM source TxtInOut: %s -> %s", src_txtinout, chm_source_txtinout)
+
+    if not chm_index:
+        raise FileNotFoundError(
+            "write_chm could not find numeric .chm source files. "
+            f"Checked base_txtinout={src_txtinout} and nested descendants; "
+            "the source must contain files named like 1.chm or 000000001.chm."
+        )
+
+    requested_ids = set(mapping)
+    missing_ids = sorted(requested_ids - set(chm_index))
+    if missing_ids and params.get("require_all_chm_sources", True):
+        sample = ", ".join(str(v) for v in missing_ids[:10])
+        raise FileNotFoundError(
+            "write_chm cannot write all requested CHM files because source CHMs "
+            f"are missing for {len(missing_ids)} of {len(requested_ids)} HRU id(s). "
+            f"CHM source={chm_source_txtinout}; sample missing HRU id(s): {sample}"
+        )
+    elif missing_ids:
+        sample = ", ".join(str(v) for v in missing_ids[:10])
+        log.warning(
+            "write_chm will skip %s of %s requested HRU id(s) missing from CHM source %s; sample=%s",
+            len(missing_ids),
+            len(requested_ids),
+            chm_source_txtinout,
+            sample,
+        )
+
+    source_without_rows = sorted(set(chm_index) - requested_ids)
+    if source_without_rows:
+        sample = ", ".join(str(v) for v in source_without_rows[:10])
+        if params.get("require_all_source_chm", False):
+            raise ValueError(
+                "write_chm cannot cover all source CHM files because the dataframe "
+                f"has no row for {len(source_without_rows)} of {len(chm_index)} source .chm file(s). "
+                f"CHM source={chm_source_txtinout}; sample missing dataframe HRU id(s): {sample}"
+            )
+        else:
+            log.warning(
+                "CHM source has %s numeric .chm file(s) with no dataframe row; they will remain base values unless generated elsewhere. sample=%s",
+                len(source_without_rows),
+                sample,
+            )
+
     written = apply_replacements_bulk(
-        base_txtinout=src_txtinout,
+        base_txtinout=chm_source_txtinout,
         dest_txtinout=Path(dest_dir),
         hru_replacements=mapping,
         pperco_val=pperco_val,
         overwrite=True,
     )
+    if requested_ids and not written and params.get("require_chm_writes", True):
+        raise RuntimeError(
+            "write_chm produced 0 CHM files despite non-empty replacements. "
+            f"CHM source={chm_source_txtinout}; requested HRU ids={len(requested_ids)}."
+        )
     rp.record_outputs(written, kind="chm")
     log.info("Wrote %s CHM files to %s", len(written), dest_dir)
     return df, written

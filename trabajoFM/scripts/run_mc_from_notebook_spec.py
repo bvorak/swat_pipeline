@@ -12,6 +12,7 @@ REPO_PACKAGE_ROOT = SCRIPT_DIR.parent  # .../trabajoFM
 sys.path.insert(0, str(REPO_PACKAGE_ROOT))
 
 from python_pipeline_scripts import utils
+from python_pipeline_scripts.runner import _resolve_txtinout
 from python_pipeline_scripts.provenance_report import build_upstream_inputs, summarize_run, realization_report
 from python_pipeline_scripts.raster_agg import rasterZonalAggregationToGPKG
 from python_pipeline_scripts.spec_runner import run_from_spec
@@ -245,6 +246,10 @@ def main() -> int:
     if args.run_model:
         _require_existing(swat_exe_path, "SWAT executable")
 
+    # Resolve nested/messy TxtInOut layouts to the effective deepest valid folder.
+    base_txtinout = _resolve_txtinout(base_txtinout)
+    log.info("Resolved base TxtInOut: %s", base_txtinout)
+
     output_gpkg.parent.mkdir(parents=True, exist_ok=True)
     pop_output_gpkg.parent.mkdir(parents=True, exist_ok=True)
     realizations_root.mkdir(parents=True, exist_ok=True)
@@ -396,6 +401,7 @@ def main() -> int:
                     "Soil labile P [mg/kg]": "Soil labile P [mg/kg]",
                     "Soil organic P [mg/kg]": "Soil organic P [mg/kg]",
                 },
+                "require_all_source_chm": True,
             },
             {
                 "type": "interpolate_years_wide",

@@ -9,6 +9,7 @@ import numpy as np
 from .provenance import RealizationProvenance
 from .realization_id import next_id, next_run_id, format_id
 from .realizations import RealizationSpec, run_realizations_batch
+from .runner import _resolve_txtinout
 from .utils import ensure_dir, get_logger
 
 
@@ -62,7 +63,13 @@ def run_monte_carlo(
     - transforms: sequence of callables; each writes files under a per-realization folder and returns paths written
     """
     log = get_logger(__name__, config)
-    base_txtinout = Path(base_txtinout).resolve()
+    base_input = Path(base_txtinout).resolve()
+    try:
+        base_txtinout = _resolve_txtinout(base_input)
+    except FileNotFoundError as e:
+        raise ValueError(f"base_txtinout could not be resolved to a valid TxtInOut folder: {base_input} ({e})") from e
+    if base_txtinout != base_input:
+        log.info("Resolved base TxtInOut for MC transforms: %s -> %s", base_input, base_txtinout)
     realization_root = Path(realization_root).resolve()
     results_root = Path(results_root).resolve()
     ensure_dir(realization_root)

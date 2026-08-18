@@ -357,12 +357,13 @@ def run_realizations_batch(
     # Determine working TxtInOut
     if create_workspace_copy:
         if workspace_dir is None:
-            ws_root, selected_txtinout = _select_workspace_root(base_input, base, log)
+            ws_root, _selected_txtinout = _select_workspace_root(base_input, base, log)
             workspace_dir = ws_root
-            work_txtinout = selected_txtinout
+            work_txtinout = Path(workspace_dir) / "TxtInOut"
         else:
             workspace_dir = Path(workspace_dir)
-            work_txtinout = _runner._resolve_txtinout(workspace_dir) if workspace_dir.exists() else (workspace_dir / "TxtInOut")
+            # Treat provided workspace_dir as workspace root and enforce a stable TxtInOut root.
+            work_txtinout = workspace_dir / "TxtInOut"
 
         if work_txtinout.exists() and force_recreate_workspace:
             ws_remove_root = Path(workspace_dir).resolve()

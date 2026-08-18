@@ -3,8 +3,59 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
-import os
 import re
+
+
+def resolve_chm_source_txtinout(base_txtinout: Path) -> Path:
+    """Return the folder that directly contains source CHM files.
+
+    Some ArcSWAT exports have wrapper TxtInOut folders where file.cio is one
+    level above the actual numeric ``*.chm`` files. CHM replacement must read
+    from the content folder, not necessarily from the file.cio folder.
+    """
+    base_txtinout = Path(base_txtinout).resolve()
+    if any(p.is_file() for p in base_txtinout.glob("*.chm")):
+        return base_txtinout
+
+    if not base_txtinout.is_dir():
+        return base_txtinout
+
+    chm_counts: dict[Path, int] = {}
+    for chm_file in base_txtinout.rglob("*.chm"):
+        if not chm_file.is_file():
+            continue
+        parent = chm_file.parent.resolve()
+        chm_counts[parent] = chm_counts.get(parent, 0) + 1
+
+    if not chm_counts:
+        return base_txtinout
+
+    def _score(path: Path) -> tuple[int, int, int, int, str]:
+        name_has_txtinout = 1 if "txtinout" in path.name.lower() else 0
+        has_file_cio = 1 if (path / "file.cio").is_file() else 0
+        depth = len(path.parts)
+        direct_chm_count = chm_counts[path]
+        return (name_has_txtinout, has_file_cio, depth, direct_chm_count, str(path).lower())
+
+    return max(chm_counts, key=_score)
+
+
+def build_chm_file_index(base_txtinout: Path) -> tuple[Path, dict[int, Path]]:
+    """Index numeric CHM source files by HRU id.
+
+    Handles both unpadded names (``1.chm``) and zero-padded SWAT names
+    (``000000001.chm``).
+    """
+    source_txtinout = resolve_chm_source_txtinout(base_txtinout)
+    name_index: dict[int, Path] = {}
+    for p in source_txtinout.glob("*.chm"):
+        stem = p.stem
+        try:
+            num = int(stem)
+        except Exception:
+            continue
+        name_index.setdefault(num, p)
+    return source_txtinout, name_index
 
 
 def modify_chm_file(
@@ -106,20 +157,12 @@ def apply_replacements_bulk(
 
     written: list[Path] = []
 
-    # Build an index of existing CHM files in the base TxtInOut. This handles
-    # zero-padded names like 000123.chm by mapping int(stem)->Path.
-    name_index: dict[int, Path] = {}
-    for p in base_txtinout.glob("*.chm"):
-        stem = p.stem
-        try:
-            num = int(stem)
-        except Exception:
-            continue
-        # prefer the first occurrence; assume unique
-        name_index.setdefault(num, p)
+    # Build an index of existing CHM files in the effective source TxtInOut.
+    # This handles zero-padded names like 000123.chm by mapping int(stem)->Path.
+    source_txtinout, name_index = build_chm_file_index(base_txtinout)
     for hru_id, repl in hru_replacements.items():
         num_id = int(hru_id)
-        src = base_txtinout / f"{num_id}.chm"
+        src = source_txtinout / f"{num_id}.chm"
         if not src.exists():
             # Try index (handles zero-padded names)
             src = name_index.get(num_id, src)
