@@ -39,7 +39,7 @@ For the Github-ZIP + manual input_data copy workflow, you only need:
 2. around 34 GB of free hard disk space
 
 The easiest way (without git and it´s LFS big file extension) is to:
-1) downlaod the Code.zip from the [Github](https://github.com/bvorak/swat_pipeline). Unzip to `YOUR-LOCATION` . This is your main project folder.
+1) downlaod the Code.zip from the [Github](https://github.com/bvorak/swat_pipeline). Unzip to `YOUR-LOCATION` . This is your main project folder (but does not contain all the large input files, just links to them).
 2) downlaod the [input_data.zip](https://universidadhuelva-my.sharepoint.com/:u:/g/personal/konstantinpascal_walter_alu_uhu_es/IQAETGkg6A3TTKUdO301mQQYAcXqXc4CineAIbyJ7eE3rH8?e=I1TD2O). Unzip. Replace ``YOUR-LOCATION\swat_pipeline-main\trabajoFM\input_data`` 
 3) If you dont have the 219 BASE calibration TxtInOut on your machine already: Extract the [´TxtInOut_1_work.zip´ from within this .zip](https://universidadhuelva-my.sharepoint.com/:u:/g/personal/konstantinpascal_walter_alu_uhu_es/IQDc6mH7Ze32T72QL3IVCtXGAUkdDRGfvjCtFDV3PqO6-JA?e=sjuBd6). Unzip twice. 
 	1) Move into `YOUR-LOCATION\swat_pipeline-main\trabajoFM\input_data\swat\cubillas\cubillas_BASE_set-219\BASE recreated from arcswat default\TxtInOut_1\`
@@ -52,17 +52,15 @@ EXECUTE: Step by step (Windows, PowerShell)
 
 
 
-1. Open PowerShell in `trabajoFM`.
-
-- Example path should end with `YOUR-LOCATION/swat_pipeline-main/trabajoFM.`
+1. Open PowerShell (with access to Python 3.12) in `YOUR-LOCATION\swat_pipeline-main\trabajoFM\`.
 
 4. Run environment setup.
 
-- If script execution is blocked, run first:  
+- (If script execution is blocked) run first:  
     ``Set-ExecutionPolicy -Scope Process Bypass``
 
 
-- Command:  
+- THEN Command:  
     ``.\scripts\setup_venv.ps1``
 
 - This installs dependencies from `requirements.txt` or lock file if present.
@@ -81,36 +79,38 @@ EXECUTE: Step by step (Windows, PowerShell)
 
 - Script: `run_mc_from_notebook_spec.py`
 - Command:  
-    python .\scripts\run_mc_from_notebook_spec.py --no-run-model
-- This validates paths, data transforms, and realization generation flow.
+    `python .\scripts\run_mc_from_notebook_spec.py --no-run-model`
+- This validates paths, data transforms, and realization generation flow. A success should print: `=== Monte Carlo run summary ===`
 
 8. Run the full workflow (includes SWAT execution).
 
 - Command:  
-    python .\scripts\run_mc_from_notebook_spec.py --mode minmax --rebuild-chm-csv --rebuild-point-csv
-- This requires SWAT executable and base TxtInOut under your input_data tree as configured in `config.yaml`.
-
+    `python .\scripts\run_mc_from_notebook_spec.py --mode minmax --rebuild-chm-csv --rebuild-point-cs`
+- If you strictly followed the Quickstart, this should be taking 5 to 15 minutes and be reproducing the results used for this publication https://doi.org/10.5281/zenodo.17660544
+- in `YOUR-LOCATION\swat_pipeline-main\trabajoFM\outputs` you find the folders
+	- 	`results` with the .rch, .std, .sub and .cio for each realization of the min-max or monte-carlo run
+ 	- 	`realizations` with the summary_table.md, provenance.json, report.txt and .dat and .chm files helping to reproduce the input pertubations used for each realization of a min-max or monte-carlo run
 9. If full run fails, check first these paths:
 
 - SWAT exe path in `config.yaml`
-- Base TxtInOut path in `config.yaml`
+	- The setupu above requires SWAT executable and base TxtInOut under your input_data tree as configured in `config.yaml`.
 - Required fig template path expected by `run_mc_from_notebook_spec.py`
 
 NEXT:
 - the workflow can be easiest understood and debugged using the Jupyter Notebook that wraps this pipeline `trabajoFM\notebooks\01_run_swat_monte_carlo.ipynb`
 - For command line runs. all paths, monte carlo adjustments and so on can best be adjusted in `run_mc_from_notebook_spec.py` (see MC_SPEC variable)
-- The second part of the pipeline: dashboard + automated analysis jupyter notebooks (03_---.ipynb and 04_---.ipynb) still has some absolute paths, that need to be adjusted before working on a new machine.
+- The second part of the pipeline: dashboard + automated analysis jupyter notebooks ([`03_dashboard_RCH_analysis.ipynb`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/notebooks/03_dashboard_RCH_analysis.ipynb) & [`04_sensitivity_stats.ipynb`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/notebooks/04_sensitivity_stats.ipynb)) still has some absolute paths, that need to be adjusted before working on a new machine.
 
 ---
 
 ## Data Setup (`input_data`)
 
-Everything under `trabajoFM/input_data/` counts as **large data** — treat it separately from the code.
+Everything under `trabajoFM/input_data/` counts as **large data** — it is treated separately from the code.
 
 > The Quickstart above already walks through the simplest option (a ready-made ZIP). This section covers both supported ways in more detail, plus what to do if something looks off.
 
 - **Path A — Git clone + Git LFS** (best if you'll keep pulling updates): clone the repo with Git, then run `git lfs install` and `git lfs pull`.
-- **Path B — external data package** (no Git LFS needed, and the path the Quickstart uses): download the externally provided ZIP and replace the whole `trabajoFM/input_data/` folder with the extracted one.
+- **Path B — external data .zip** (no Git LFS needed, and the path the Quickstart uses): download the externally provided ZIP and replace the whole `trabajoFM/input_data/` folder with the extracted one.
 
 ⚠️ Don't rely on GitHub's "Download ZIP" button for this data on its own — Git LFS files can download as small pointer files instead of the real content.
 
@@ -344,7 +344,7 @@ reconstruct_mc_from_ledger(
 | File | Folder | What it does |
 |---|---|---|
 | [`01_run_swat_monte_carlo.ipynb`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/notebooks/01_run_swat_monte_carlo.ipynb) | [`notebooks/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/notebooks) | The easiest way to understand and debug the pipeline — wraps the whole Monte Carlo workflow. Start here if you like working interactively. |
-| `03_...ipynb`, `04_...ipynb` | [`notebooks/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/notebooks) | Dashboard + automated analysis notebooks (second half of the pipeline). Still contain some absolute paths that need adjusting on a new machine. |
+| [`03_dashboard_RCH_analysis.ipynb`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/notebooks/03_dashboard_RCH_analysis.ipynb) & [`04_sensitivity_stats.ipynb`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/notebooks/04_sensitivity_stats.ipynb) | [`notebooks/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/notebooks) | Dashboard + automated analysis notebooks (second half of the pipeline). Still contain some absolute paths that need adjusting on a new machine. |
 | [`run_mc_from_notebook_spec.py`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/scripts/run_mc_from_notebook_spec.py) | [`scripts/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/scripts) | CLI version of the notebook's Monte Carlo spec (see the `MC_SPEC` variable) — the script used in the Quickstart. |
 | [`run_mc_example.py`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/scripts/run_mc_extreme_bounds.py) *(now `run_mc_extreme_bounds.py`)* | [`scripts/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/scripts) | Corner-sampling example: 4 realizations across every ± combination of N/P bounds, e.g. `--alpha-n 0.10 --alpha-p 0.10`. |
 | [`run_pipeline.py`](https://github.com/bvorak/swat_pipeline/blob/main/trabajoFM/scripts/run_pipeline.py) | [`scripts/`](https://github.com/bvorak/swat_pipeline/tree/main/trabajoFM/scripts) | CLI entry point that runs a named `input_groups` config against the runner. |
